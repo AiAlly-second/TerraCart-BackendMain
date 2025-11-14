@@ -1,0 +1,23 @@
+app = "sarva-cafe-backend"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "5001"
+  NODE_ENV = "production"
+
+[http_service]
+  internal_port = 5001
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+
