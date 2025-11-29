@@ -7,7 +7,10 @@ const {
   getOrderById,
   updateOrderStatus,
   cancelOrderByCustomer,
-  deleteOrder
+  deleteOrder,
+  returnItems,
+  convertToTakeaway,
+  addItemsToOrder
 } = require("../controllers/orderController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 
@@ -23,6 +26,9 @@ router.patch("/:id/customer-status", cancelOrderByCustomer);  // Customer cancel
 router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin"]), getOrders);
 router.get("/:id", getOrderById);  // Public for customers to view their order
 router.patch("/:id/status", protect, authorize(["admin", "franchise_admin", "super_admin"]), updateOrderStatus);
+router.post("/:id/add-items", protect, authorize(["admin", "franchise_admin", "super_admin"]), addItemsToOrder);
+router.patch("/:id/return-items", protect, authorize(["admin", "franchise_admin", "super_admin"]), returnItems);
+router.patch("/:id/convert-to-takeaway", protect, authorize(["admin", "franchise_admin", "super_admin"]), convertToTakeaway);
 router.delete("/:id", protect, authorize(["admin", "franchise_admin", "super_admin"]), deleteOrder);
 
 module.exports = router;

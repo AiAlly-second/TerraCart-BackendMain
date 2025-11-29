@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const User = require('./models/userModel');
 
-mongoose.connect('mongodb://127.0.0.1:27017/sarvacafe')
+mongoose.connect('mongodb://127.0.0.1:27017/terracart')
   .then(async () => {
     try {
       const users = await User.find({});

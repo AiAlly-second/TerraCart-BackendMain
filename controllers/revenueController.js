@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
 const { Payment } = require("../models/paymentModel");
@@ -58,56 +59,56 @@ exports.calculateDailyRevenue = async (req, res) => {
 
     // Get franchise breakdown (only active franchises)
     const franchiseMap = new Map();
-    const cafeMap = new Map();
+    const cartMap = new Map();
 
     for (const order of orders) {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cartId = order.cartId?.toString() || order.cartId;
 
       if (franchiseId && activeFranchiseIds.has(franchiseId)) {
         if (!franchiseMap.has(franchiseId)) {
           franchiseMap.set(franchiseId, {
             franchiseId,
             revenue: 0,
-            cafeIds: new Set(),
+            cartIds: new Set(),
           });
         }
         const franchise = franchiseMap.get(franchiseId);
         const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         franchise.revenue += orderTotal;
-        if (cafeId) {
-          franchise.cafeIds.add(cafeId);
+        if (cartId) {
+          franchise.cartIds.add(cartId);
         }
       }
 
-      if (cafeId) {
+      if (cartId) {
         const orderFranchiseId = order.franchiseId?.toString() || order.franchiseId;
         if (orderFranchiseId && activeFranchiseIds.has(orderFranchiseId)) {
-          if (!cafeMap.has(cafeId)) {
-            cafeMap.set(cafeId, {
-              cafeId,
+          if (!cartMap.has(cartId)) {
+            cartMap.set(cartId, {
+              cartId,
               franchiseId: orderFranchiseId,
               revenue: 0,
               orderCount: 0,
             });
           }
-          const cafe = cafeMap.get(cafeId);
+          const cart = cartMap.get(cartId);
           const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
-          cafe.revenue += orderTotal;
-          cafe.orderCount += 1;
+          cart.revenue += orderTotal;
+          cart.orderCount += 1;
         }
       }
     }
 
-    // Get franchise and cafe names (only active ones)
+    // Get franchise and cart names (only active ones)
     const franchiseIds = Array.from(franchiseMap.keys());
-    const cafeIds = Array.from(cafeMap.keys());
+    const cartIds = Array.from(cartMap.keys());
     const franchises = await User.find({ 
       _id: { $in: franchiseIds },
       role: "franchise_admin"
     }).select("name").lean();
-    const cafes = await User.find({ 
-      _id: { $in: cafeIds },
+    const carts = await User.find({ 
+      _id: { $in: cartIds },
       role: "admin"
     }).select("name franchiseId").lean();
 
@@ -116,9 +117,9 @@ exports.calculateDailyRevenue = async (req, res) => {
       franchiseMapNames.set(f._id.toString(), f.name);
     });
 
-    const cafeMapNames = new Map();
-    cafes.forEach((c) => {
-      cafeMapNames.set(c._id.toString(), {
+    const cartMapNames = new Map();
+    carts.forEach((c) => {
+      cartMapNames.set(c._id.toString(), {
         name: c.name,
         franchiseId: c.franchiseId?.toString(),
       });
@@ -129,13 +130,13 @@ exports.calculateDailyRevenue = async (req, res) => {
       franchiseId: id,
       franchiseName: franchiseMapNames.get(id) || "Unknown",
       revenue: data.revenue,
-      cafeCount: data.cafeIds.size,
+      cartCount: data.cartIds.size,
     }));
 
     // Build cafe revenue array
-    const cafeRevenue = Array.from(cafeMap.entries()).map(([id, data]) => ({
-      cafeId: id,
-      cafeName: cafeMapNames.get(id)?.name || "Unknown",
+    const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
+      cartId: id,
+      cartName: cartMapNames.get(id)?.name || "Unknown",
       franchiseId: data.franchiseId,
       franchiseName: franchiseMapNames.get(data.franchiseId) || "Unknown",
       revenue: data.revenue,
@@ -153,7 +154,7 @@ exports.calculateDailyRevenue = async (req, res) => {
         periodType: "daily",
         totalRevenue,
         franchiseRevenue,
-        cafeRevenue,
+        cartRevenue,
         totalOrders: orders.length,
         totalPayments: orders.length,
         calculatedAt: new Date(),
@@ -228,56 +229,56 @@ exports.calculateMonthlyRevenue = async (req, res) => {
 
     // Get franchise breakdown (only active franchises)
     const franchiseMap = new Map();
-    const cafeMap = new Map();
+    const cartMap = new Map();
 
     for (const order of orders) {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cartId = order.cartId?.toString() || order.cartId;
 
       if (franchiseId && activeFranchiseIds.has(franchiseId)) {
         if (!franchiseMap.has(franchiseId)) {
           franchiseMap.set(franchiseId, {
             franchiseId,
             revenue: 0,
-            cafeIds: new Set(),
+            cartIds: new Set(),
           });
         }
         const franchise = franchiseMap.get(franchiseId);
         const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         franchise.revenue += orderTotal;
-        if (cafeId) {
-          franchise.cafeIds.add(cafeId);
+        if (cartId) {
+          franchise.cartIds.add(cartId);
         }
       }
 
-      if (cafeId) {
+      if (cartId) {
         const orderFranchiseId = order.franchiseId?.toString() || order.franchiseId;
         if (orderFranchiseId && activeFranchiseIds.has(orderFranchiseId)) {
-          if (!cafeMap.has(cafeId)) {
-            cafeMap.set(cafeId, {
-              cafeId,
+          if (!cartMap.has(cartId)) {
+            cartMap.set(cartId, {
+              cartId,
               franchiseId: orderFranchiseId,
               revenue: 0,
               orderCount: 0,
             });
           }
-          const cafe = cafeMap.get(cafeId);
+          const cart = cartMap.get(cartId);
           const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
-          cafe.revenue += orderTotal;
-          cafe.orderCount += 1;
+          cart.revenue += orderTotal;
+          cart.orderCount += 1;
         }
       }
     }
 
-    // Get franchise and cafe names (only active ones)
+    // Get franchise and cart names (only active ones)
     const franchiseIds = Array.from(franchiseMap.keys());
-    const cafeIds = Array.from(cafeMap.keys());
+    const cartIds = Array.from(cartMap.keys());
     const franchises = await User.find({ 
       _id: { $in: franchiseIds },
       role: "franchise_admin"
     }).select("name").lean();
-    const cafes = await User.find({ 
-      _id: { $in: cafeIds },
+    const carts = await User.find({ 
+      _id: { $in: cartIds },
       role: "admin"
     }).select("name franchiseId").lean();
 
@@ -286,9 +287,9 @@ exports.calculateMonthlyRevenue = async (req, res) => {
       franchiseMapNames.set(f._id.toString(), f.name);
     });
 
-    const cafeMapNames = new Map();
-    cafes.forEach((c) => {
-      cafeMapNames.set(c._id.toString(), {
+    const cartMapNames = new Map();
+    carts.forEach((c) => {
+      cartMapNames.set(c._id.toString(), {
         name: c.name,
         franchiseId: c.franchiseId?.toString(),
       });
@@ -299,13 +300,13 @@ exports.calculateMonthlyRevenue = async (req, res) => {
       franchiseId: id,
       franchiseName: franchiseMapNames.get(id) || "Unknown",
       revenue: data.revenue,
-      cafeCount: data.cafeIds.size,
+      cartCount: data.cartIds.size,
     }));
 
     // Build cafe revenue array
-    const cafeRevenue = Array.from(cafeMap.entries()).map(([id, data]) => ({
-      cafeId: id,
-      cafeName: cafeMapNames.get(id)?.name || "Unknown",
+    const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
+      cartId: id,
+      cartName: cartMapNames.get(id)?.name || "Unknown",
       franchiseId: data.franchiseId,
       franchiseName: franchiseMapNames.get(data.franchiseId) || "Unknown",
       revenue: data.revenue,
@@ -323,7 +324,7 @@ exports.calculateMonthlyRevenue = async (req, res) => {
         periodType: "monthly",
         totalRevenue,
         franchiseRevenue,
-        cafeRevenue,
+        cartRevenue,
         totalOrders: orders.length,
         totalPayments: orders.length,
         calculatedAt: new Date(),
@@ -423,11 +424,11 @@ exports.getCurrentRevenue = async (req, res) => {
 
     // Get franchise breakdown (only active franchises)
     const franchiseMap = new Map();
-    const cafeMap = new Map();
+    const cartMap = new Map();
 
     for (const order of activeOrders) {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cartId = order.cartId?.toString() || order.cartId;
 
       // Only process orders from active franchises
       if (franchiseId && activeFranchiseIds.has(franchiseId)) {
@@ -435,47 +436,47 @@ exports.getCurrentRevenue = async (req, res) => {
           franchiseMap.set(franchiseId, {
             franchiseId,
             revenue: 0,
-            cafeIds: new Set(),
+            cartIds: new Set(),
           });
         }
         const franchise = franchiseMap.get(franchiseId);
         const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         franchise.revenue += orderTotal;
-        if (cafeId) {
-          franchise.cafeIds.add(cafeId);
+        if (cartId) {
+          franchise.cartIds.add(cartId);
         }
       }
 
       // Only process cafes from active franchises
-      if (cafeId) {
+      if (cartId) {
         const orderFranchiseId = order.franchiseId?.toString() || order.franchiseId;
         if (orderFranchiseId && activeFranchiseIds.has(orderFranchiseId)) {
-          if (!cafeMap.has(cafeId)) {
-            cafeMap.set(cafeId, {
-              cafeId,
+          if (!cartMap.has(cartId)) {
+            cartMap.set(cartId, {
+              cartId,
               franchiseId: orderFranchiseId,
               revenue: 0,
               orderCount: 0,
             });
           }
-          const cafe = cafeMap.get(cafeId);
+          const cart = cartMap.get(cartId);
           const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
-          cafe.revenue += orderTotal;
-          cafe.orderCount += 1;
+          cart.revenue += orderTotal;
+          cart.orderCount += 1;
         }
       }
     }
 
-    // Get cafe names (only for active cafes under active franchises)
-    const cafeIds = Array.from(cafeMap.keys());
-    const cafes = await User.find({ 
-      _id: { $in: cafeIds },
+    // Get cart names (only for active carts under active franchises)
+    const cartIds = Array.from(cartMap.keys());
+    const carts = await User.find({ 
+      _id: { $in: cartIds },
       role: "admin"
     }).select("name franchiseId").lean();
 
-    const cafeMapNames = new Map();
-    cafes.forEach((c) => {
-      cafeMapNames.set(c._id.toString(), {
+    const cartMapNames = new Map();
+    carts.forEach((c) => {
+      cartMapNames.set(c._id.toString(), {
         name: c.name,
         franchiseId: c.franchiseId?.toString(),
       });
@@ -486,13 +487,13 @@ exports.getCurrentRevenue = async (req, res) => {
       franchiseId: id,
       franchiseName: franchiseNameMap.get(id) || "Unknown",
       revenue: data.revenue,
-      cafeCount: data.cafeIds.size,
+      cartCount: data.cartIds.size,
     }));
 
     // Build cafe revenue array (only active cafes)
-    const cafeRevenue = Array.from(cafeMap.entries()).map(([id, data]) => ({
-      cafeId: id,
-      cafeName: cafeMapNames.get(id)?.name || "Unknown",
+    const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
+      cartId: id,
+      cartName: cartMapNames.get(id)?.name || "Unknown",
       franchiseId: data.franchiseId,
       franchiseName: franchiseNameMap.get(data.franchiseId) || "Unknown",
       revenue: data.revenue,
@@ -511,7 +512,7 @@ exports.getCurrentRevenue = async (req, res) => {
       data: {
         totalRevenue, // Only from active franchises
         franchiseRevenue, // Only active franchises
-        cafeRevenue, // Only active cafes
+        cartRevenue, // Only active carts
         totalOrders: activeOrders.length, // Only from active franchises
         calculatedAt: new Date(),
         // Additional info about preserved data from deleted franchises
@@ -548,46 +549,57 @@ exports.getFranchiseRevenue = async (req, res) => {
 
     // Get all paid orders for this franchise from database
     // These orders are permanently stored in MongoDB and persist after logout
+    // Convert franchiseId string to ObjectId for proper query matching
+    let franchiseObjectId;
+    try {
+      franchiseObjectId = new mongoose.Types.ObjectId(franchiseId);
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid franchise ID format",
+      });
+    }
+    
     const orders = await Order.find({
       status: "Paid",
-      franchiseId: franchiseId,
+      franchiseId: franchiseObjectId,
     }).lean();
 
     const totalRevenue = calculateOrderRevenue(orders);
 
-    // Get cafe breakdown for this franchise
-    const cafeMap = new Map();
+    // Get cart breakdown for this franchise
+    const cartMap = new Map();
 
     for (const order of orders) {
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cartId = order.cartId?.toString() || order.cartId;
 
-      if (cafeId) {
-        if (!cafeMap.has(cafeId)) {
-          cafeMap.set(cafeId, {
-            cafeId,
+      if (cartId) {
+        if (!cartMap.has(cartId)) {
+          cartMap.set(cartId, {
+            cartId,
             revenue: 0,
             orderCount: 0,
           });
         }
-        const cafe = cafeMap.get(cafeId);
+        const cart = cartMap.get(cartId);
         const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
-        cafe.revenue += orderTotal;
-        cafe.orderCount += 1;
+        cart.revenue += orderTotal;
+        cart.orderCount += 1;
       }
     }
 
-    // Get cafe names
-    const cafeIds = Array.from(cafeMap.keys());
-    const cafes = await User.find({ _id: { $in: cafeIds } }).select("name").lean();
+    // Get cart names
+    const cartIds = Array.from(cartMap.keys());
+    const carts = await User.find({ _id: { $in: cartIds } }).select("name").lean();
 
-    const cafeMapNames = new Map();
-    cafes.forEach((c) => {
-      cafeMapNames.set(c._id.toString(), c.name);
+    const cartMapNames = new Map();
+    carts.forEach((c) => {
+      cartMapNames.set(c._id.toString(), c.name);
     });
 
-    const cafeRevenue = Array.from(cafeMap.entries()).map(([id, data]) => ({
-      cafeId: id,
-      cafeName: cafeMapNames.get(id) || "Unknown",
+    const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
+      cartId: id,
+      cartName: cartMapNames.get(id) || "Unknown",
       revenue: data.revenue,
       orderCount: data.orderCount,
     }));
@@ -636,7 +648,7 @@ exports.getFranchiseRevenue = async (req, res) => {
         franchiseName: req.user.name,
         totalRevenue,
         recentRevenue, // Last 30 days
-        cafeRevenue,
+        cartRevenue,
         dailyBreakdown,
         totalOrders: orders.length,
         calculatedAt: new Date(),

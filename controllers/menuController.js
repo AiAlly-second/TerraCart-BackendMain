@@ -11,20 +11,64 @@ const buildCategoryWithItems = (categories, itemsByCategory) =>
     items: itemsByCategory[category._id.toString()] || [],
   }));
 
-exports.getPublicMenu = async (_req, res) => {
+exports.getPublicMenu = async (req, res) => {
   try {
-    const categories = await MenuCategory.find({ isActive: true })
+    // Get cartId from query parameter (passed from frontend based on table)
+    const { cartId } = req.query;
+    
+    // Build query - filter by cartId if provided
+    const categoryQuery = { isActive: true };
+    const itemQuery = { isAvailable: true };
+    
+    if (cartId) {
+      // Validate cartId format
+      if (!mongoose.Types.ObjectId.isValid(cartId)) {
+        return res.status(400).json({ message: "Invalid cart ID" });
+      }
+      categoryQuery.cafeId = cartId;
+      itemQuery.cafeId = cartId;
+    } else {
+      // Return empty menu if no cartId - prevents showing all carts' menus
+      return res.json([]);
+    }
+    
+    const categories = await MenuCategory.find(categoryQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
     const categoryIds = categories.map((cat) => cat._id);
 
-    const items = await MenuItem.find({
-      category: { $in: categoryIds },
-      isAvailable: true,
-    })
+    if (categoryIds.length > 0) {
+      itemQuery.category = { $in: categoryIds };
+    } else {
+      // No categories found for this cart
+      return res.json([]);
+    }
+
+    const items = await MenuItem.find(itemQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
+
+    // Helper function to decode HTML entities in image URLs
+    const decodeImageUrl = (imageUrl) => {
+      if (!imageUrl || typeof imageUrl !== 'string') return '';
+      return imageUrl
+        .replace(/&amp;#x2F;/g, '/')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#x2F;/g, '/')
+        .replace(/&#39;/g, "'")
+        .trim();
+    };
+
+    // Decode image URLs in items
+    items.forEach(item => {
+      if (item.image) {
+        item.image = decodeImageUrl(item.image);
+      }
+    });
 
     const itemsByCategory = items.reduce((acc, item) => {
       const key = item.category.toString();
@@ -369,7 +413,8 @@ exports.uploadMenuImage = [
     if (!req.file) {
       return res.status(400).json({ message: "No image uploaded" });
     }
-    const fileUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+      // Return relative URL so it works across different domains/environments
+      const fileUrl = `/uploads/${req.file.filename}`;
     return res.status(201).json({
       url: fileUrl,
       filename: req.file.filename,

@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 
-const TABLE_STATUSES = ["AVAILABLE", "OCCUPIED", "RESERVED", "CLEANING"];
+const TABLE_STATUSES = ["AVAILABLE", "OCCUPIED", "RESERVED", "CLEANING", "MERGED"];
 
 const tableSchema = new mongoose.Schema(
   {
@@ -53,19 +53,22 @@ const tableSchema = new mongoose.Schema(
       trim: true,
     },
     // Cafe admin association for data isolation
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Franchise association - tables belong to franchises through cafes
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Table merging functionality
+    mergedWith: { type: mongoose.Schema.Types.ObjectId, ref: "Table", default: null }, // Table this is merged with
+    mergedTables: [{ type: mongoose.Schema.Types.ObjectId, ref: "Table" }], // Tables merged into this one
   },
   { timestamps: true }
 );
 
 tableSchema.index({ sessionToken: 1 }, { sparse: true, name: "sessionToken_1" });
 
-// Compound unique index: number must be unique per cafeId
-// For cafe admins: { number: 1, cafeId: 1 } must be unique
-// For non-cafe admins: number must be globally unique (cafeId is null/undefined)
-tableSchema.index({ number: 1, cafeId: 1 }, { unique: true, sparse: true });
+// Compound unique index: number must be unique per cartId
+// For cafe admins: { number: 1, cartId: 1 } must be unique
+// For non-cafe admins: number must be globally unique (cartId is null/undefined)
+tableSchema.index({ number: 1, cartId: 1 }, { unique: true, sparse: true });
 
 module.exports = {
   Table: mongoose.model("Table", tableSchema),

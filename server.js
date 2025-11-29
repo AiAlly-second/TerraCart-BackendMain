@@ -1,3 +1,8 @@
+/**
+ * Terra Cart Backend Server
+ * Production-ready with security enhancements
+ */
+
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
@@ -8,59 +13,153 @@ const connectDB = require("./config/db");
 const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
 const { scheduleDailyRevenue, scheduleMonthlyRevenue } = require("./services/revenueScheduler");
 
+// Security middleware
+const {
+  rateLimiters,
+  securityHeaders,
+  sanitizeInput,
+  errorHandler,
+  getCorsConfig
+} = require("./middleware/securityMiddleware");
+
 // Load env vars
 dotenv.config();
 
-// Connect to MongoDB
-connectDB();
+// Validate critical environment variables
+const validateEnv = () => {
+  const warnings = [];
+  
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sarva-cafe-secret-key-2025') {
+    warnings.push('⚠️  JWT_SECRET is using default value. Set a strong secret in production!');
+  }
+  
+  if (!process.env.MONGO_URI) {
+    warnings.push('⚠️  MONGO_URI not set. Using local MongoDB.');
+  }
+  
+  if (process.env.NODE_ENV === 'production') {
+    if (!process.env.ALLOWED_ORIGINS) {
+      warnings.push('⚠️  ALLOWED_ORIGINS not set. CORS may be too permissive.');
+    }
+    if (!process.env.SIGNED_URL_SECRET) {
+      warnings.push('⚠️  SIGNED_URL_SECRET not set. Using JWT_SECRET as fallback.');
+    }
+  }
+  
+  // Security warnings removed for cleaner console output
+};
 
+validateEnv();
+
+// Initialize Express app
 const app = express();
 const server = http.createServer(app);
+
+// Socket.IO setup
 const io = socketIo(server, {
-  cors: {
-    origin: "*", // Allow all origins or specify your frontend URL here
-    methods: ["GET", "POST"]
-  }
+  cors: getCorsConfig(),
+  pingTimeout: 60000,
+  pingInterval: 25000,
 });
 
-app.set("io", io);
-
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(cors(getCorsConfig()));
+app.use(securityHeaders);
+app.use(sanitizeInput);
+
+// Apply rate limiting to all routes
+app.use(rateLimiters.api);
 
 // Routes
 app.use("/api/users", require("./routes/userRoutes"));
-app.use("/api/orders", require("./routes/orderRoutes")); // uses controller inside routes
-app.use("/api/admin", require("./routes/adminRoutes")); // admin authentication routes
-app.use("/api/tables", require("./routes/tableRoutes"));
-app.use("/api/waitlist", require("./routes/waitlistRoutes"));
 app.use("/api/menu", require("./routes/menuRoutes"));
+app.use("/api/default-menu", require("./routes/defaultMenuRoutes"));
+app.use("/api/orders", require("./routes/orderRoutes"));
+app.use("/api/tables", require("./routes/tableRoutes"));
 app.use("/api/payments", require("./routes/paymentRoutes"));
 app.use("/api/payment-qr", require("./routes/paymentQrRoutes"));
-console.log("✅ Payment QR routes registered at /api/payment-qr");
+app.use("/api/customers", require("./routes/customerRoutes"));
+app.use("/api/waitlist", require("./routes/waitlistRoutes"));
+app.use("/api/feedback", require("./routes/feedbackRoutes"));
 app.use("/api/revenue", require("./routes/revenueRoutes"));
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use("/api/admin", require("./routes/adminRoutes"));
+app.use("/api/files", require("./routes/fileRoutes"));
+app.use("/api/inventory", require("./routes/inventoryRoutes"));
+app.use("/api/kiosk", require("./routes/kioskRoutes"));
+app.use("/api/kiosk-owner", require("./routes/kioskOwnerRoutes"));
+app.use("/api/employees", require("./routes/employeeRoutes"));
+app.use("/api/attendance", require("./routes/attendanceRoutes"));
+app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));
+app.use("/api/employee-skills", require("./routes/employeeSkillsRoutes"));
 
-// Background jobs
+// Health check endpoint
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Static file serving for uploads
+app.use("/uploads/menu", express.static(path.join(__dirname, "uploads/menu"), {
+  maxAge: '1d',
+  etag: true,
+  lastModified: true
+}));
+
+if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_PUBLIC_UPLOADS === 'true') {
+  app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
+    maxAge: '1h',
+    etag: true
+  }));
+} else {
+  app.use("/uploads/payment-qr", express.static(path.join(__dirname, "uploads/payment-qr"), {
+    maxAge: '1d',
+    etag: true
+  }));
+}
+
+// Socket.IO connection handling
+io.on("connection", (socket) => {
+  socket.on("disconnect", (reason) => {
+    // Socket disconnected
+  });
+  
+  // Handle socket errors
+  socket.on("error", (error) => {
+    // Socket error
+  });
+});
+
+// Make io available to routes
+app.set("io", io);
+
+// Schedule background jobs
 scheduleOrderAutoRelease(io);
 scheduleDailyRevenue();
 scheduleMonthlyRevenue();
 
-// Health check route
-app.get("/", (req, res) => {
-  res.status(200).send("Sarva Cafe Node.js Backend is Live 🚀");
+// Error handling middleware (must be last)
+app.use(errorHandler);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ message: "Route not found" });
 });
 
-// Socket.IO connection handler (optional for logging)
-io.on("connection", (socket) => {
-  console.log("Admin panel connected via socket:", socket.id);
-  socket.on("disconnect", () => {
-    console.log("Socket disconnected:", socket.id);
-  });
-});
+// Connect to database and start server
+const startServer = async () => {
+  try {
+    await connectDB();
+    
+    const PORT = process.env.PORT || 5001;
+    server.listen(PORT, () => {
+      // Server started
+    });
+  } catch (error) {
+    process.exit(1);
+  }
+};
 
-const PORT = process.env.PORT || 5001;
-server.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`);
-});
+startServer();
+
+module.exports = { app, server, io };

@@ -6,7 +6,7 @@ const Table = require('../models/tableModel').Table;
 async function fixTableIndexes() {
   try {
     // Connect to MongoDB
-    const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sarva-cafe';
+    const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/terra-cart';
     await mongoose.connect(mongoUri);
     console.log('✅ Connected to MongoDB');
 
@@ -55,12 +55,28 @@ async function fixTableIndexes() {
       }
     }
 
-    // Ensure the new compound index exists
-    console.log('\n🔧 Ensuring compound index { number: 1, cafeId: 1 } exists...');
+    // Drop old cafeId index if exists
+    try {
+      const cafeIdIndex = indexes.find(idx => idx.name === 'number_1_cafeId_1' || (idx.key && idx.key.cafeId));
+      if (cafeIdIndex) {
+        console.log('\n🗑️  Dropping old cafeId index...');
+        await collection.dropIndex(cafeIdIndex.name);
+        console.log('✅ Dropped old cafeId index');
+      }
+    } catch (err) {
+      if (err.codeName === 'IndexNotFound') {
+        console.log('✅ No old cafeId index found');
+      } else {
+        console.log('ℹ️  Could not drop cafeId index:', err.message);
+      }
+    }
+
+    // Ensure the new compound index exists (using cartId)
+    console.log('\n🔧 Ensuring compound index { number: 1, cartId: 1 } exists...');
     try {
       await collection.createIndex(
-        { number: 1, cafeId: 1 },
-        { unique: true, sparse: true, name: 'number_1_cafeId_1' }
+        { number: 1, cartId: 1 },
+        { unique: true, sparse: true, name: 'number_1_cartId_1' }
       );
       console.log('✅ Compound index created/verified');
     } catch (err) {
@@ -88,6 +104,10 @@ async function fixTableIndexes() {
 }
 
 fixTableIndexes();
+
+
+
+
 
 
 

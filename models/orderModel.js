@@ -7,6 +7,7 @@ const itemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     price: { type: Number, required: true, min: 0 },
     returned: { type: Boolean, default: false },
+    convertedToTakeaway: { type: Boolean, default: false },
   },
   { _id: false }
 );
@@ -33,6 +34,10 @@ const orderSchema = new mongoose.Schema(
       enum: ["DINE_IN", "TAKEAWAY"],
       default: "DINE_IN",
     },
+    // Customer information for takeaway orders (optional)
+    customerName: { type: String },
+    customerMobile: { type: String },
+    customerEmail: { type: String },
     kotLines:    { type: [kotLineSchema], default: [] },
     status: {
       type: String,
@@ -53,9 +58,9 @@ const orderSchema = new mongoose.Schema(
     returnedAt: Date,
     autoReleasedAt: Date,
     sessionToken: { type: String, index: true, sparse: true }, // Session token for dine-in orders
-    // Cafe admin association for data isolation
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
-    // Franchise association - orders belong to franchises through cafes
+    // Cart admin association for data isolation
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Franchise association - orders belong to franchises through carts
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
   },
   { timestamps: true }

@@ -1,13 +1,43 @@
 const mongoose = require("mongoose");
 const { Payment, PAYMENT_METHODS, PAYMENT_STATUSES } = require("../models/paymentModel");
 const Order = require("../models/orderModel");
+const PaymentQR = require("../models/paymentQrModel");
 const { releaseTableForOrder } = require("./orderController");
 
-const buildUpiPayload = (orderId, amount) => {
-  const payee = process.env.UPI_PAYEE_VPA || "sarvacafe@upi";
-  const payeeName = encodeURIComponent(process.env.UPI_PAYEE_NAME || "Sarva Cafe");
+const buildUpiPayload = async (orderId, amount, cafeId = null) => {
+  // Try to get UPI ID from admin uploaded QR code
+  let payee = process.env.UPI_PAYEE_VPA || "sarvacafe@upi";
+  let payeeName = process.env.UPI_PAYEE_NAME || "Terra Cart";
+  
+  try {
+    // Try to find cafe-specific QR first, then any active QR
+    let qrCode = null;
+    if (cafeId) {
+      qrCode = await PaymentQR.findOne({
+        $or: [{ cafeId }, { userId: cafeId }],
+        isActive: true,
+      }).sort({ createdAt: -1 });
+    }
+    
+    // If no cafe-specific QR found, get any active global QR
+    if (!qrCode) {
+      qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    }
+    
+    // Use UPI ID from uploaded QR if available
+    if (qrCode && qrCode.upiId) {
+      payee = qrCode.upiId.trim();
+      if (qrCode.gatewayName) {
+        payeeName = qrCode.gatewayName;
+      }
+    }
+  } catch (err) {
+    console.warn("[PAYMENT] Failed to fetch PaymentQR, using default UPI:", err.message);
+  }
+  
+  const encodedPayeeName = encodeURIComponent(payeeName);
   const note = encodeURIComponent(`Order ${orderId}`);
-  return `upi://pay?pa=${payee}&pn=${payeeName}&tn=${note}&am=${amount.toFixed(
+  return `upi://pay?pa=${payee}&pn=${encodedPayeeName}&tn=${note}&am=${amount.toFixed(
     2
   )}&cu=INR`;
 };
@@ -130,7 +160,9 @@ exports.createPaymentIntent = async (req, res) => {
     };
 
     if (method === "ONLINE") {
-      payload.upiPayload = buildUpiPayload(orderId, amount);
+      // Get cafeId from order to find cafe-specific UPI QR
+      const cafeId = order.cafeId ? order.cafeId.toString() : null;
+      payload.upiPayload = await buildUpiPayload(orderId, amount, cafeId);
     }
 
     const payment = await Payment.create(payload);
@@ -162,8 +194,11 @@ exports.listPayments = async (req, res) => {
     // - Franchise admin: only payments for orders from cafes under their franchise
     // - Super admin: see all payments (no filter)
     if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - get orders for this cafe
-      const cafeOrders = await Order.find({ cafeId: req.user._id }).select("_id").lean();
+      // Cafe admin - get orders for this cafe only (use cartId, not cafeId)
+      const cafeOrders = await Order.find({ cartId: req.user._id })
+        .select("_id")
+        .limit(10000) // Safety limit
+        .lean();
       const orderIds = cafeOrders.map(o => o._id);
       if (orderIds.length > 0) {
         filter.orderId = { $in: orderIds };
@@ -172,8 +207,11 @@ exports.listPayments = async (req, res) => {
         return res.json([]);
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      // Franchise admin - get orders from cafes under their franchise
-      const franchiseOrders = await Order.find({ franchiseId: req.user._id }).select("_id").lean();
+      // Franchise admin - get orders from cafes under their franchise only
+      const franchiseOrders = await Order.find({ franchiseId: req.user._id })
+        .select("_id")
+        .limit(10000) // Safety limit
+        .lean();
       const orderIds = franchiseOrders.map(o => o._id);
       if (orderIds.length > 0) {
         filter.orderId = { $in: orderIds };
@@ -297,7 +335,19 @@ exports.PAYMENT_STATUSES = PAYMENT_STATUSES;
 
 exports.syncPaidOrders = async (req, res) => {
   try {
-    const orders = await Order.find({ status: "Paid" }).sort({ updatedAt: -1 });
+    // Filter orders based on admin role (same as listPayments)
+    const query = { status: "Paid" };
+    
+    if (req.user && req.user.role === "admin" && req.user._id) {
+      // Cafe admin - only sync orders from their cafe (use cartId, not cafeId)
+      query.cartId = req.user._id;
+    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+      // Franchise admin - only sync orders from cafes under their franchise
+      query.franchiseId = req.user._id;
+    }
+    // For super_admin, no filter (sync all paid orders)
+    
+    const orders = await Order.find(query).sort({ updatedAt: -1 });
     const results = [];
     for (const order of orders) {
       const amount = getOrderAmount(order);

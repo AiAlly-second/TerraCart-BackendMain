@@ -5,7 +5,7 @@ const User = require(path.join(__dirname, '../models/userModel'));
 
 async function createAdminUsers() {
   try {
-    await mongoose.connect('mongodb://127.0.0.1:27017/sarva-cafe');
+    await mongoose.connect('mongodb://127.0.0.1:27017/terra-cart');
     
     console.log('Connected to MongoDB');
     
@@ -15,10 +15,10 @@ async function createAdminUsers() {
     
     // Create Super Admin user
     const superAdmin = await User.findOneAndUpdate(
-      { email: 'superadmin@sarva.cafe' },
+      { email: 'superadmin@terra.cart' },
       {
         name: 'Super Admin',
-        email: 'superadmin@sarva.cafe',
+        email: 'superadmin@terra.cart',
         password: passwordHash,
         role: 'super_admin'
       },
@@ -32,10 +32,10 @@ async function createAdminUsers() {
     
     // Create Franchise Admin user
     const franchiseAdmin = await User.findOneAndUpdate(
-      { email: 'franchise@sarva.cafe' },
+      { email: 'franchise@terra.cart' },
       {
         name: 'Franchise Admin',
-        email: 'franchise@sarva.cafe',
+        email: 'franchise@terra.cart',
         password: passwordHash,
         role: 'franchise_admin'
       },
@@ -50,11 +50,11 @@ async function createAdminUsers() {
     console.log('\n✨ Both admin users are ready!');
     console.log('\nSuper Admin Login:');
     console.log('  URL: http://localhost:5173 (super-admin)');
-    console.log('  Email: superadmin@sarva.cafe');
+    console.log('  Email: superadmin@terra.cart');
     console.log('  Password: Admin@123');
     console.log('\nFranchise Admin Login:');
     console.log('  URL: http://localhost:5174 (franchise-admin)');
-    console.log('  Email: franchise@sarva.cafe');
+    console.log('  Email: franchise@terra.cart');
     console.log('  Password: Admin@123');
     
   } catch (error) {

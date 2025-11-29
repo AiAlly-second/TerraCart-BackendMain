@@ -11,18 +11,49 @@ const userSchema = new mongoose.Schema(
       enum: ["super_admin", "franchise_admin", "admin", "employee", "customer"],
       default: "customer",
     },
-    // Cafe admin specific fields
+    
+    // ===== FRANCHISE ID SYSTEM =====
+    // Franchise Code: 3-letter shortcut from franchise name (e.g., "MAH" for "Mahindra")
+    franchiseShortcut: { type: String, uppercase: true, maxlength: 3 },
+    // Full Franchise ID: shortcut + sequence number (e.g., "MAH001", "ABC002")
+    franchiseCode: { type: String, unique: true, sparse: true, index: true },
+    // Sequence number for this franchise (1, 2, 3...)
+    franchiseSequence: { type: Number },
+    
+    // ===== CART ID SYSTEM =====
+    // Full Cart ID: franchise shortcut + cart sequence (e.g., "MAH001", "MAH002")
+    cartCode: { type: String, unique: true, sparse: true, index: true },
+    // Sequence number for cart within franchise (1, 2, 3...)
+    cartSequence: { type: Number },
+    
+    // Cart admin specific fields
     location: { type: String },
     phone: { type: String },
     address: { type: String },
-    cafeName: { type: String },
+    cartName: { type: String },
     isApproved: { type: Boolean, default: false },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     approvedAt: { type: Date },
-    // Franchise relationship - cafe admins belong to a franchise
+    // Franchise relationship - cart admins belong to a franchise
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Active/Inactive status for franchises (default: true for new franchises)
     isActive: { type: Boolean, default: true, index: true },
+    // Franchise admin specific fields
+    mobile: { type: String }, // Mobile number for franchise admin
+    gstNumber: { type: String }, // GST number
+    udyamCertificate: { type: String }, // File path for Udyam certificate
+    aadharCard: { type: String }, // File path for Aadhar card
+    panCard: { type: String }, // File path for PAN card
+    // Cart admin specific document fields
+    gstCertificate: { type: String }, // File path for GST Certificate
+    shopActLicense: { type: String }, // File path for Shop Act License
+    fssaiLicense: { type: String }, // File path for FSSAI License
+    electricityBill: { type: String }, // File path for Electricity Bill (address proof)
+    rentAgreement: { type: String }, // File path for Rent Agreement (address proof)
+    // Document expiry dates (optional) - only for documents that can expire
+    gstCertificateExpiry: { type: Date },
+    shopActLicenseExpiry: { type: Date },
+    fssaiLicenseExpiry: { type: Date },
   },
   { timestamps: true }
 );

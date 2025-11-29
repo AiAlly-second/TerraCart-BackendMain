@@ -1,52 +1,140 @@
 const express = require("express");
+const router = express.Router();
 const {
-  getUsers,
-  createUser,
-  getUserById,
-  updateUser,
-  deleteUser,
   loginUser,
+  getUsers,
+  getCartStatistics,
+  createUser,
   registerCafeAdmin,
   approveCafeAdmin,
   rejectCafeAdmin,
+  toggleCafeStatus,
+  getUserById,
+  updateUser,
   toggleFranchiseStatus,
+  deleteUser,
+  uploadFranchiseDocs,
+  uploadCafeAdminDocs,
+  generateMyFranchiseCode,
 } = require("../controllers/userController");
-const { protect, admin, franchiseAdmin, authorize } = require('../middleware/authMiddleware');
+const { protect, authorize } = require("../middleware/authMiddleware");
+const { rateLimiters } = require("../middleware/securityMiddleware");
+const { 
+  validateRequired, 
+  validateEmail, 
+  validatePassword, 
+  validateObjectId 
+} = require("../middleware/validationMiddleware");
 
-const router = express.Router();
+// ============= PUBLIC ROUTES =============
 
-// Public routes
-router.post("/login", loginUser);
+// Login with rate limiting and validation
+router.post(
+  "/login", 
+  rateLimiters.login,
+  validateRequired(['email', 'password']),
+  validateEmail('email'),
+  loginUser
+);
 
-// Franchise admin can register cafe admins (or super admin)
-router.post("/register-cafe-admin", protect, authorize(["franchise_admin", "super_admin"]), registerCafeAdmin);
+// Public cafe admin registration (for signup page)
+router.post(
+  "/register-cafe-admin-public",
+  rateLimiters.login, // Use login limiter for registration too
+  uploadCafeAdminDocs,
+  validateRequired(['name', 'email', 'password', 'cartName', 'location']),
+  validateEmail('email'),
+  validatePassword('password', 6),
+  registerCafeAdmin
+);
 
-router.route("/")
-  .get(protect, admin, getUsers)     // GET all users (admin only)
-  .post(protect, authorize(["super_admin"]), createUser); // POST new user (super admin only)
+// Protected cafe admin registration (via admin panel)
+router.post(
+  "/register-cafe-admin", 
+  protect, 
+  uploadCafeAdminDocs,
+  validateRequired(['name', 'email', 'password', 'cartName', 'location']),
+  validateEmail('email'),
+  validatePassword('password', 6),
+  registerCafeAdmin
+);
 
-// IMPORTANT: Specific routes must be defined BEFORE generic /:id route
-// Otherwise Express will match /:id first and these routes won't work
+// ============= PROTECTED ROUTES =============
+router.use(protect);
 
-// Franchise admin only routes
-router.patch("/:id/approve", protect, franchiseAdmin, approveCafeAdmin);
-router.patch("/:id/reject", protect, franchiseAdmin, rejectCafeAdmin);
+// Generate franchise code for current user (franchise admin only)
+router.post(
+  "/generate-franchise-code", 
+  authorize(["franchise_admin"]), 
+  generateMyFranchiseCode
+);
 
-// Super admin only - toggle franchise active/inactive status
-router.patch("/:id/toggle-status", protect, authorize(["super_admin"]), (req, res, next) => {
-  console.log('[ROUTE DEBUG] toggle-status route hit!', {
-    method: req.method,
-    path: req.path,
-    params: req.params,
-    userRole: req.user?.role
-  });
-  next();
-}, toggleFranchiseStatus);
+// User management routes
+router.get("/", getUsers);
 
-// Generic /:id route (must be last)
-router.route("/:id")
-  .get(protect, admin, getUserById)   // GET user by id (admin only)
-  .put(protect, admin, updateUser)    // PUT update user (admin only)
-  .delete(protect, admin, deleteUser); // DELETE user (admin only) - for franchises, sets isActive=false
+router.get(
+  "/stats/carts", 
+  authorize(["super_admin", "franchise_admin"]), 
+  getCartStatistics
+);
+
+router.get(
+  "/:id", 
+  validateObjectId('id'),
+  getUserById
+);
+
+router.post(
+  "/", 
+  authorize(["super_admin"]), 
+  uploadFranchiseDocs,
+  validateRequired(['name', 'email', 'password', 'role']),
+  validateEmail('email'),
+  validatePassword('password', 6),
+  createUser
+);
+
+router.put(
+  "/:id", 
+  validateObjectId('id'),
+  uploadCafeAdminDocs, 
+  updateUser
+);
+
+router.delete(
+  "/:id", 
+  validateObjectId('id'),
+  deleteUser
+);
+
+// Cafe admin management routes
+router.patch(
+  "/:id/approve", 
+  validateObjectId('id'),
+  authorize(["franchise_admin"]), 
+  approveCafeAdmin
+);
+
+router.patch(
+  "/:id/reject", 
+  validateObjectId('id'),
+  authorize(["franchise_admin"]), 
+  rejectCafeAdmin
+);
+
+router.patch(
+  "/:id/toggle-cafe-status", 
+  validateObjectId('id'),
+  authorize(["franchise_admin", "super_admin"]), 
+  toggleCafeStatus
+);
+
+// Franchise status toggle (super admin only)
+router.patch(
+  "/:id/toggle-status", 
+  validateObjectId('id'),
+  authorize(["super_admin"]), 
+  toggleFranchiseStatus
+);
 
 module.exports = router;

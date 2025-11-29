@@ -99,7 +99,7 @@ exports.joinWaitlist = async (req, res) => {
       const existingByToken = await Waitlist.findOne({
         token: providedToken,
         table: table._id,
-        status: { $in: ["WAITING", "NOTIFIED"] },
+        status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
       });
 
       if (existingByToken) {
@@ -120,9 +120,34 @@ exports.joinWaitlist = async (req, res) => {
       }
     }
 
-    // Check if user already has an active waitlist entry for this table
-    // (This is a fallback check, but without token we can't reliably identify the user)
-    // We'll rely on the frontend passing the token to prevent duplicates
+    // CRITICAL: Check if user already has an active waitlist entry for this table
+    // Check by sessionToken if available (from table lookup)
+    // This prevents duplicate entries when user clicks "Join Waitlist" multiple times
+    const { sessionToken } = req.body;
+    if (sessionToken) {
+      const existingBySession = await Waitlist.findOne({
+        table: table._id,
+        sessionToken: sessionToken,
+        status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
+      });
+      
+      if (existingBySession) {
+        // User already has an active entry - return it instead of creating duplicate
+        const position = await computePosition(existingBySession);
+        return res.status(200).json({
+          token: existingBySession.token,
+          position: position,
+          name: existingBySession.name || null,
+          partySize: existingBySession.partySize || 1,
+          message: "Already in waitlist",
+          table: {
+            id: table._id,
+            number: table.number,
+            status: table.status,
+          },
+        });
+      }
+    }
 
     const token = providedToken || crypto.randomBytes(6).toString("hex");
     const entry = await Waitlist.create({
@@ -131,6 +156,7 @@ exports.joinWaitlist = async (req, res) => {
       token,
       name,
       partySize,
+      sessionToken: sessionToken || undefined, // Link to session if available
     });
 
     // Calculate position after entry is created - this ensures accurate ordering
