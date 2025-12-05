@@ -27,8 +27,10 @@ const employeeSchema = new mongoose.Schema(
     employeeRole: {
       type: String,
       enum: [
-        // Cafe-level roles
-        "waiter", "chef", "manager", "cashier", "cleaner",
+        // Cafe-level roles (mobile app roles)
+        "waiter", "cook", "captain", "manager", 
+        // Legacy/alternative role names
+        "chef", "cashier", "cleaner",
         // Franchise-level roles
         "franchise_manager", "area_manager", "supervisor", "accountant", 
         "hr_manager", "operations_manager", "quality_auditor", "training_coordinator",
@@ -36,6 +38,8 @@ const employeeSchema = new mongoose.Schema(
       ],
       required: true,
     },
+    // User account link (for mobile app login)
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, sparse: true },
     // Hierarchy relationships
     cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },

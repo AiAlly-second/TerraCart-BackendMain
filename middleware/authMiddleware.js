@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/userModel');
+const Employee = require('../models/employeeModel');
 
 exports.protect = async (req, res, next) => {
   let token;
@@ -24,6 +25,50 @@ exports.protect = async (req, res, next) => {
           message: 'Not authorized, user not found',
           code: 'USER_NOT_FOUND'
         });
+      }
+
+      // For mobile app users, populate cafeId and employeeId if not already set
+      if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
+        // If cafeId is not set, try to get it from employeeId or Employee lookup
+        if (!req.user.cafeId || !req.user.employeeId) {
+          let employee = null;
+          
+          // Try to find employee by userId first (new relationship)
+          if (req.user.employeeId) {
+            employee = await Employee.findById(req.user.employeeId).lean();
+          } else {
+            // Fallback: find by userId field in Employee model
+            employee = await Employee.findOne({ userId: req.user._id }).lean();
+            
+            // If still not found, try email matching (legacy)
+            if (!employee && req.user.email) {
+              employee = await Employee.findOne({ email: req.user.email.toLowerCase() }).lean();
+            }
+          }
+          
+          if (employee) {
+            // Populate cafeId and employeeId on req.user for use in controllers
+            req.user.cafeId = req.user.cafeId || employee.cafeId;
+            req.user.employeeId = req.user.employeeId || employee._id;
+            
+            // Update User model if fields are missing (one-time update)
+            if (!req.user.cafeId || !req.user.employeeId) {
+              const updateData = {};
+              if (!req.user.cafeId && employee.cafeId) {
+                updateData.cafeId = employee.cafeId;
+              }
+              if (!req.user.employeeId && employee._id) {
+                updateData.employeeId = employee._id;
+              }
+              if (Object.keys(updateData).length > 0) {
+                await User.findByIdAndUpdate(req.user._id, updateData);
+                // Update req.user object
+                req.user.cafeId = req.user.cafeId || employee.cafeId;
+                req.user.employeeId = req.user.employeeId || employee._id;
+              }
+            }
+          }
+        }
       }
 
       // Check if franchise admin is active
@@ -118,7 +163,7 @@ exports.franchiseAdmin = async (req, res, next) => {
   }
 };
 
-exports.authorize = (allowedRoles = []) => (req, res, next) => {
+exports.authorize = (allowedRoles = []) => async (req, res, next) => {
   if (!Array.isArray(allowedRoles) || allowedRoles.length === 0) {
     return next();
   }
@@ -127,13 +172,66 @@ exports.authorize = (allowedRoles = []) => (req, res, next) => {
     return res.status(401).json({ message: 'Not authorized' });
   }
 
-  const userRole = req.user.role || 'user';
+  let userRole = req.user.role || 'user';
   
+  // For mobile users with role "employee", look up Employee to get actual role
+  if (userRole === 'employee') {
+    try {
+      const employee = await Employee.findOne({ userId: req.user._id }).lean();
+      if (employee) {
+        userRole = employee.employeeRole; // waiter, cook, captain, manager, etc.
+      }
+    } catch (error) {
+      console.error('[AUTHORIZE] Error looking up employee:', error.message);
+    }
+  }
+  
+  // Check if user role is in allowed roles
   if (!allowedRoles.includes(userRole)) {
     return res.status(403).json({ 
       message: `Not authorized for this action. Required roles: ${allowedRoles.join(', ')}` 
     });
   }
 
+  return next();
+};
+
+// Optional protect - authenticates if token is provided, but allows request to proceed without token
+exports.optionalProtect = async (req, res, next) => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (token) {
+    try {
+      const secret = process.env.JWT_SECRET || 'your-secret-key';
+      const decoded = jwt.verify(token, secret);
+      req.user = await User.findById(decoded.id).select('-password');
+      // Continue even if user not found (for public access)
+      if (req.user) {
+        // For mobile app users, populate cafeId and employeeId if not already set
+        if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
+          if (!req.user.cafeId || !req.user.employeeId) {
+            let employee = null;
+            
+            if (req.user.employeeId) {
+              employee = await Employee.findById(req.user.employeeId).lean();
+            } else {
+              employee = await Employee.findOne({ userId: req.user._id }).lean();
+              if (!employee && req.user.email) {
+                employee = await Employee.findOne({ email: req.user.email.toLowerCase() }).lean();
+              }
+            }
+            
+            if (employee) {
+              req.user.cafeId = req.user.cafeId || employee.cafeId;
+              req.user.employeeId = req.user.employeeId || employee._id;
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // If token is invalid, just continue without req.user (for public access)
+      console.log('[OPTIONAL_PROTECT] Token invalid or expired, continuing as public:', error.message);
+    }
+  }
+  // Always continue to next middleware (with or without req.user)
   return next();
 };

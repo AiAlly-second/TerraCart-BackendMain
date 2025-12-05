@@ -20,15 +20,41 @@ exports.getPublicMenu = async (req, res) => {
     const categoryQuery = { isActive: true };
     const itemQuery = { isAvailable: true };
     
+    let targetCafeId = null;
+    
+    // Priority 1: Use cartId from query parameter (for public access)
     if (cartId) {
       // Validate cartId format
       if (!mongoose.Types.ObjectId.isValid(cartId)) {
         return res.status(400).json({ message: "Invalid cart ID" });
       }
-      categoryQuery.cafeId = cartId;
-      itemQuery.cafeId = cartId;
+      targetCafeId = cartId;
+    } 
+    // Priority 2: For authenticated mobile users, get cafeId from their Employee record
+    else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      const Employee = require("../models/employeeModel");
+      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      if (employee && employee.cafeId) {
+        targetCafeId = employee.cafeId;
+        console.log('[MENU] getPublicMenu - Mobile user cafeId:', {
+          userId: req.user._id,
+          email: req.user.email,
+          cafeId: targetCafeId
+        });
+      }
+    }
+    // Priority 3: For admin users, use their _id as cafeId
+    else if (req.user && req.user.role === "admin") {
+      targetCafeId = req.user._id;
+    }
+    
+    if (targetCafeId) {
+      categoryQuery.cafeId = targetCafeId;
+      itemQuery.cafeId = targetCafeId;
+      console.log('[MENU] getPublicMenu - Filtering by cafeId:', targetCafeId);
     } else {
-      // Return empty menu if no cartId - prevents showing all carts' menus
+      // Return empty menu if no cafeId - prevents showing all carts' menus
+      console.log('[MENU] getPublicMenu - No cafeId found, returning empty menu');
       return res.json([]);
     }
     
@@ -142,6 +168,13 @@ exports.createCategory = async (req, res) => {
       cafeId: cafeId,
     });
 
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (cafeId) {
+      emitToCafe(io, cafeId.toString(), "menu:updated", { type: "category_created", category });
+    }
+
     return res.status(201).json(category);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -169,6 +202,13 @@ exports.updateCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (category.cafeId) {
+      emitToCafe(io, category.cafeId.toString(), "menu:updated", { type: "category_updated", category });
+    }
+
     return res.json(category);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -192,6 +232,13 @@ exports.deleteCategory = async (req, res) => {
     const category = await MenuCategory.findByIdAndDelete(id);
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
+    }
+
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (category.cafeId) {
+      emitToCafe(io, category.cafeId.toString(), "menu:updated", { type: "category_deleted", categoryId: id });
     }
 
     return res.json({ message: "Category deleted" });
@@ -259,6 +306,13 @@ exports.createItem = async (req, res) => {
       calories,
       cafeId: finalCafeId,
     });
+
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (finalCafeId) {
+      emitToCafe(io, finalCafeId.toString(), "menu:updated", { type: "item_created", item });
+    }
 
     return res.status(201).json(item);
   } catch (err) {
@@ -332,6 +386,13 @@ exports.updateItem = async (req, res) => {
       }
     }
 
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (item.cafeId) {
+      emitToCafe(io, item.cafeId.toString(), "menu:updated", { type: "item_updated", item });
+    }
+
     return res.json(item);
   } catch (err) {
     if (err.code === 11000) {
@@ -363,6 +424,13 @@ exports.updateItemAvailability = async (req, res) => {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (item.cafeId) {
+      emitToCafe(io, item.cafeId.toString(), "menu:updated", { type: "item_availability_updated", item });
+    }
+
     return res.json(item);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -376,12 +444,22 @@ exports.deleteItem = async (req, res) => {
       return res.status(400).json({ message: "Invalid item id" });
     }
 
-    const item = await MenuItem.findByIdAndDelete(id);
+    const item = await MenuItem.findById(id);
     if (!item) {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
-    // After deletion update category counts indirectly
+    const cafeId = item.cafeId;
+
+    await MenuItem.findByIdAndDelete(id);
+
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (cafeId) {
+      emitToCafe(io, cafeId.toString(), "menu:updated", { type: "item_deleted", itemId: id });
+    }
+
     return res.json({ message: "Menu item deleted" });
   } catch (err) {
     return res.status(500).json({ message: err.message });

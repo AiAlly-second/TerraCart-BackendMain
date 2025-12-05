@@ -32,6 +32,19 @@ const supplierSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    // Kiosk/Outlet association (required - suppliers are cart-specific)
+    outletId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    franchiseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -42,6 +55,8 @@ const supplierSchema = new mongoose.Schema(
 supplierSchema.index({ name: 1 });
 supplierSchema.index({ "contact.email": 1 });
 supplierSchema.index({ isActive: 1 });
+supplierSchema.index({ outletId: 1 });
+supplierSchema.index({ franchiseId: 1 });
 
 module.exports = mongoose.model("Supplier", supplierSchema);
 

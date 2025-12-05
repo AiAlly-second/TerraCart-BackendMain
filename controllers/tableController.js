@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const { Table, TABLE_STATUSES } = require("../models/tableModel");
 const Order = require("../models/orderModel");
 const Waitlist = require("../models/waitlistModel");
+const Employee = require("../models/employeeModel");
 const { notifyNextWaitlist } = require("./waitlistController");
 
 const activeWaitlistStatuses = ["WAITING", "NOTIFIED"];
@@ -14,12 +15,63 @@ const countActiveWaitlist = (tableId) =>
   });
 
 // Helper function to build query based on user role
-const buildHierarchyQuery = (user) => {
+const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user && user.role === "admin" && user._id) {
     query.cartId = user._id;
   } else if (user && user.role === "franchise_admin" && user._id) {
     query.franchiseId = user._id;
+  } else if (user && ["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users - these are direct User records with cafeId set during login
+    // First check if User has cafeId directly
+    if (user.cafeId) {
+      query.cartId = user.cafeId;
+      console.log('[TABLE] buildHierarchyQuery - Mobile user has direct cafeId:', {
+        userId: user._id,
+        role: user.role,
+        cafeId: user.cafeId,
+        cartId: query.cartId
+      });
+    } else {
+      // Fallback: try to find Employee record by userId or email
+      const employee = await Employee.findOne({ 
+        $or: [
+          { userId: user._id },
+          { email: user.email?.toLowerCase() }
+        ]
+      }).lean();
+      if (employee && employee.cafeId) {
+        query.cartId = employee.cafeId;
+        console.log('[TABLE] buildHierarchyQuery - Mobile user employee found:', {
+          userId: user._id,
+          email: user.email,
+          employeeId: employee._id,
+          cafeId: employee.cafeId,
+          cartId: query.cartId
+        });
+      } else {
+        console.log('[TABLE] buildHierarchyQuery - No cafeId found for mobile user:', {
+          userId: user._id,
+          role: user.role,
+          email: user.email
+        });
+      }
+    }
+  } else if (user && user.role === "employee") {
+    // Legacy employee role - look up Employee by userId or email
+    if (user.cafeId) {
+      query.cartId = user.cafeId;
+    } else {
+      const employee = await Employee.findOne({ 
+        $or: [
+          { userId: user._id },
+          { email: user.email?.toLowerCase() }
+        ]
+      }).lean();
+      if (employee && employee.cafeId) {
+        query.cartId = employee.cafeId;
+      }
+    }
   }
   return query;
 };
@@ -228,28 +280,107 @@ exports.listTables = async (req, res) => {
   try {
     await syncTableFields();
     
-    // Filter tables based on admin role:
-    // - Cafe admin: only see tables from their cafe (cartId matches their _id)
-    // - Franchise admin: only see tables from cafes under their franchise (franchiseId matches their _id)
-    // - Super admin: see all tables (no filter)
-    const query = {};
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - only see tables from their cafe
-      query.cartId = req.user._id;
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      // Franchise admin - only see tables from cafes under their franchise
-      query.franchiseId = req.user._id;
-    }
-    // For super_admin, no filter (see all tables)
+    // Build query based on user role (handles mobile roles too)
+    const query = await buildHierarchyQuery(req.user);
     
+    // Debug logging
+    console.log('[TABLE] listTables - User:', {
+      id: req.user?._id,
+      role: req.user?.role,
+      email: req.user?.email
+    });
+    console.log('[TABLE] listTables - Query:', JSON.stringify(query, null, 2));
+    
+    // If query is empty (no cartId/franchiseId), return empty array
+    // This prevents returning all tables when user has no associated cart
+    if (Object.keys(query).length === 0) {
+      console.log('[TABLE] listTables - Empty query, returning empty array');
+      return res.json({
+        success: true,
+        data: [],
+      });
+    }
+    
+    // CRITICAL: Ensure we only return tables that have a cartId matching the query
+    // Convert cartId to string for comparison if needed
+    if (query.cartId) {
+      // Ensure cartId is properly formatted (ObjectId or string)
+      const mongoose = require("mongoose");
+      if (mongoose.Types.ObjectId.isValid(query.cartId)) {
+        query.cartId = new mongoose.Types.ObjectId(query.cartId);
+      }
+    }
+    
+    // Find tables and ensure no duplicates by table number within the same cafe
+    // Only return tables that match the query exactly
     const tables = await Table.find(query).sort({ number: 1 }).lean();
+    
+    // Additional safety: Filter out any tables that don't match the cartId exactly
+    // This prevents returning tables from other carts due to query issues
+    const filteredTables = tables.filter(table => {
+      if (query.cartId) {
+        const tableCartId = table.cartId?.toString();
+        const queryCartId = query.cartId.toString();
+        if (tableCartId !== queryCartId) {
+          console.log(`[TABLE] Filtering out table ${table.number} - cartId mismatch: ${tableCartId} !== ${queryCartId}`);
+          return false;
+        }
+      }
+      return true;
+    });
+    
+    console.log('[TABLE] listTables - Found tables:', filteredTables.length);
+    filteredTables.forEach(t => {
+      console.log(`[TABLE] - Table ${t.number}: cartId=${t.cartId}, cafeId=${t.cafeId}, franchiseId=${t.franchiseId}`);
+    });
+    
+    // Deduplicate: If multiple tables have the same number, keep only the first one
+    // Group by table number and cartId, then take the first occurrence
+    const seen = new Map();
+    const uniqueTables = [];
+    
+    for (const table of filteredTables) {
+      const key = `${table.cartId || table.cafeId || 'unknown'}-${table.number}`;
+      if (!seen.has(key)) {
+        seen.set(key, true);
+        uniqueTables.push(table);
+      } else {
+        console.log(`[TABLE] listTables - Skipping duplicate: ${key}`);
+      }
+    }
+    
+    console.log('[TABLE] listTables - After deduplication:', uniqueTables.length);
+    
     const enriched = await Promise.all(
-      tables.map(async (table) => ({
-        ...table,
-        waitlistLength: await countActiveWaitlist(table._id),
-      }))
+      uniqueTables.map(async (table) => {
+        // Ensure table status is correct - if no current order, it should be AVAILABLE
+        if (!table.currentOrder && table.status === "OCCUPIED") {
+          // Auto-fix: Update table status if it's incorrectly marked as OCCUPIED
+          try {
+            await Table.findByIdAndUpdate(table._id, { 
+              status: "AVAILABLE",
+              currentOrder: null,
+              sessionToken: undefined,
+              lastAssignedAt: null
+            });
+            table.status = "AVAILABLE";
+            table.currentOrder = null;
+          } catch (err) {
+            console.error(`[TABLE] Failed to auto-fix table ${table._id}:`, err);
+          }
+        }
+        
+        return {
+          ...table,
+          waitlistLength: await countActiveWaitlist(table._id),
+        };
+      })
     );
-    return res.json(enriched);
+    
+    return res.json({
+      success: true,
+      data: enriched,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1069,6 +1200,17 @@ exports.updateTable = async (req, res) => {
     await table.save();
 
     const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    
+    // Emit socket event for table status update
+    if (io && emitToCafe && table.cartId) {
+      emitToCafe(io, table.cartId.toString(), "table:status:updated", {
+        id: table._id,
+        number: table.number,
+        status: table.status,
+        currentOrder: table.currentOrder || null,
+      });
+    }
     
     // When table becomes AVAILABLE, notify next waitlist person
     // Don't cancel waitlist entries - let the flow handle it naturally
@@ -1168,7 +1310,7 @@ exports.mergeTables = async (req, res) => {
     }
     
     // Check hierarchy access
-    const query = buildHierarchyQuery(req.user);
+    const query = await buildHierarchyQuery(req.user);
     if (query.cartId && primaryTable.cartId?.toString() !== query.cartId.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -1259,7 +1401,7 @@ exports.unmergeTables = async (req, res) => {
     }
     
     // Check hierarchy access
-    const query = buildHierarchyQuery(req.user);
+    const query = await buildHierarchyQuery(req.user);
     if (query.cartId && table.cartId?.toString() !== query.cartId.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }

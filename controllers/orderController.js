@@ -132,9 +132,12 @@ function formatPaymentPayload(payment) {
   };
 }
 
-// Order status transitions (Finalized removed - Served goes directly to Paid)
+// Order status transitions
+// DINE_IN flow: Pending -> Confirmed -> Preparing -> Ready -> Served -> Paid
+// TAKEAWAY flow: Pending/Accept -> Being Prepared -> Completed -> Paid -> Exit
 const transitions = {
-  Pending: new Set(["Confirmed", "Cancelled"]),
+  // DINE_IN statuses
+  Pending: new Set(["Confirmed", "Cancelled", "Accept"]), // Allow Accept for takeaway
   Confirmed: new Set(["Preparing", "Cancelled"]),
   Preparing: new Set(["Ready", "Cancelled"]),
   Ready: new Set(["Served", "Cancelled"]),
@@ -143,32 +146,58 @@ const transitions = {
   Paid: new Set(["Returned"]),
   Cancelled: new Set([]),
   Returned: new Set([]),
+  // TAKEAWAY statuses
+  Accept: new Set(["Being Prepared", "BeingPrepared", "Cancelled"]),
+  Accepted: new Set(["Being Prepared", "BeingPrepared", "Cancelled"]),
+  "Being Prepared": new Set(["Completed", "Cancelled"]),
+  BeingPrepared: new Set(["Completed", "Cancelled"]),
+  Completed: new Set(["Paid", "Cancelled"]),
+  Exit: new Set([]), // Final status for takeaway
 };
 
 // ---------------- CREATE ORDER ----------------
-async function releaseTableForOrder(order, io) {
+async function releaseTableForOrder(order, io, emitToCafe = null) {
   try {
     if (!order?.table) return;
     const tableId = order.table._id || order.table;
     const table = await Table.findById(tableId);
     if (!table) return;
+    
+    const oldStatus = table.status;
     table.status = "AVAILABLE";
     table.currentOrder = null;
     table.set("sessionToken", undefined);
+    table.lastAssignedAt = null;
     await table.save();
+    
+    // Emit socket event for table status update
+    if (io && table.cartId && emitToCafe) {
+      emitToCafe(io, table.cartId.toString(), "table:status:updated", {
+        id: table._id,
+        number: table.number,
+        status: table.status,
+        currentOrder: null,
+      });
+    }
     
     // Notify next person in waitlist when table becomes available
     if (io) {
       const { notifyNextWaitlist } = require("./waitlistController");
       await notifyNextWaitlist(tableId, io);
     }
+    
+    console.log(`[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE`);
   } catch (err) {
     console.error("Failed to release table", err);
   }
 }
 
 const createOrder = async (req, res) => {
-  console.log('[ORDER] createOrder called - no auth required');
+  console.log('[ORDER] createOrder called', {
+    hasUser: !!req.user,
+    userRole: req.user?.role,
+    userId: req.user?._id?.toString()
+  });
   try {
     const { items, serviceType = "DINE_IN", tableId, sessionToken, customerName, customerMobile, customerEmail } = req.body;
     let { tableNumber } = req.body;
@@ -444,9 +473,14 @@ const createOrder = async (req, res) => {
       })();
     }
 
-    // Emit socket event
+    // Emit socket event to cafe room
     const io = req.app.get("io");
-    io.emit("newOrder", order);
+    const emitToCafe = req.app.get("emitToCafe");
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:created", order);
+      emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "kot:created", order); // KOT created
+    }
 
     // Print KOT to printer (non-blocking)
     printKOT(order, kot, 0).catch(err => {
@@ -649,8 +683,14 @@ const addKot = async (req, res) => {
       })();
     }
 
+    // Emit socket event to cafe room
     const io = req.app.get("io");
-    io.emit("orderUpdated", order);
+    const emitToCafe = req.app.get("emitToCafe");
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+    }
 
     // Print new KOT to printer (non-blocking)
     const kotIndex = order.kotLines.length - 1;
@@ -695,8 +735,17 @@ const finalizeOrder = async (req, res) => {
     order.status = "Finalized";
     await order.save();
 
+    // Release table when order is finalized
     const io = req.app.get("io");
-    io.emit("orderUpdated", order);
+    const emitToCafe = req.app.get("emitToCafe");
+    await releaseTableForOrder(order, io, emitToCafe);
+
+    // Emit socket event to cafe room
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+    }
 
     return res.json(order);
   } catch (err) {
@@ -712,9 +761,10 @@ const getOrders = async (req, res) => {
   try {
     const query = {};
     
-    // Filter orders based on admin role:
+    // Filter orders based on user role:
     // - Cart admin (admin): ONLY see orders from their cart (cartId matches their _id) - CRITICAL FOR DATA ISOLATION
     // - Franchise admin: only orders from cafes under their franchise (franchiseId matches their _id)
+    // - Mobile users (waiter, cook, captain, manager): ONLY see orders from their assigned cart/kiosk
     // - Super admin: all orders (no filter - they see everything)
     if (req.user && req.user.role === "admin" && req.user._id) {
       // CRITICAL: Cart admin - ONLY see orders from their own cart
@@ -725,6 +775,17 @@ const getOrders = async (req, res) => {
       // Franchise admin - only see orders from cafes under their franchise
       query.franchiseId = req.user._id;
       console.log(`[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`);
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      // Mobile users - ONLY see orders from their assigned cart/kiosk
+      // Use cafeId from req.user (populated by middleware)
+      if (req.user.cafeId) {
+        query.cartId = req.user.cafeId;
+        console.log(`[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`);
+      } else {
+        // If cafeId not set, return empty array (should not happen if middleware works correctly)
+        console.warn(`[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`);
+        return res.json([]);
+      }
     }
     // For super_admin, no query-level restriction (see all orders)
     
@@ -782,9 +843,10 @@ const getOrderById = async (req, res) => {
       }
     }
     
-    // Check access permissions based on admin role:
+    // Check access permissions based on user role:
     // - Cafe admin: can only access orders from their cafe
     // - Franchise admin: can only access orders from cafes under their franchise
+    // - Mobile users (waiter, cook, captain, manager): can only access orders from their assigned cart/kiosk
     // - Super admin: can access all orders
     // - Public (no auth): can access orders (for frontend customers)
     if (req.user && req.user.role === "admin" && req.user._id) {
@@ -796,6 +858,14 @@ const getOrderById = async (req, res) => {
       // Franchise admin - check if order belongs to their franchise
       if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Order does not belong to your franchise" });
+      }
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      // Mobile users - check if order belongs to their assigned cart/kiosk
+      if (!req.user.cafeId) {
+        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+      }
+      if (!order.cartId || order.cartId.toString() !== req.user.cafeId.toString()) {
+        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
     // For super_admin, no restriction (they can see all orders)
@@ -891,6 +961,14 @@ const addItemsToOrder = async (req, res) => {
       if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Order does not belong to your franchise" });
       }
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      // Mobile users - can only add items to orders from their assigned cart/kiosk
+      if (!req.user.cafeId) {
+        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+      }
+      if (!order.cartId || order.cartId.toString() !== req.user.cafeId.toString()) {
+        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+      }
     }
 
     // Check if order can be modified - only allow adding items until payment is done
@@ -935,8 +1013,14 @@ const addItemsToOrder = async (req, res) => {
     }
 
     // Emit socket event for real-time update
+    // Emit socket event to cafe room
     const io = req.app.get("io");
-    io.emit("orderUpdated", order);
+    const emitToCafe = req.app.get("emitToCafe");
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+    }
 
     // Print new KOT to printer (non-blocking)
     const kotIndex = order.kotLines.length - 1;
@@ -981,12 +1065,44 @@ const updateOrderStatus = async (req, res) => {
 
     // ADMIN FLEXIBLE STATUS CHANGES: Allow admins to change status to any valid status
     // This gives admins full control over order status regardless of normal flow
-    const validStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Finalized", "Paid", "Cancelled", "Returned"];
+    // Include both DINE_IN and TAKEAWAY statuses
+    const validStatuses = [
+      "Pending", "Confirmed", "Preparing", "Ready", "Served", "Finalized", "Paid", "Cancelled", "Returned",
+      // TAKEAWAY statuses
+      "Accept", "Accepted", "Being Prepared", "BeingPrepared", "Completed", "Exit"
+    ];
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ 
         message: `Invalid status: ${status}`,
         validStatuses
       });
+    }
+    
+    // For non-admin users, validate status transitions based on service type
+    if (req.user && !["admin", "franchise_admin", "super_admin"].includes(req.user.role)) {
+      const currentStatus = order.status;
+      const allowedTransitions = transitions[currentStatus] || new Set();
+      
+      // Normalize status names for comparison (handle "Being Prepared" vs "BeingPrepared")
+      const normalizedStatus = status === "Being Prepared" ? "BeingPrepared" : status;
+      const normalizedCurrent = currentStatus === "Being Prepared" ? "BeingPrepared" : currentStatus;
+      
+      // Check if transition is allowed
+      if (!allowedTransitions.has(status) && !allowedTransitions.has(normalizedStatus)) {
+        // Special handling: Allow "Accept" -> "Being Prepared" for takeaway orders starting from Pending
+        if (order.serviceType === "TAKEAWAY" && 
+            (currentStatus === "Pending" || currentStatus === "Accept" || currentStatus === "Accepted") &&
+            (status === "Being Prepared" || status === "BeingPrepared")) {
+          // Allow this transition
+        } else {
+          return res.status(400).json({ 
+            message: `Invalid status transition from ${currentStatus} to ${status}`,
+            currentStatus,
+            requestedStatus: status,
+            allowedTransitions: Array.from(allowedTransitions)
+          });
+        }
+      }
     }
 
     // Log the status change (admin has full control)
@@ -1107,11 +1223,17 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
-    if (["Paid", "Cancelled", "Returned"].includes(status)) {
-      await releaseTableForOrder(order, io);
+    // Release table for final statuses (Paid, Cancelled, Returned, Finalized)
+    const emitToCafe = req.app.get("emitToCafe");
+    if (["Paid", "Cancelled", "Returned", "Finalized"].includes(status)) {
+      await releaseTableForOrder(order, io, emitToCafe);
     }
 
-    io.emit("orderUpdated", order);
+    // Emit socket event to cafe room
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+    }
 
     console.log('Status updated successfully:', order._id, '→', status);
     return res.json(order);
@@ -1214,11 +1336,16 @@ const cancelOrderByCustomer = async (req, res) => {
     await order.save();
 
     // Release table if order is cancelled or returned
+    const emitToCafe = req.app.get("emitToCafe");
     if (["Cancelled", "Returned"].includes(status)) {
-      await releaseTableForOrder(order, io);
+      await releaseTableForOrder(order, io, emitToCafe);
     }
 
-    io.emit("orderUpdated", order);
+    // Emit socket event to cafe room
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+    }
 
     return res.json(order);
   } catch (err) {
@@ -1295,10 +1422,15 @@ const confirmPaymentByCustomer = async (req, res) => {
       }
     }
 
+    // Emit socket event to cafe room
+    const emitToCafe = req.app.get("emitToCafe");
+    
     // Release table
-    await releaseTableForOrder(order, io);
-
-    io.emit("orderUpdated", order);
+    await releaseTableForOrder(order, io, emitToCafe);
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+    }
 
     console.log('Payment confirmed by customer:', order._id);
     return res.json(order);
@@ -1366,12 +1498,15 @@ const deleteOrder = async (req, res) => {
     const io = req.app.get("io");
     await releaseTableForOrder(order, io);
 
+    // Emit socket event before deletion
+    const emitToCafe = req.app.get("emitToCafe");
+    if (order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:deleted", { id: req.params.id });
+      emitToCafe(io, order.cartId.toString(), "orderDeleted", { id: req.params.id }); // Legacy support
+    }
+    
     // Delete the order
     await Order.findByIdAndDelete(req.params.id);
-
-    if (io) {
-      io.emit("orderDeleted", { id: req.params.id });
-    }
 
     return res.json({ 
       message: isPaidOrder 
@@ -1477,14 +1612,17 @@ const returnItems = async (req, res) => {
 
     await order.save();
 
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    
     // Release table if order is fully returned
     if (order.status === "Returned") {
-      await releaseTableForOrder(order, req.app.get("io"));
+      await releaseTableForOrder(order, io, emitToCafe);
     }
-
-    const io = req.app.get("io");
-    if (io) {
-      io.emit("orderUpdated", order);
+    if (io && order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
     }
 
     res.json({
@@ -1641,10 +1779,18 @@ const convertToTakeaway = async (req, res) => {
       // Save the updated original order
       await order.save();
 
+      // Emit socket events to cafe room
       const io = req.app.get("io");
+      const emitToCafe = req.app.get("emitToCafe");
       if (io) {
-        io.emit("newOrder", newTakeawayOrder);
-        io.emit("orderUpdated", order);
+        if (newTakeawayOrder.cartId) {
+          emitToCafe(io, newTakeawayOrder.cartId.toString(), "order:created", newTakeawayOrder);
+          emitToCafe(io, newTakeawayOrder.cartId.toString(), "newOrder", newTakeawayOrder); // Legacy support
+        }
+        if (order.cartId) {
+          emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+          emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+        }
       }
 
       return res.json({
@@ -1674,9 +1820,12 @@ const convertToTakeaway = async (req, res) => {
 
     await order.save();
 
+    // Emit socket event to cafe room
     const io = req.app.get("io");
-    if (io) {
-      io.emit("orderUpdated", order);
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && order.cartId) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
     }
 
     res.json({

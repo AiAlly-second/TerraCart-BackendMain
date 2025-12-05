@@ -321,11 +321,12 @@ exports.markPaymentPaid = async (req, res) => {
       order.paidAt = new Date();
       await order.save();
       const io = req.app.get("io");
+      const emitToCafe = req.app.get("emitToCafe");
       if (io) {
         io.emit("paymentUpdated", formatPaymentResponse(payment));
         io.emit("orderUpdated", order);
       }
-      await releaseTableForOrder(order, req.app.get("io"));
+      await releaseTableForOrder(order, io, emitToCafe);
     }
 
     return res.json(formatPaymentResponse(payment));

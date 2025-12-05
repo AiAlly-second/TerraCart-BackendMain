@@ -2,12 +2,24 @@ const EmployeeSchedule = require("../models/employeeScheduleModel");
 const Employee = require("../models/employeeModel");
 
 // Helper function to build query based on user role
-const buildHierarchyQuery = (user) => {
+const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
     query.cafeId = user._id;
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
+  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users - get their employee record to find cafeId
+    const employee = await Employee.findOne({ userId: user._id }).lean();
+    if (employee) {
+      query.cafeId = employee.cafeId;
+    }
+  } else if (user.role === "employee") {
+    // Legacy employee role - look up Employee
+    const employee = await Employee.findOne({ userId: user._id }).lean();
+    if (employee) {
+      query.cafeId = employee.cafeId;
+    }
   }
   return query;
 };
@@ -15,7 +27,7 @@ const buildHierarchyQuery = (user) => {
 // Get all schedules
 exports.getAllSchedules = async (req, res) => {
   try {
-    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const schedules = await EmployeeSchedule.find(hierarchyQuery)
       .populate("employeeId", "name employeeRole mobile")
       .sort({ createdAt: -1 });
@@ -31,7 +43,7 @@ exports.getEmployeeSchedule = async (req, res) => {
     const { employeeId } = req.params;
     
     // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
@@ -57,13 +69,50 @@ exports.getEmployeeSchedule = async (req, res) => {
   }
 };
 
+// Get current user's schedule (for mobile app)
+exports.getMySchedule = async (req, res) => {
+  try {
+    const user = req.user;
+    
+    // For mobile users, get their employee record
+    let employee;
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      employee = await Employee.findOne({ userId: user._id });
+    } else if (user.role === "employee") {
+      employee = await Employee.findOne({ userId: user._id });
+    }
+    
+    if (!employee) {
+      return res.status(404).json({ message: "Employee record not found for this user" });
+    }
+    
+    let schedule = await EmployeeSchedule.findOne({ employeeId: employee._id })
+      .populate("employeeId", "name employeeRole mobile");
+    
+    if (!schedule) {
+      // Create default schedule if doesn't exist
+      schedule = await EmployeeSchedule.create({
+        employeeId: employee._id,
+        weeklySchedule: [],
+        cafeId: employee.cafeId,
+        franchiseId: employee.franchiseId,
+      });
+      await schedule.populate("employeeId", "name employeeRole mobile");
+    }
+    
+    return res.json(schedule);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // Create or update schedule
 exports.upsertSchedule = async (req, res) => {
   try {
     const { employeeId } = req.body;
     
     // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
@@ -92,7 +141,7 @@ exports.updateTodayState = async (req, res) => {
     const { todayState } = req.body;
     
     // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
@@ -125,7 +174,7 @@ exports.deleteSchedule = async (req, res) => {
     const { employeeId } = req.params;
     
     // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });

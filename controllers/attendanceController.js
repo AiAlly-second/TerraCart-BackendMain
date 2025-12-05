@@ -3,12 +3,27 @@ const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
 // Helper function to build query based on user role
-const buildHierarchyQuery = (user) => {
+const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
     query.cafeId = user._id;
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
+  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users - get their employee record to find cafeId
+    const employee = await Employee.findOne({ userId: user._id }).lean();
+    if (employee) {
+      query.cafeId = employee.cafeId;
+      // For individual mobile users, only show their own attendance
+      query.employeeId = employee._id;
+    }
+  } else if (user.role === "employee") {
+    // Legacy employee role - look up Employee
+    const employee = await Employee.findOne({ userId: user._id }).lean();
+    if (employee) {
+      query.cafeId = employee.cafeId;
+      query.employeeId = employee._id;
+    }
   }
   return query;
 };
@@ -17,7 +32,7 @@ const buildHierarchyQuery = (user) => {
 exports.getAllAttendance = async (req, res) => {
   try {
     const { employeeId, startDate, endDate, status } = req.query;
-    const query = buildHierarchyQuery(req.user);
+    const query = await buildHierarchyQuery(req.user);
 
     if (employeeId) {
       query.employeeId = employeeId;
@@ -56,8 +71,9 @@ exports.getTodayAttendance = async (req, res) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = {
-      ...buildHierarchyQuery(req.user),
+      ...hierarchyQuery,
       date: { $gte: today, $lt: tomorrow },
     };
 
@@ -72,15 +88,52 @@ exports.getTodayAttendance = async (req, res) => {
   }
 };
 
+// Get past attendance records
+exports.getPastAttendance = async (req, res) => {
+  try {
+    const { employeeId, limit = 30 } = req.query;
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    
+    const query = {
+      ...hierarchyQuery,
+      date: { $lt: new Date() }, // Past dates only
+    };
+
+    if (employeeId) {
+      query.employeeId = employeeId;
+    }
+
+    const attendance = await EmployeeAttendance.find(query)
+      .populate("employeeId", "name mobile employeeRole")
+      .sort({ date: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    return res.json(attendance);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // Check-in employee
 exports.checkIn = async (req, res) => {
   try {
     const { employeeId, location, notes } = req.body;
     const user = req.user;
 
-    // Determine employeeId - must be provided in body
-    const targetEmployeeId = employeeId;
-
+    // Determine employeeId - for mobile users, use their own employeeId
+    let targetEmployeeId = employeeId;
+    
+    // If mobile user (waiter, cook, captain, manager) and no employeeId provided, use their own
+    if (!targetEmployeeId && ["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const employee = await Employee.findOne({ userId: user._id });
+      if (employee) {
+        targetEmployeeId = employee._id;
+      } else {
+        return res.status(404).json({ message: "Employee record not found for this user" });
+      }
+    }
+    
     if (!targetEmployeeId) {
       return res.status(400).json({ message: "Employee ID is required" });
     }
@@ -98,12 +151,27 @@ exports.checkIn = async (req, res) => {
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
+    // Mobile users can only check themselves in
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({ userId: user._id });
+      if (!userEmployee || userEmployee._id.toString() !== targetEmployeeId.toString()) {
+        return res.status(403).json({ message: "Access denied. You can only check yourself in." });
+      }
+    }
 
-    // Check if already checked in today
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Check if already checked in today (using IST timezone)
+    // IST is UTC+5:30
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
+    const istNow = new Date(now.getTime() + istOffset);
+    
+    // Get today's date in IST
+    const today = new Date(istNow);
+    today.setUTCHours(0, 0, 0, 0);
+    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
+    
     const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
 
     let attendance = await EmployeeAttendance.findOne({
       employeeId: targetEmployeeId,
@@ -114,7 +182,7 @@ exports.checkIn = async (req, res) => {
       return res.status(400).json({ message: "Employee already checked in today" });
     }
 
-    const checkInTime = new Date();
+    const checkInTime = new Date(); // Store in UTC (MongoDB default)
 
     // Get employee schedule to check if late
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
@@ -123,16 +191,20 @@ exports.checkIn = async (req, res) => {
 
     if (schedule && schedule.weeklySchedule) {
       const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-      const todayDay = dayNames[today.getDay()];
+      // Use IST date for day calculation
+      const todayDay = dayNames[istNow.getUTCDay()];
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.startTime) {
         const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-        const scheduledTime = new Date(today);
-        scheduledTime.setHours(hours, minutes, 0, 0);
-
-        if (checkInTime > scheduledTime) {
-          const lateMinutes = Math.floor((checkInTime - scheduledTime) / (1000 * 60));
+        // Create scheduled time in IST, then convert to UTC for comparison
+        const scheduledTimeIST = new Date(istNow);
+        scheduledTimeIST.setUTCHours(hours, minutes, 0, 0);
+        scheduledTimeIST.setTime(scheduledTimeIST.getTime() - istOffset); // Convert to UTC
+        
+        // Compare checkInTime (UTC) with scheduledTime (UTC)
+        if (checkInTime > scheduledTimeIST) {
+          const lateMinutes = Math.floor((checkInTime - scheduledTimeIST) / (1000 * 60));
           if (lateMinutes > 15) {
             // Late if more than 15 minutes
             status = "late";
@@ -171,6 +243,14 @@ exports.checkIn = async (req, res) => {
 
     await attendance.populate("employeeId", "name mobile employeeRole");
 
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendance.cafeId) {
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_in", attendance);
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    }
+
     return res.json({
       message: isLate ? "Checked in (Late)" : "Checked in successfully",
       attendance,
@@ -187,9 +267,19 @@ exports.checkOut = async (req, res) => {
     const { employeeId, location, notes } = req.body;
     const user = req.user;
 
-    // Determine employeeId - must be provided in body
-    const targetEmployeeId = employeeId;
-
+    // Determine employeeId - for mobile users, use their own employeeId
+    let targetEmployeeId = employeeId;
+    
+    // If mobile user (waiter, cook, captain, manager) and no employeeId provided, use their own
+    if (!targetEmployeeId && ["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const employee = await Employee.findOne({ userId: user._id });
+      if (employee) {
+        targetEmployeeId = employee._id;
+      } else {
+        return res.status(404).json({ message: "Employee record not found for this user" });
+      }
+    }
+    
     if (!targetEmployeeId) {
       return res.status(400).json({ message: "Employee ID is required" });
     }
@@ -207,12 +297,26 @@ exports.checkOut = async (req, res) => {
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
+    // Mobile users can only check themselves out
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({ userId: user._id });
+      if (!userEmployee || userEmployee._id.toString() !== targetEmployeeId.toString()) {
+        return res.status(403).json({ message: "Access denied. You can only check yourself out." });
+      }
+    }
 
-    // Find today's attendance
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Find today's attendance (using IST timezone)
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
+    const istNow = new Date(now.getTime() + istOffset);
+    
+    // Get today's date in IST
+    const today = new Date(istNow);
+    today.setUTCHours(0, 0, 0, 0);
+    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
+    
     const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
 
     const attendance = await EmployeeAttendance.findOne({
       employeeId: targetEmployeeId,
@@ -227,7 +331,7 @@ exports.checkOut = async (req, res) => {
       return res.status(400).json({ message: "Employee already checked out today" });
     }
 
-    const checkOutTime = new Date();
+    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
 
     // Calculate working hours
     const checkInTime = new Date(attendance.checkIn.time);
@@ -240,16 +344,20 @@ exports.checkOut = async (req, res) => {
 
     if (schedule && schedule.weeklySchedule) {
       const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-      const todayDay = dayNames[today.getDay()];
+      // Use IST date for day calculation
+      const todayDay = dayNames[istNow.getUTCDay()];
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        const scheduledEndTime = new Date(today);
-        scheduledEndTime.setHours(hours, minutes, 0, 0);
-
-        if (checkOutTime > scheduledEndTime) {
-          overtime = Math.floor((checkOutTime - scheduledEndTime) / (1000 * 60));
+        // Create scheduled end time in IST, then convert to UTC for comparison
+        const scheduledEndTimeIST = new Date(istNow);
+        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
+        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        
+        // Compare checkOutTime (UTC) with scheduledEndTime (UTC)
+        if (checkOutTime > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
         }
       }
     }
@@ -271,9 +379,132 @@ exports.checkOut = async (req, res) => {
     await attendance.save();
     await attendance.populate("employeeId", "name mobile employeeRole");
 
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendance.cafeId) {
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_out", attendance);
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    }
+
     return res.json({
       message: "Checked out successfully",
       attendance,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// Start break
+exports.startBreak = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    // Find attendance record
+    const attendance = await EmployeeAttendance.findById(id);
+    if (!attendance) {
+      return res.status(404).json({ message: "Attendance record not found" });
+    }
+
+    // Check access - mobile users can only manage their own attendance
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({ userId: user._id });
+      if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else {
+      // Admin access check
+      const query = await buildHierarchyQuery(user);
+      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    }
+
+    if (!attendance.checkIn.time) {
+      return res.status(400).json({ message: "Employee has not checked in" });
+    }
+
+    if (attendance.checkOut.time) {
+      return res.status(400).json({ message: "Employee has already checked out" });
+    }
+
+    if (attendance.breakStart) {
+      return res.status(400).json({ message: "Break already started" });
+    }
+
+    attendance.breakStart = new Date();
+    await attendance.save();
+    await attendance.populate("employeeId", "name mobile employeeRole");
+
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendance.cafeId) {
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:break_started", attendance);
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    }
+
+    return res.json({
+      message: "Break started",
+      attendance,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// End break
+exports.endBreak = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = req.user;
+
+    // Find attendance record
+    const attendance = await EmployeeAttendance.findById(id);
+    if (!attendance) {
+      return res.status(404).json({ message: "Attendance record not found" });
+    }
+
+    // Check access - mobile users can only manage their own attendance
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({ userId: user._id });
+      if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else {
+      // Admin access check
+      const query = await buildHierarchyQuery(user);
+      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    }
+
+    if (!attendance.breakStart) {
+      return res.status(400).json({ message: "Break has not been started" });
+    }
+
+    const breakEnd = new Date();
+    const breakDuration = Math.floor((breakEnd - attendance.breakStart) / (1000 * 60)); // in minutes
+    attendance.breakDuration = (attendance.breakDuration || 0) + breakDuration;
+    attendance.breakStart = null; // Clear break start time
+
+    await attendance.save();
+    await attendance.populate("employeeId", "name mobile employeeRole");
+
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendance.cafeId) {
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:break_ended", attendance);
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    }
+
+    return res.json({
+      message: "Break ended",
+      attendance,
+      breakDuration,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -284,7 +515,7 @@ exports.checkOut = async (req, res) => {
 exports.getAttendanceStats = async (req, res) => {
   try {
     const { employeeId, startDate, endDate } = req.query;
-    const query = buildHierarchyQuery(req.user);
+    const query = await buildHierarchyQuery(req.user);
 
     if (employeeId) {
       query.employeeId = employeeId;
@@ -332,7 +563,7 @@ exports.updateAttendanceStatus = async (req, res) => {
     }
 
     // Check hierarchy access
-    const query = buildHierarchyQuery(req.user);
+    const query = await buildHierarchyQuery(req.user);
     if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -359,4 +590,3 @@ exports.updateAttendanceStatus = async (req, res) => {
     return res.status(500).json({ message: err.message });
   }
 };
-

@@ -4,6 +4,7 @@ const { protect } = require("../middleware/authMiddleware");
 const {
   getAllSchedules,
   getEmployeeSchedule,
+  getMySchedule,
   upsertSchedule,
   updateTodayState,
   deleteSchedule,
@@ -12,6 +13,7 @@ const {
 router.use(protect); // All routes require authentication
 
 router.get("/", getAllSchedules);
+router.get("/my-schedule", getMySchedule);
 router.get("/employee/:employeeId", getEmployeeSchedule);
 router.post("/", upsertSchedule);
 router.put("/employee/:employeeId/today-state", updateTodayState);

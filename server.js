@@ -95,6 +95,11 @@ app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));
 app.use("/api/employee-skills", require("./routes/employeeSkillsRoutes"));
 app.use("/api/admin/costing", require("./routes/costingRoutes"));
 app.use("/api/costing-v2", require("./routes/costing-v2Routes"));
+app.use("/api/dashboard", require("./routes/dashboardRoutes"));
+app.use("/api/tasks", require("./routes/taskRoutes"));
+app.use("/api/customer-requests", require("./routes/customerRequestRoutes"));
+app.use("/api/compliance", require("./routes/complianceRoutes"));
+app.use("/api/kot", require("./routes/kotRoutes"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -120,17 +125,110 @@ if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_PUBLIC_UPLOADS ==
   }));
 }
 
-// Socket.IO connection handling
+// Socket.IO connection handling with room support
 io.on("connection", (socket) => {
+  console.log(`[SOCKET] Client connected: ${socket.id}`);
+  
+  // Join cafe room
+  socket.on("join:cafe", (cafeId) => {
+    if (cafeId) {
+      const room = `cafe:${cafeId}`;
+      socket.join(room);
+      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
+    }
+  });
+  
+  // Join franchise room
+  socket.on("join:franchise", (franchiseId) => {
+    if (franchiseId) {
+      const room = `franchise:${franchiseId}`;
+      socket.join(room);
+      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
+    }
+  });
+  
+  // Join role-based room
+  socket.on("join:role", (role) => {
+    if (role) {
+      const room = `role:${role}`;
+      socket.join(room);
+      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
+    }
+  });
+  
+  // Join cart room (for mobile app users)
+  socket.on("join:cart", (cartId) => {
+    if (cartId) {
+      const room = `cart:${cartId}`;
+      socket.join(room);
+      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
+      // Also join cafe room for backward compatibility
+      socket.emit("join:cafe", cartId);
+    }
+  });
+  
+  // Join kiosk room (for mobile app users)
+  socket.on("join:kiosk", (kioskId) => {
+    if (kioskId) {
+      const room = `kiosk:${kioskId}`;
+      socket.join(room);
+      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
+    }
+  });
+  
   socket.on("disconnect", (reason) => {
-    // Socket disconnected
+    console.log(`[SOCKET] Client disconnected: ${socket.id}, reason: ${reason}`);
   });
   
   // Handle socket errors
   socket.on("error", (error) => {
-    // Socket error
+    console.error(`[SOCKET] Error for ${socket.id}:`, error);
   });
 });
+
+// Helper function to emit to cafe room
+const emitToCafe = (io, cafeId, event, data) => {
+  if (cafeId) {
+    const cafeRoom = `cafe:${cafeId}`;
+    const cartRoom = `cart:${cafeId}`;
+    io.to(cafeRoom).emit(event, data);
+    io.to(cartRoom).emit(event, data); // Also emit to cart room
+    console.log(`[SOCKET] Emitted ${event} to cafe:${cafeId} and cart:${cafeId}`);
+  }
+};
+
+// Helper function to emit to franchise room
+const emitToFranchise = (io, franchiseId, event, data) => {
+  if (franchiseId) {
+    io.to(`franchise:${franchiseId}`).emit(event, data);
+    console.log(`[SOCKET] Emitted ${event} to franchise:${franchiseId}`);
+  }
+};
+
+// Helper function to emit to cart room
+const emitToCart = (io, cartId, event, data) => {
+  if (cartId) {
+    const cartRoom = `cart:${cartId}`;
+    const cafeRoom = `cafe:${cartId}`;
+    io.to(cartRoom).emit(event, data);
+    io.to(cafeRoom).emit(event, data); // Also emit to cafe room for backward compatibility
+    console.log(`[SOCKET] Emitted ${event} to cart:${cartId}`);
+  }
+};
+
+// Helper function to emit to kiosk room
+const emitToKiosk = (io, kioskId, event, data) => {
+  if (kioskId) {
+    io.to(`kiosk:${kioskId}`).emit(event, data);
+    console.log(`[SOCKET] Emitted ${event} to kiosk:${kioskId}`);
+  }
+};
+
+// Make helpers available to routes
+app.set("emitToCafe", emitToCafe);
+app.set("emitToFranchise", emitToFranchise);
+app.set("emitToCart", emitToCart);
+app.set("emitToKiosk", emitToKiosk);
 
 // Make io available to routes
 app.set("io", io);

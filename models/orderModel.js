@@ -51,6 +51,13 @@ const orderSchema = new mongoose.Schema(
         "Paid",
         "Cancelled",
         "Returned",
+        // Takeaway-specific statuses
+        "Accept",
+        "Accepted",
+        "Being Prepared",
+        "BeingPrepared",
+        "Completed",
+        "Exit",
       ],
       default: "Pending",
     },

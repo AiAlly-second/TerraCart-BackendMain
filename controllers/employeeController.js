@@ -122,10 +122,67 @@ exports.createEmployee = async (req, res) => {
       employeeData.email = employeeData.email.toLowerCase().trim();
     }
     
-    // Remove password from employeeData (it's only for User account creation if needed)
+    // Extract password for User account creation
     const { password, ...employeeDataToSave } = employeeData;
     
+    // Create employee record
     const employee = await Employee.create(employeeDataToSave);
+    
+    // If email and password are provided, and employee role is a mobile role, create User account
+    const mobileRoles = ['waiter', 'cook', 'captain', 'manager'];
+    if (employeeData.email && password && mobileRoles.includes(employee.employeeRole)) {
+      try {
+        // Check if User account already exists with this email
+        const existingUser = await User.findOne({ email: employeeData.email });
+        
+        if (existingUser) {
+          console.log(`[EMPLOYEE] User account already exists for email: ${employeeData.email}`);
+          // Update existing user's role if needed
+          if (!mobileRoles.includes(existingUser.role)) {
+            existingUser.role = employee.employeeRole;
+          }
+          // Link userId to employee and cafeId to user
+          existingUser.cafeId = employee.cafeId;
+          existingUser.employeeId = employee._id;
+          existingUser.franchiseId = employee.franchiseId || existingUser.franchiseId;
+          await existingUser.save();
+          
+          // Link userId in employee
+          employee.userId = existingUser._id;
+          await employee.save();
+          
+          console.log(`[EMPLOYEE] Updated existing user role to: ${employee.employeeRole} and linked userId`);
+        } else {
+          // Create new User account for mobile login
+          const userData = {
+            name: employee.name,
+            email: employeeData.email,
+            password: password,
+            role: employee.employeeRole, // Set role to match employee role (waiter, cook, captain, manager)
+            cafeId: employee.cafeId, // Link to cart/kiosk
+            employeeId: employee._id, // Link to employee
+          };
+          
+          // Set franchiseId if employee has one
+          if (employee.franchiseId) {
+            userData.franchiseId = employee.franchiseId;
+          }
+          
+          const user = await User.create(userData);
+          
+          // Link userId in employee
+          employee.userId = user._id;
+          await employee.save();
+          
+          console.log(`[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
+          console.log(`[EMPLOYEE] User ID: ${user._id}, Email: ${user.email}, CafeId: ${user.cafeId}`);
+        }
+      } catch (userError) {
+        console.error('[EMPLOYEE] Error creating User account:', userError.message);
+        // Don't fail employee creation if User creation fails - log error but continue
+        // Employee can still be created, and User account can be created manually later
+      }
+    }
     
     // Populate relationships before returning
     await employee.populate("cafeId", "name cafeName email");
@@ -194,11 +251,50 @@ exports.updateEmployee = async (req, res) => {
       req.body.email = req.body.email ? req.body.email.toLowerCase().trim() : null;
     }
     
-    // Remove password from update (it's only for User account creation if needed)
+    // Extract password for User account creation/update
     const { password, ...updateData } = req.body;
     
     Object.assign(employee, updateData);
     await employee.save();
+    
+    // If email and password are provided, and employee role is a mobile role, create/update User account
+    const mobileRoles = ['waiter', 'cook', 'captain', 'manager'];
+    if (employee.email && password && mobileRoles.includes(employee.employeeRole)) {
+      try {
+        // Check if User account exists with this email
+        let user = await User.findOne({ email: employee.email });
+        
+        if (user) {
+          // Update existing user's password and role if needed
+          user.password = password; // Password will be hashed by User model pre-save hook
+          if (!mobileRoles.includes(user.role)) {
+            user.role = employee.employeeRole;
+          }
+          await user.save();
+          console.log(`[EMPLOYEE] Updated User account for employee: ${employee.name}`);
+        } else {
+          // Create new User account for mobile login
+          const userData = {
+            name: employee.name,
+            email: employee.email,
+            password: password,
+            role: employee.employeeRole,
+          };
+          
+          // Set franchiseId if employee has one
+          if (employee.franchiseId) {
+            userData.franchiseId = employee.franchiseId;
+          }
+          
+          user = await User.create(userData);
+          console.log(`[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
+        }
+      } catch (userError) {
+        console.error('[EMPLOYEE] Error creating/updating User account:', userError.message);
+        // Don't fail employee update if User creation fails
+      }
+    }
+    
     await employee.populate("cafeId", "name cafeName email");
     await employee.populate("franchiseId", "name email");
     return res.json(employee);

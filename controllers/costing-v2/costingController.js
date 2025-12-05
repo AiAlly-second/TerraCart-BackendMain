@@ -25,7 +25,8 @@ const {
 
 /**
  * @route   GET /api/costing-v2/suppliers
- * @desc    Get all suppliers
+ * @desc    Get suppliers filtered by cart/kiosk/cafe
+ * @note    Suppliers are now cart-specific (have outletId field)
  */
 exports.getSuppliers = async (req, res) => {
   try {
@@ -35,23 +36,90 @@ exports.getSuppliers = async (req, res) => {
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
 
-    const suppliers = await Supplier.find(filter).sort({ name: 1 });
+    // Apply role-based filtering using buildCostingQuery (suppliers now have outletId)
+    const costingFilter = await buildCostingQuery(req.user, filter);
+    
+    console.log('[GET_SUPPLIERS] Filter:', JSON.stringify(costingFilter), 'User role:', req.user.role);
+
+    const suppliers = await Supplier.find(costingFilter).sort({ name: 1 });
     res.json({ success: true, data: suppliers });
   } catch (error) {
+    console.error('[GET_SUPPLIERS] Error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 /**
  * @route   POST /api/costing-v2/suppliers
- * @desc    Create supplier
+ * @desc    Create supplier (automatically associates with cart/kiosk/cafe)
  */
 exports.createSupplier = async (req, res) => {
   try {
-    const supplier = new Supplier(req.body);
+    // Automatically set outletId and franchiseId based on user role
+    const supplierData = { ...req.body };
+    
+    if (req.user.role === "admin") {
+      // Cart admin - supplier belongs to their cart
+      supplierData.outletId = req.user._id;
+      supplierData.franchiseId = req.user.franchiseId || req.user._id; // Fallback to _id if no franchiseId
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin - can specify outletId or create for a specific cart
+      // If outletId is provided in body, validate it belongs to their franchise
+      if (supplierData.outletId) {
+        const outlet = await User.findById(supplierData.outletId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ 
+            success: false, 
+            message: "Access denied: Kiosk does not belong to your franchise" 
+          });
+        }
+        supplierData.franchiseId = req.user._id;
+      } else {
+        // No outletId specified - cannot create supplier (suppliers are cart-specific)
+        return res.status(400).json({ 
+          success: false, 
+          message: "outletId is required. Please specify which cart/kiosk this supplier belongs to." 
+        });
+      }
+    } else if (req.user.role === "super_admin") {
+      // Super admin - must specify outletId and franchiseId
+      if (!supplierData.outletId) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "outletId is required" 
+        });
+      }
+      if (!supplierData.franchiseId) {
+        // Try to get franchiseId from the outlet
+        const outlet = await User.findById(supplierData.outletId);
+        if (outlet && outlet.franchiseId) {
+          supplierData.franchiseId = outlet.franchiseId;
+        } else {
+          return res.status(400).json({ 
+            success: false, 
+            message: "franchiseId is required or outlet must have a franchiseId" 
+          });
+        }
+      }
+    } else {
+      return res.status(403).json({ 
+        success: false, 
+        message: "Access denied: Invalid role" 
+      });
+    }
+    
+    console.log('[CREATE_SUPPLIER] Creating supplier with:', {
+      name: supplierData.name,
+      outletId: supplierData.outletId,
+      franchiseId: supplierData.franchiseId,
+      userRole: req.user.role
+    });
+    
+    const supplier = new Supplier(supplierData);
     await supplier.save();
     res.status(201).json({ success: true, data: supplier });
   } catch (error) {
+    console.error('[CREATE_SUPPLIER] Error:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -62,15 +130,43 @@ exports.createSupplier = async (req, res) => {
  */
 exports.updateSupplier = async (req, res) => {
   try {
-    const supplier = await Supplier.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
+    const supplier = await Supplier.findById(req.params.id);
     if (!supplier) {
       return res.status(404).json({ success: false, message: "Supplier not found" });
     }
-    res.json({ success: true, data: supplier });
+    
+    // Check access: cart admin can only update their own suppliers
+    if (req.user.role === "admin") {
+      if (supplier.outletId?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You can only update suppliers belonging to your cart" 
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can update suppliers from their franchise carts
+      const outlet = await User.findById(supplier.outletId);
+      if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: Supplier does not belong to your franchise" 
+        });
+      }
+    }
+    // Super admin can update any supplier
+    
+    // Prevent changing outletId/franchiseId (suppliers are cart-specific)
+    const updateData = { ...req.body };
+    delete updateData.outletId;
+    delete updateData.franchiseId;
+    
+    const updatedSupplier = await Supplier.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+    
+    res.json({ success: true, data: updatedSupplier });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -82,10 +178,32 @@ exports.updateSupplier = async (req, res) => {
  */
 exports.deleteSupplier = async (req, res) => {
   try {
-    const supplier = await Supplier.findByIdAndDelete(req.params.id);
+    const supplier = await Supplier.findById(req.params.id);
     if (!supplier) {
       return res.status(404).json({ success: false, message: "Supplier not found" });
     }
+    
+    // Check access: cart admin can only delete their own suppliers
+    if (req.user.role === "admin") {
+      if (supplier.outletId?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You can only delete suppliers belonging to your cart" 
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can delete suppliers from their franchise carts
+      const outlet = await User.findById(supplier.outletId);
+      if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: Supplier does not belong to your franchise" 
+        });
+      }
+    }
+    // Super admin can delete any supplier
+    
+    await Supplier.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Supplier deleted" });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -110,8 +228,17 @@ exports.getIngredients = async (req, res) => {
     if (category) filter.category = category;
     if (storageLocation) filter.storageLocation = storageLocation;
 
-    // Apply role-based filtering (ingredients can be shared, but if outletId is specified, filter by it)
-    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: !outletId });
+    // Apply role-based filtering
+    // For cart admins (role: "admin"), always filter by their outletId (req.user._id)
+    // This ensures cart admins only see ingredients belonging to their cart/kiosk
+    // For franchise/super admins, can see shared ingredients (outletId=null) or filter by specific outletId
+    const shouldSkipOutletFilter = (req.user.role === "franchise_admin" || req.user.role === "super_admin") && !outletId;
+    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: shouldSkipOutletFilter });
+    
+    // Log filtering for debugging
+    if (req.user.role === "admin") {
+      console.log('[GET_INGREDIENTS] Cart admin filter - outletId:', req.user._id.toString(), 'Filter:', JSON.stringify(costingFilter));
+    }
 
     let ingredients = await Ingredient.find(costingFilter)
       .populate("preferredSupplierId", "name")
@@ -463,8 +590,17 @@ exports.getInventoryTransactions = async (req, res) => {
  */
 exports.getLowStock = async (req, res) => {
   try {
-    // Apply role-based filtering (ingredients can be shared, so skip outletId filter)
-    const filter = await buildCostingQuery(req.user, { isActive: true }, { skipOutletFilter: true });
+    // Apply role-based filtering
+    // For cart admins, only show low stock items from their cart (filter by outletId)
+    // For franchise/super admins, can see all low stock items or filter by outletId
+    const shouldSkipOutletFilter = (req.user.role === "franchise_admin" || req.user.role === "super_admin");
+    const filter = await buildCostingQuery(req.user, { isActive: true }, { skipOutletFilter: shouldSkipOutletFilter });
+    
+    // Log filtering for debugging
+    if (req.user.role === "admin") {
+      console.log('[GET_LOW_STOCK] Cart admin filter - outletId:', req.user._id.toString());
+    }
+    
     const ingredients = await Ingredient.find(filter);
     const lowStock = ingredients.filter(
       ing => ing.qtyOnHand <= ing.reorderLevel
@@ -784,7 +920,13 @@ exports.getMenuItems = async (req, res) => {
  */
 exports.createMenuItem = async (req, res) => {
   try {
-    const { recipeId, sellingPrice } = req.body;
+    // Convert empty strings to null for optional ObjectId fields
+    const menuItemData = { ...req.body };
+    if (menuItemData.recipeId === '' || menuItemData.recipeId === null || menuItemData.recipeId === undefined) {
+      menuItemData.recipeId = null;
+    }
+
+    const { recipeId, sellingPrice } = menuItemData;
 
     // Recipe is optional - if provided, validate it exists
     if (recipeId) {
@@ -795,13 +937,13 @@ exports.createMenuItem = async (req, res) => {
     }
 
     // Set outlet context (menu items are kiosk-specific)
-    const data = await setOutletContext(req.user, { ...req.body });
+    const data = await setOutletContext(req.user, menuItemData);
 
     const menuItem = new MenuItem(data);
     
     // Set defaultMenuPath if default menu fields are provided
-    if (req.body.defaultMenuFranchiseId && req.body.defaultMenuCategoryName && req.body.defaultMenuItemName) {
-      menuItem.defaultMenuPath = `${req.body.defaultMenuFranchiseId}/${req.body.defaultMenuCategoryName}/${req.body.defaultMenuItemName}`;
+    if (menuItemData.defaultMenuFranchiseId && menuItemData.defaultMenuCategoryName && menuItemData.defaultMenuItemName) {
+      menuItem.defaultMenuPath = `${menuItemData.defaultMenuFranchiseId}/${menuItemData.defaultMenuCategoryName}/${menuItemData.defaultMenuItemName}`;
     }
     
     // Calculate metrics if recipe is provided
@@ -839,8 +981,14 @@ exports.updateMenuItem = async (req, res) => {
       return res.status(404).json({ success: false, message: "Menu item not found" });
     }
 
+    // Convert empty strings to null for optional ObjectId fields
+    const updateData = { ...req.body };
+    if (updateData.recipeId === '' || updateData.recipeId === null) {
+      updateData.recipeId = null;
+    }
+
     // Use recipeId from request body if provided, otherwise use existing recipeId
-    const recipeIdToUse = req.body.recipeId !== undefined ? req.body.recipeId : menuItem.recipeId;
+    const recipeIdToUse = updateData.recipeId !== undefined ? updateData.recipeId : menuItem.recipeId;
     
     // Validate recipe if provided
     if (recipeIdToUse) {
@@ -850,16 +998,16 @@ exports.updateMenuItem = async (req, res) => {
       }
     }
 
-    Object.assign(menuItem, req.body);
+    Object.assign(menuItem, updateData);
     
     // Ensure recipeId is set (can be null to unlink)
     menuItem.recipeId = recipeIdToUse || null;
     
     // Update defaultMenuPath if default menu fields are provided
-    if (req.body.defaultMenuFranchiseId || req.body.defaultMenuCategoryName || req.body.defaultMenuItemName) {
-      const franchiseId = req.body.defaultMenuFranchiseId || menuItem.defaultMenuFranchiseId;
-      const categoryName = req.body.defaultMenuCategoryName || menuItem.defaultMenuCategoryName;
-      const itemName = req.body.defaultMenuItemName || menuItem.defaultMenuItemName;
+    if (updateData.defaultMenuFranchiseId || updateData.defaultMenuCategoryName || updateData.defaultMenuItemName) {
+      const franchiseId = updateData.defaultMenuFranchiseId || menuItem.defaultMenuFranchiseId;
+      const categoryName = updateData.defaultMenuCategoryName || menuItem.defaultMenuCategoryName;
+      const itemName = updateData.defaultMenuItemName || menuItem.defaultMenuItemName;
       if (franchiseId && categoryName && itemName) {
         menuItem.defaultMenuPath = `${franchiseId}/${categoryName}/${itemName}`;
       }
@@ -1403,6 +1551,14 @@ exports.getFoodCostReport = async (req, res) => {
   try {
     const { from, to, outletId } = req.query;
     
+    // Log user info for debugging
+    console.log('[FOOD_COST_REPORT] User:', {
+      userId: req.user._id,
+      role: req.user.role,
+      email: req.user.email,
+      name: req.user.name
+    });
+    
     // Build date filter for transactions (use date field, not createdAt)
     const transactionDateFilter = {};
     if (from || to) {
@@ -1416,6 +1572,7 @@ exports.getFoodCostReport = async (req, res) => {
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
       transactionOutletFilter.outletId = req.user._id;
+      console.log('[FOOD_COST_REPORT] Cart admin filter - outletId:', req.user._id.toString());
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
       if (outletId) {
@@ -1453,6 +1610,7 @@ exports.getFoodCostReport = async (req, res) => {
     ]);
 
     const totalFoodCost = consumptionTransactions[0]?.totalFoodCost || 0;
+    console.log('[FOOD_COST_REPORT] Total food cost:', totalFoodCost, 'Filter:', JSON.stringify(transactionOutletFilter));
 
     // Get total sales (from orders - calculate from kotLines)
     const orderFilter = {};
@@ -1501,6 +1659,7 @@ exports.getFoodCostReport = async (req, res) => {
     ]);
 
     const totalSales = salesData[0]?.totalSales || 0;
+    console.log('[FOOD_COST_REPORT] Total sales:', totalSales, 'Order filter:', JSON.stringify(orderFilter));
     const foodCostPercent = totalSales > 0 ? (totalFoodCost / totalSales) * 100 : 0;
 
     res.json({
@@ -1669,6 +1828,14 @@ exports.getPnLReport = async (req, res) => {
   try {
     const { from, to, outletId } = req.query;
     
+    // Log user info for debugging
+    console.log('[PNL_REPORT] User:', {
+      userId: req.user._id,
+      role: req.user.role,
+      email: req.user.email,
+      name: req.user.name
+    });
+    
     // Build date filter for transactions (use date field, not createdAt)
     const transactionDateFilter = {};
     if (from || to) {
@@ -1682,6 +1849,7 @@ exports.getPnLReport = async (req, res) => {
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
       transactionOutletFilter.outletId = req.user._id;
+      console.log('[PNL_REPORT] Cart admin filter - outletId:', req.user._id.toString());
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
       if (outletId) {
@@ -1719,6 +1887,7 @@ exports.getPnLReport = async (req, res) => {
     ]);
 
     const foodCost = consumptionTransactions[0]?.totalFoodCost || 0;
+    console.log('[PNL_REPORT] Total food cost:', foodCost, 'Transaction filter:', JSON.stringify(transactionOutletFilter));
 
     // Get total sales (from orders - calculate from kotLines)
     const orderFilter = {};
@@ -1768,12 +1937,14 @@ exports.getPnLReport = async (req, res) => {
     ]);
 
     const totalSales = salesData[0]?.totalSales || 0;
+    console.log('[PNL_REPORT] Total sales:', totalSales, 'Order filter:', JSON.stringify(orderFilter));
 
     // Get labour costs
     const labourFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
       labourFilter.outletId = req.user._id;
+      console.log('[PNL_REPORT] Cart admin labour filter - outletId:', req.user._id.toString());
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
       if (outletId) {
@@ -1797,16 +1968,19 @@ exports.getPnLReport = async (req, res) => {
 
     const labourCosts = await LabourCost.find(labourFilter);
     const totalLabour = labourCosts.reduce((sum, l) => sum + l.amount, 0);
+    console.log('[PNL_REPORT] Total labour:', totalLabour, 'Labour filter:', JSON.stringify(labourFilter), 'Count:', labourCosts.length);
 
     // Get overheads (same filter as labour)
     const overheads = await Overhead.find(labourFilter);
     const totalOverhead = overheads.reduce((sum, o) => sum + o.amount, 0);
+    console.log('[PNL_REPORT] Total overhead:', totalOverhead, 'Overhead count:', overheads.length);
 
     // Get expenses
     const expenseFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
       expenseFilter.outletId = req.user._id;
+      console.log('[PNL_REPORT] Cart admin expense filter - outletId:', req.user._id.toString());
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
       if (outletId) {
@@ -1834,6 +2008,7 @@ exports.getPnLReport = async (req, res) => {
 
     const expenses = await CostingExpense.find(expenseFilter);
     const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    console.log('[PNL_REPORT] Total expenses:', totalExpenses, 'Expense filter:', JSON.stringify(expenseFilter), 'Count:', expenses.length);
 
     // Calculate P&L
     const totalCosts = foodCost + totalLabour + totalOverhead + totalExpenses;

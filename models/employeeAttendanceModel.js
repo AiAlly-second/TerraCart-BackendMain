@@ -40,6 +40,9 @@ const employeeAttendanceSchema = new mongoose.Schema(
       type: Number, // Break duration in minutes
       default: 0,
     },
+    breakStart: {
+      type: Date, // When break started (temporary, cleared when break ends)
+    },
     // Hierarchy relationships
     cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },

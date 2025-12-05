@@ -10,6 +10,8 @@ const {
   rejectCafeAdmin,
   toggleCafeStatus,
   getUserById,
+  getMe,
+  logoutUser,
   updateUser,
   toggleFranchiseStatus,
   deleteUser,
@@ -61,6 +63,12 @@ router.post(
 
 // ============= PROTECTED ROUTES =============
 router.use(protect);
+
+// Get current user (me)
+router.get("/me", getMe);
+
+// Logout user
+router.post("/logout", logoutUser);
 
 // Generate franchise code for current user (franchise admin only)
 router.post(

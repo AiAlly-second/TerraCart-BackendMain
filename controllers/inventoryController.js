@@ -1,23 +1,64 @@
 const InventoryItem = require("../models/inventoryModel");
 const User = require("../models/userModel");
+const Employee = require("../models/employeeModel");
+
+// Helper to get cafeId based on user role
+const getCafeId = async (user) => {
+  if (user.role === "admin") {
+    return user._id;
+  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users - these are direct User records with cafeId set during login
+    // First check if User has cafeId directly
+    if (user.cafeId) {
+      return user.cafeId;
+    }
+    // Fallback: try to find Employee record by email (since Employee doesn't have userId)
+    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+    return employee?.cafeId;
+  } else if (user.role === "employee") {
+    // Legacy employee role - look up Employee by email
+    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+    return employee?.cafeId;
+  } else if (user.role === "franchise_admin") {
+    return null; // Franchise admin doesn't have a specific cafeId
+  }
+  return null;
+};
 
 // Get all inventory items
 exports.getAllInventory = async (req, res) => {
   try {
     const query = {};
 
-    // Filter based on admin role
+    // Filter based on user role
     if (req.user && req.user.role === "admin" && req.user._id) {
       query.cafeId = req.user._id;
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - get cafeId from employee record
+      const cafeId = await getCafeId(req.user);
+      if (cafeId) {
+        query.cafeId = cafeId;
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (cafeId) {
+        query.cafeId = cafeId;
+      }
     }
 
     const items = await InventoryItem.find(query)
       .sort({ category: 1, name: 1 })
       .lean();
+    
+    console.log('[INVENTORY] getAllInventory - Found items:', items.length);
 
-    return res.json(items);
+    // Return in consistent format for both admin app and admin site
+    return res.json({
+      success: true,
+      data: items,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -40,6 +81,17 @@ exports.getInventoryItem = async (req, res) => {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - check if item belongs to their cafe
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
     }
 
     return res.json(item);
@@ -53,6 +105,20 @@ exports.createInventoryItem = async (req, res) => {
   try {
     const itemData = { ...req.body };
 
+    // Ensure required fields have defaults
+    if (itemData.unitPrice === undefined || itemData.unitPrice === null) {
+      itemData.unitPrice = 0;
+    }
+    if (itemData.quantity === undefined || itemData.quantity === null) {
+      itemData.quantity = 0;
+    }
+    if (itemData.minStockLevel === undefined || itemData.minStockLevel === null) {
+      itemData.minStockLevel = 0;
+    }
+    if (!itemData.unit) {
+      itemData.unit = 'piece';
+    }
+
     // Set hierarchy relationships
     if (req.user && req.user.role === "admin" && req.user._id) {
       itemData.cafeId = req.user._id;
@@ -63,12 +129,44 @@ exports.createInventoryItem = async (req, res) => {
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       itemData.franchiseId = req.user._id;
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - get cafeId from employee record
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId) {
+        return res.status(403).json({ message: "No cafe associated with this user" });
+      }
+      itemData.cafeId = cafeId;
+      // Get franchiseId from employee
+      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      if (employee && employee.franchiseId) {
+        itemData.franchiseId = employee.franchiseId;
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId) {
+        return res.status(403).json({ message: "No cafe associated with this user" });
+      }
+      itemData.cafeId = cafeId;
+      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      if (employee && employee.franchiseId) {
+        itemData.franchiseId = employee.franchiseId;
+      }
     }
 
     const item = await InventoryItem.create(itemData);
+    
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (item.cafeId) {
+      emitToCafe(io, item.cafeId.toString(), "inventory:created", item);
+      emitToCafe(io, item.cafeId.toString(), "inventory:updated", item);
+    }
+    
     return res.status(201).json(item);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[INVENTORY] Create error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to create inventory item' });
   }
 };
 
@@ -89,13 +187,33 @@ exports.updateInventoryItem = async (req, res) => {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - check if item belongs to their cafe
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
     }
 
     Object.assign(item, req.body);
     await item.save();
+    
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (item.cafeId) {
+      emitToCafe(io, item.cafeId.toString(), "inventory:updated", item);
+    }
+    
     return res.json(item);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[INVENTORY] Update error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to update inventory item' });
   }
 };
 
@@ -116,8 +234,26 @@ exports.deleteInventoryItem = async (req, res) => {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - check if item belongs to their cafe
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
     }
 
+    // Emit socket event before deletion
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (item.cafeId) {
+      emitToCafe(io, item.cafeId.toString(), "inventory:deleted", { id: req.params.id });
+    }
+    
     await InventoryItem.findByIdAndDelete(req.params.id);
     return res.json({ message: "Inventory item deleted successfully" });
   } catch (err) {
@@ -143,6 +279,17 @@ exports.updateStock = async (req, res) => {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - check if item belongs to their cafe
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      }
     }
 
     if (operation === "add") {
@@ -158,7 +305,8 @@ exports.updateStock = async (req, res) => {
     await item.save();
     return res.json(item);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[INVENTORY] Update error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to update inventory item' });
   }
 };
 
@@ -167,14 +315,54 @@ exports.getInventoryStats = async (req, res) => {
   try {
     const query = {};
 
-    // Filter based on admin role
+    // Filter based on user role
     if (req.user && req.user.role === "admin" && req.user._id) {
       query.cafeId = req.user._id;
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - get cafeId from employee record
+      const cafeId = await getCafeId(req.user);
+      if (cafeId) {
+        query.cafeId = cafeId;
+        console.log('[INVENTORY] getInventoryStats - Mobile user cafeId:', cafeId);
+      } else {
+        console.log('[INVENTORY] getInventoryStats - No cafeId found for mobile user:', req.user._id);
+        // Return empty stats if no cafeId
+        return res.json({
+          success: true,
+          data: {
+            totalItems: 0,
+            lowStockItems: 0,
+            outOfStockItems: 0,
+            totalValue: 0,
+            categories: {},
+          },
+        });
+      }
+    } else if (req.user?.role === "employee") {
+      const cafeId = await getCafeId(req.user);
+      if (cafeId) {
+        query.cafeId = cafeId;
+      } else {
+        return res.json({
+          success: true,
+          data: {
+            totalItems: 0,
+            lowStockItems: 0,
+            outOfStockItems: 0,
+            totalValue: 0,
+            categories: {},
+          },
+        });
+      }
     }
+    
+    console.log('[INVENTORY] getInventoryStats - Query:', JSON.stringify(query, null, 2));
 
     const allItems = await InventoryItem.find(query).lean();
+    
+    console.log('[INVENTORY] getInventoryStats - Found items:', allItems.length);
 
     const stats = {
       totalItems: allItems.length,
@@ -203,7 +391,11 @@ exports.getInventoryStats = async (req, res) => {
       }
     });
 
-    return res.json(stats);
+    // Return in consistent format for both admin app and admin site
+    return res.json({
+      success: true,
+      data: stats,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

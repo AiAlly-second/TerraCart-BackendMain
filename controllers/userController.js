@@ -1,4 +1,5 @@
 const User = require("../models/userModel");
+const Employee = require("../models/employeeModel");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
@@ -105,7 +106,22 @@ exports.loginUser = async (req, res) => {
     }
 
     // Find user by email (case-insensitive)
-    const user = await User.findOne({ email: email.toLowerCase().trim() });
+    const normalizedEmail = email.toLowerCase().trim();
+    let user = await User.findOne({ email: normalizedEmail });
+    
+    // Check if this is a mobile app login
+    const isMobileLogin = req.headers['x-app-login'] === 'mobile';
+    
+    // For mobile app login, also check Employee model if User not found
+    if (isMobileLogin && !user) {
+      const employee = await Employee.findOne({ email: normalizedEmail }).lean();
+      if (employee) {
+        // If employee has a userId, get the User account
+        if (employee.userId) {
+          user = await User.findById(employee.userId);
+        }
+      }
+    }
     
     // Use generic error message to prevent user enumeration
     if (!user) {
@@ -118,7 +134,122 @@ exports.loginUser = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Check if user is admin
+    // For mobile app login, handle employee roles
+    if (isMobileLogin) {
+      const allowedMobileRoles = ['waiter', 'cook', 'captain', 'manager'];
+      let actualRole = user.role;
+      let cafeId = null;
+      let franchiseId = null;
+      
+      // For all mobile users, look up Employee record to get cafeId
+      // Employee model uses email to link to User (no userId field)
+      const employee = await Employee.findOne({ 
+        email: normalizedEmail
+      }).lean();
+      
+      if (employee) {
+        // Check if employee is active
+        if (employee.isActive === false) {
+          return res.status(403).json({ 
+            message: "Your account has been deactivated. Please contact your administrator." 
+          });
+        }
+        
+        // Use employee role if user role is "employee", otherwise use user role
+        if (user.role === 'employee' && allowedMobileRoles.includes(employee.employeeRole)) {
+          actualRole = employee.employeeRole;
+        }
+        
+        cafeId = employee.cafeId;
+        franchiseId = employee.franchiseId;
+        
+        // Ensure bidirectional linking: userId in Employee, cafeId/employeeId in User
+        const updatePromises = [];
+        
+        // Link userId in Employee if missing
+        if (!employee.userId || employee.userId.toString() !== user._id.toString()) {
+          employee.userId = user._id;
+          updatePromises.push(Employee.findByIdAndUpdate(employee._id, { userId: user._id }));
+        }
+        
+        // Update User with cafeId and employeeId if missing
+        if (!user.cafeId || user.cafeId.toString() !== cafeId?.toString()) {
+          updatePromises.push(User.findByIdAndUpdate(user._id, { 
+            cafeId: cafeId,
+            employeeId: employee._id,
+            franchiseId: franchiseId || user.franchiseId
+          }));
+          user.cafeId = cafeId;
+          user.employeeId = employee._id;
+        } else if (!user.employeeId || user.employeeId.toString() !== employee._id.toString()) {
+          updatePromises.push(User.findByIdAndUpdate(user._id, { employeeId: employee._id }));
+          user.employeeId = employee._id;
+        }
+        
+        // Execute updates
+        if (updatePromises.length > 0) {
+          await Promise.all(updatePromises);
+          console.log('[LOGIN] Updated Employee-User linking');
+        }
+        
+        console.log('[LOGIN] Mobile user employee found:', {
+          userId: user._id,
+          email: normalizedEmail,
+          employeeId: employee._id,
+          employeeRole: employee.employeeRole,
+          actualRole: actualRole,
+          cafeId: cafeId,
+          franchiseId: franchiseId
+        });
+      } else {
+        console.log('[LOGIN] No employee record found for mobile user:', {
+          userId: user._id,
+          email: normalizedEmail,
+          userRole: user.role
+        });
+      }
+      
+      // Check if role is one of the allowed mobile roles
+      if (allowedMobileRoles.includes(actualRole)) {
+        // Ensure we have cafeId from employee record
+        if (!cafeId) {
+          return res.status(403).json({ 
+            message: "No cafe associated with this account. Please contact your administrator." 
+          });
+        }
+        // Check if user is active
+        if (user.isActive === false) {
+          return res.status(403).json({ 
+            message: "Your account has been deactivated. Please contact your administrator." 
+          });
+        }
+        
+        // Create token and send response for mobile users
+        const token = generateToken(user._id);
+        return res.json({
+          success: true,
+          token: token,
+          user: {
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            role: actualRole, // Use the actual role (waiter, cook, captain, manager)
+            cafeId: cafeId || user.cafeId,
+            employeeId: user.employeeId,
+            franchiseId: franchiseId || user.franchiseId,
+            franchiseCode: user.franchiseCode,
+            cartCode: user.cartCode,
+          },
+        });
+      }
+      
+      // If not an allowed role, deny access
+      return res.status(403).json({ 
+        message: "Access denied. Mobile app login is only available for waiter, cook, captain, and manager roles." 
+      });
+    }
+
+    // For web/admin login, only allow admin roles
     if (user.role !== 'admin') {
       return res.status(403).json({ message: "Access denied. Admin only." });
     }
@@ -747,6 +878,63 @@ exports.toggleCafeStatus = async (req, res) => {
 
 // @desc    Get single user
 // @route   GET /api/users/:id
+// @desc    Get current user (me)
+// @route   GET /api/users/me
+exports.getMe = async (req, res) => {
+  try {
+    const user = req.user;
+    if (!user) {
+      return res.status(401).json({ message: "Not authorized" });
+    }
+
+    // For mobile users with role "employee", get the actual employee role
+    let userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      cafeId: user.cafeId,
+      franchiseId: user.franchiseId,
+      franchiseCode: user.franchiseCode,
+      cartCode: user.cartCode,
+      isActive: user.isActive,
+    };
+
+    if (user.role === 'employee') {
+      const employee = await Employee.findOne({ userId: user._id }).lean();
+      if (employee) {
+        userResponse.role = employee.employeeRole; // waiter, cook, captain, manager
+        userResponse.cafeId = employee.cafeId;
+        userResponse.franchiseId = employee.franchiseId;
+      }
+    }
+
+    res.json({
+      success: true,
+      user: userResponse,
+    });
+  } catch (error) {
+    console.error('[GET_ME] Error:', error.message);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
+// @desc    Logout user
+// @route   POST /api/users/logout
+exports.logoutUser = async (req, res) => {
+  try {
+    // Logout is handled client-side by clearing the token
+    // This endpoint just confirms the logout
+    res.json({
+      success: true,
+      message: "Logged out successfully",
+    });
+  } catch (error) {
+    console.error('[LOGOUT] Error:', error.message);
+    res.status(500).json({ message: "Server error" });
+  }
+};
+
 exports.getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.id).select('-password');

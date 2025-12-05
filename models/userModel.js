@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     role: {
       type: String,
-      enum: ["super_admin", "franchise_admin", "admin", "employee", "customer"],
+      enum: ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"],
       default: "customer",
     },
     
@@ -36,6 +36,9 @@ const userSchema = new mongoose.Schema(
     approvedAt: { type: Date },
     // Franchise relationship - cart admins belong to a franchise
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Mobile app user fields - link to Employee and Cart/Kiosk
+    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, sparse: true }, // Cart/Kiosk ID for mobile users
+    employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", index: true, sparse: true }, // Employee record for mobile users
     // Active/Inactive status for franchises (default: true for new franchises)
     isActive: { type: Boolean, default: true, index: true },
     // Franchise admin specific fields
