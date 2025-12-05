@@ -39,8 +39,8 @@ const adminLogin = async (req, res) => {
       });
     }
 
-    // Check if user is an admin role
-    if (!["super_admin", "franchise_admin", "admin"].includes(user.role)) {
+    // Check if user is an admin role (includes cart_admin for backward compatibility)
+    if (!["super_admin", "franchise_admin", "admin", "cart_admin"].includes(user.role)) {
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
@@ -148,7 +148,7 @@ const verifyAdminToken = async (req, res) => {
 
     const user = req.user;
 
-    if (!["super_admin", "franchise_admin", "admin"].includes(user.role)) {
+    if (!["super_admin", "franchise_admin", "admin", "cart_admin"].includes(user.role)) {
       return res.status(403).json({
         success: false,
         message: "Not authorized as admin",

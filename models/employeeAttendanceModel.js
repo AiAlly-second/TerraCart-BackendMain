@@ -25,11 +25,29 @@ const employeeAttendanceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["present", "absent", "late", "half_day", "on_leave", "sick"],
+      enum: ["present", "absent", "late", "half_day", "on_leave", "sick", "on_break", "completed"],
       default: "present",
     },
+    isOnBreak: {
+      type: Boolean,
+      default: false,
+    },
+    breakStart: {
+      type: Date,
+    },
+    breakEnd: {
+      type: Date,
+    },
+    breakMinutes: {
+      type: Number, // Total break duration in minutes
+      default: 0,
+    },
+    totalWorkingMinutes: {
+      type: Number, // Total working minutes (excluding breaks)
+      default: 0,
+    },
     workingHours: {
-      type: Number, // Total working hours in minutes
+      type: Number, // Total working hours in minutes (deprecated, use totalWorkingMinutes)
       default: 0,
     },
     overtime: {
@@ -37,7 +55,7 @@ const employeeAttendanceSchema = new mongoose.Schema(
       default: 0,
     },
     breakDuration: {
-      type: Number, // Break duration in minutes
+      type: Number, // Break duration in minutes (deprecated, use breakMinutes)
       default: 0,
     },
     // Hierarchy relationships

@@ -13,7 +13,7 @@ exports.protect = async (req, res, next) => {
       token = req.headers.authorization.split(' ')[1];
 
       // Verify token
-      const secret = process.env.JWT_SECRET || 'your-secret-key';
+      const secret = process.env.JWT_SECRET || 'sarva-cafe-secret-key-2025';
       const decoded = jwt.verify(token, secret);
 
       // Get user from token (always fetch fresh from DB to check current status)
@@ -127,13 +127,28 @@ exports.authorize = (allowedRoles = []) => (req, res, next) => {
     return res.status(401).json({ message: 'Not authorized' });
   }
 
-  const userRole = req.user.role || 'user';
+  // Ensure userRole is a string and trim any whitespace
+  const userRole = String(req.user.role || 'user').trim();
   
-  if (!allowedRoles.includes(userRole)) {
+  // Normalize allowedRoles to strings and trim
+  const normalizedAllowedRoles = allowedRoles.map(role => String(role).trim());
+  
+  // Debug logging with request path
+  console.log(`[AUTHORIZE] ${req.method} ${req.originalUrl || req.path} - Checking access for role: "${userRole}"`);
+  console.log(`[AUTHORIZE] Allowed roles:`, normalizedAllowedRoles);
+  
+  // Check if role is in allowed roles (case-sensitive but normalized)
+  const hasAccess = normalizedAllowedRoles.includes(userRole);
+  
+  if (!hasAccess) {
+    console.log(`[AUTHORIZE] ❌ Access DENIED for role "${userRole}" on ${req.method} ${req.originalUrl || req.path}`);
     return res.status(403).json({ 
-      message: `Not authorized for this action. Required roles: ${allowedRoles.join(', ')}` 
+      message: `Not authorized for this action. Required roles: ${normalizedAllowedRoles.join(', ')}`,
+      userRole: userRole,
+      allowedRoles: normalizedAllowedRoles
     });
   }
 
+  console.log(`[AUTHORIZE] ✅ Access GRANTED for role "${userRole}" on ${req.method} ${req.originalUrl || req.path}`);
   return next();
 };

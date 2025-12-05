@@ -11,6 +11,20 @@ exports.getAllInventory = async (req, res) => {
       query.cafeId = req.user._id;
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
+    } else if (req.user && req.user.role === "manager") {
+      // Manager role: filter by their cafeId or franchiseId
+      if (req.user.cafeId) {
+        query.cafeId = req.user.cafeId;
+      } else if (req.user.franchiseId) {
+        query.franchiseId = req.user.franchiseId;
+      }
+    } else if (req.user && ["waiter", "cook", "captain"].includes(req.user.role)) {
+      // Mobile roles: filter by their cafeId
+      if (req.user.cafeId) {
+        query.cafeId = req.user.cafeId;
+      } else if (req.user.franchiseId) {
+        query.franchiseId = req.user.franchiseId;
+      }
     }
 
     const items = await InventoryItem.find(query)
@@ -63,6 +77,20 @@ exports.createInventoryItem = async (req, res) => {
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       itemData.franchiseId = req.user._id;
+    } else if (req.user && req.user.role === "manager") {
+      // Manager role: use their cafeId and franchiseId
+      if (req.user.cafeId) {
+        itemData.cafeId = req.user.cafeId;
+      }
+      if (req.user.franchiseId) {
+        itemData.franchiseId = req.user.franchiseId;
+      } else if (req.user.cafeId) {
+        // If no franchiseId, get it from the cafe admin
+        const cafeAdmin = await User.findById(req.user.cafeId);
+        if (cafeAdmin && cafeAdmin.franchiseId) {
+          itemData.franchiseId = cafeAdmin.franchiseId;
+        }
+      }
     }
 
     const item = await InventoryItem.create(itemData);

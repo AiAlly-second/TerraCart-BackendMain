@@ -22,7 +22,13 @@ router.get("/lookup/:slug", lookupTableBySlug);
 router.post("/:id/occupy", occupyTable); // Public endpoint to mark table as occupied
 
 // Admin-protected endpoints
-router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin"]), listTables);
+// Mobile app access: waiter, cook, manager, captain can view tables for order management
+router.get(
+  "/",
+  protect,
+  authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "manager", "captain"]),
+  listTables
+);
 router.post("/", protect, authorize(["admin"]), createTable);
 router.put("/:id", protect, authorize(["admin"]), updateTable);
 router.patch("/:id", protect, authorize(["admin"]), updateTable);

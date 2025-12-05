@@ -259,11 +259,23 @@ const createOrder = async (req, res) => {
     const seqStr = String(counter.seq).padStart(3, "0");
     const orderId = `ORD-${dateStr}${seqStr}`;
 
-    // Set cartId: priority 1) from authenticated cafe admin, 2) from table's cartId (for dine-in only), 3) from first active cafe (for takeaway)
+    // Set cartId: priority 1) from authenticated cafe admin,
+    // 2) from mobile user's cafeId,
+    // 3) from body.cartId (for unauthenticated mobile apps),
+    // 4) from table's cartId (for dine-in only),
+    // 5) from first active cafe (for takeaway)
     let cartId = null;
     if (req.user && req.user.role === "admin" && req.user._id) {
       cartId = req.user._id;
-      console.log('[ORDER] Using cartId from authenticated user:', cartId.toString());
+      console.log('[ORDER] Using cartId from authenticated admin user:', cartId.toString());
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role) && req.user.cafeId) {
+      // Mobile users (waiter, cook, captain, manager) - use their cafeId
+      cartId = req.user.cafeId;
+      console.log('[ORDER] Using cartId from mobile user (${req.user.role}):', cartId.toString());
+    } else if (req.body && req.body.cartId) {
+      // Allow unauthenticated mobile apps to pass cartId explicitly
+      cartId = req.body.cartId;
+      console.log('[ORDER] Using cartId from request body:', cartId?.toString?.() || cartId);
     } else if (!isTakeaway && tableDoc && tableDoc.cartId) {
       cartId = tableDoc.cartId;
       console.log('[ORDER] Using cartId from table:', cartId.toString());
@@ -281,6 +293,18 @@ const createOrder = async (req, res) => {
       } else {
         console.warn('[ORDER] WARNING: No active cafe admin found for takeaway order. Order will be created without cartId.');
         // Allow order to be created without cartId - it will be visible to super admin only
+      }
+    }
+    
+    // If still no cartId and we have a mobile user, try to find their cart from Employee
+    if (!cartId && req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      const Employee = require("../models/employeeModel");
+      const employee = await Employee.findOne({ 
+        name: req.user.name 
+      }).select('cafeId').lean();
+      if (employee && employee.cafeId) {
+        cartId = employee.cafeId;
+        console.log('[ORDER] Using cartId from employee record:', cartId.toString());
       }
     }
     
@@ -710,9 +734,10 @@ const getOrders = async (req, res) => {
   try {
     const query = {};
     
-    // Filter orders based on admin role:
+    // Filter orders based on role:
     // - Cafe admin: only orders from their cafe (cartId matches their _id)
     // - Franchise admin: only orders from cafes under their franchise (franchiseId matches their _id)
+    // - Mobile roles (waiter, cook, captain, manager): only orders from their cafe (cafeId)
     // - Super admin: all orders (no filter - they see everything)
     if (req.user && req.user.role === "admin" && req.user._id) {
       // Cafe admin - only see orders from their cafe
@@ -720,6 +745,35 @@ const getOrders = async (req, res) => {
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       // Franchise admin - only see orders from cafes under their franchise
       query.franchiseId = req.user._id;
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      // Mobile roles - filter by cartId (cafeId in user should match cartId in orders)
+      // First try to get cafeId from user (which should be populated from Employee during login)
+      let cafeId = req.user.cafeId;
+      
+      if (!cafeId) {
+        // Fallback: Try to get cafeId from Employee model by matching name
+        const Employee = require("../models/employeeModel");
+        const employee = await Employee.findOne({ 
+          name: req.user.name
+        }).select('cafeId franchiseId').lean();
+        if (employee && employee.cafeId) {
+          cafeId = employee.cafeId;
+        }
+      }
+      
+      if (cafeId) {
+        // Filter orders by cartId (which references the cafe admin's user ID)
+        query.cartId = cafeId;
+      } else if (req.user.franchiseId) {
+        // Fallback to franchiseId if cafeId not available
+        query.franchiseId = req.user.franchiseId;
+      } else {
+        // If no cafeId or franchiseId, return empty array
+        return res.json({
+          success: true,
+          data: []
+        });
+      }
     }
     // For super_admin, no filter (see all orders)
     
@@ -730,10 +784,18 @@ const getOrders = async (req, res) => {
       .limit(10000) // Safety limit to prevent infinite queries
       .populate("table")
       .lean();
-    return res.json(orders);
+    
+    // Return in the format expected by Flutter app
+    return res.json({
+      success: true,
+      data: orders
+    });
   } catch (err) {
     console.error('[GET_ORDERS] Error:', err);
-    return res.status(500).json({ message: err.message });
+    return res.status(500).json({ 
+      success: false,
+      message: err.message 
+    });
   }
 };
 

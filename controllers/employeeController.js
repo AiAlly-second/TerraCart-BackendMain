@@ -56,6 +56,7 @@ exports.getAllEmployees = async (req, res) => {
     const employees = await Employee.find(query)
       .populate("cafeId", "name cafeName email")
       .populate("franchiseId", "name email")
+      .populate("userId", "email")
       .sort({ createdAt: -1 });
     return res.json(employees);
   } catch (err) {
@@ -70,7 +71,8 @@ exports.getEmployee = async (req, res) => {
     const query = { _id: id, ...buildHierarchyQuery(req.user) };
     const employee = await Employee.findOne(query)
       .populate("cafeId", "name cafeName email")
-      .populate("franchiseId", "name email");
+      .populate("franchiseId", "name email")
+      .populate("userId", "email");
     
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
@@ -82,6 +84,8 @@ exports.getEmployee = async (req, res) => {
 };
 
 // Create employee
+// @note    Creates both User and Employee documents for unified user system
+// @note    User role is set from employeeRole (manager, captain, waiter, cook)
 exports.createEmployee = async (req, res) => {
   try {
     const employeeData = { ...req.body };
@@ -97,7 +101,80 @@ exports.createEmployee = async (req, res) => {
       });
     }
     
-    // Set hierarchy relationships based on user role
+    // Handle both 'role' and 'employeeRole' fields (frontend may send either)
+    // Priority: employeeRole > role
+    if (!employeeData.employeeRole && employeeData.role) {
+      employeeData.employeeRole = employeeData.role;
+    }
+    
+    // Ensure employeeRole is set
+    if (!employeeData.employeeRole) {
+      return res.status(400).json({ message: "employeeRole is required" });
+    }
+    
+    // Map employeeRole to user role (for unified system)
+    const roleMapping = {
+      "waiter": "waiter",
+      "chef": "cook",
+      "cook": "cook",
+      "manager": "manager",
+      "captain": "captain",
+      "cashier": "waiter", // Map cashier to waiter for now
+      "cleaner": "waiter", // Map cleaner to waiter for now
+    };
+    
+    // Get user role from employeeRole, default to employeeRole if not mapped
+    const userRole = roleMapping[employeeData.employeeRole] || employeeData.employeeRole;
+    const allowedEmployeeRoles = ["manager", "captain", "waiter", "cook"];
+    
+    // Only create User if role is one of the unified roles
+    let user = null;
+    if (allowedEmployeeRoles.includes(userRole)) {
+      // Check if user already exists (by email if provided)
+      if (employeeData.email) {
+        user = await User.findOne({ email: employeeData.email.toLowerCase().trim() });
+      }
+      
+      // If user doesn't exist, create one
+      if (!user) {
+        // Generate a default password if not provided (employee should change on first login)
+        const defaultPassword = employeeData.password || `Temp${Date.now()}`;
+        
+        const userData = {
+          name: employeeData.name,
+          email: employeeData.email || `${employeeData.name.toLowerCase().replace(/\s+/g, '.')}@employee.local`,
+          password: defaultPassword,
+          role: userRole,
+        };
+        
+        // Set hierarchy relationships based on user role
+        if (req.user.role === "admin") {
+          userData.cafeId = req.user._id;
+          if (req.user.franchiseId) {
+            userData.franchiseId = req.user.franchiseId;
+          }
+        } else if (req.user.role === "franchise_admin") {
+          userData.franchiseId = req.user._id;
+          // If cafeId is provided, validate it belongs to this franchise
+          if (employeeData.cafeId) {
+            const cafe = await User.findById(employeeData.cafeId);
+            if (!cafe || cafe.franchiseId?.toString() !== req.user._id.toString()) {
+              return res.status(403).json({ message: "Invalid cafe selection" });
+            }
+            userData.cafeId = employeeData.cafeId;
+          }
+        } else if (req.user.role === "super_admin") {
+          // Super admin can specify cafeId/franchiseId
+          if (employeeData.cafeId) userData.cafeId = employeeData.cafeId;
+          if (employeeData.franchiseId) userData.franchiseId = employeeData.franchiseId;
+        }
+        
+        user = await User.create(userData);
+        console.log(`[EMPLOYEE CREATION] ✅ Created User for employee: ${user.name} (User ID: ${user._id}, Role: ${userRole})`);
+      }
+    }
+    
+    // Set hierarchy relationships for Employee document
     if (req.user.role === "admin") {
       employeeData.cafeId = req.user._id;
       if (req.user.franchiseId) {
@@ -114,8 +191,31 @@ exports.createEmployee = async (req, res) => {
       }
     }
     
+    // Link employee to user if user was created/found
+    if (user) {
+      employeeData.userId = user._id;
+      // Sync email: prefer employeeData.email, fallback to user.email
+      if (!employeeData.email && user.email) {
+        employeeData.email = user.email;
+      } else if (employeeData.email && user.email !== employeeData.email) {
+        // If employee email differs from user email, update user email
+        await User.findByIdAndUpdate(user._id, { email: employeeData.email });
+      }
+    }
+    
     const employee = await Employee.create(employeeData);
-    return res.status(201).json(employee);
+    
+    // Return both user and employee data
+    const response = { ...employee.toObject() };
+    if (user) {
+      response.user = {
+        _id: user._id,
+        email: user.email,
+        role: user.role
+      };
+    }
+    
+    return res.status(201).json(response);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -143,6 +243,12 @@ exports.updateEmployee = async (req, res) => {
           minimumAge: MINIMUM_WORKING_AGE
         });
       }
+    }
+    
+    // Handle both 'role' and 'employeeRole' fields (frontend may send either)
+    // Priority: employeeRole > role
+    if (!req.body.employeeRole && req.body.role) {
+      req.body.employeeRole = req.body.role;
     }
     
     // Handle hierarchy changes based on role
@@ -173,10 +279,16 @@ exports.updateEmployee = async (req, res) => {
       delete req.body.franchiseId;
     }
     
+    // If email is being updated, sync it to the linked User document
+    if (req.body.email && employee.userId) {
+      await User.findByIdAndUpdate(employee.userId, { email: req.body.email });
+    }
+    
     Object.assign(employee, req.body);
     await employee.save();
     await employee.populate("cafeId", "name cafeName email");
     await employee.populate("franchiseId", "name email");
+    await employee.populate("userId", "email");
     return res.json(employee);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -224,6 +336,7 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({})
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
+        .populate("userId", "email")
         .sort({ createdAt: -1 });
 
       // Organize employees by franchise and cafe
@@ -277,6 +390,7 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({ franchiseId: userId })
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
+        .populate("userId", "email")
         .sort({ createdAt: -1 });
 
       const cafesWithEmployees = cafes.map(cafe => {
@@ -314,6 +428,7 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({ cafeId: userId })
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
+        .populate("userId", "email")
         .sort({ createdAt: -1 });
 
       // If cafe has a franchise, include franchise info
@@ -350,9 +465,44 @@ exports.getHierarchy = async (req, res) => {
       emp => !emp.franchiseId && !emp.cafeId
     );
 
+    // Helper function to ensure email is included in employee objects
+    const enrichEmployeeWithEmail = (emp) => {
+      const empObj = emp.toObject ? emp.toObject() : emp;
+      // If email is not on employee, get it from linked User
+      if (!empObj.email && empObj.userId) {
+        if (typeof empObj.userId === 'object' && empObj.userId.email) {
+          empObj.email = empObj.userId.email;
+        }
+      }
+      return empObj;
+    };
+
+    // Enrich all employees with email
+    const enrichHierarchy = (hier) => {
+      return hier.map(franchise => {
+        const enrichedFranchise = { ...franchise };
+        if (franchise.employees) {
+          enrichedFranchise.employees = franchise.employees.map(enrichEmployeeWithEmail);
+        }
+        if (franchise.cafes) {
+          enrichedFranchise.cafes = franchise.cafes.map(cafe => {
+            const enrichedCafe = { ...cafe };
+            if (cafe.employees) {
+              enrichedCafe.employees = cafe.employees.map(enrichEmployeeWithEmail);
+            }
+            return enrichedCafe;
+          });
+        }
+        return enrichedFranchise;
+      });
+    };
+
+    const enrichedHierarchy = enrichHierarchy(hierarchy);
+    const enrichedOrphanEmployees = orphanEmployees.map(enrichEmployeeWithEmail);
+
     return res.json({
-      hierarchy,
-      orphanEmployees: userRole === "super_admin" ? orphanEmployees : []
+      hierarchy: enrichedHierarchy,
+      orphanEmployees: userRole === "super_admin" ? enrichedOrphanEmployees : []
     });
   } catch (err) {
     console.error("[getHierarchy Error]:", err);

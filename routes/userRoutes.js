@@ -10,7 +10,9 @@ const {
   rejectCafeAdmin,
   toggleCafeStatus,
   getUserById,
+  getCurrentUser,
   updateUser,
+  updateEmergencyContacts,
   toggleFranchiseStatus,
   deleteUser,
   uploadFranchiseDocs,
@@ -61,6 +63,15 @@ router.post(
 
 // ============= PROTECTED ROUTES =============
 router.use(protect);
+
+// Get current user (for mobile app and web)
+router.get("/me", getCurrentUser);
+
+// Update emergency contacts for current user (mobile roles)
+router.patch(
+  "/me/emergency-contacts",
+  updateEmergencyContacts,
+);
 
 // Generate franchise code for current user (franchise admin only)
 router.post(

@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     role: {
       type: String,
-      enum: ["super_admin", "franchise_admin", "admin", "employee", "customer"],
+      enum: ["super_admin", "franchise_admin", "admin", "cart_admin", "manager", "captain", "waiter", "cook", "employee", "customer"],
       default: "customer",
     },
     
@@ -54,6 +54,45 @@ const userSchema = new mongoose.Schema(
     gstCertificateExpiry: { type: Date },
     shopActLicenseExpiry: { type: Date },
     fssaiLicenseExpiry: { type: Date },
+    // Tasks array for waiters and other mobile roles
+    tasks: [{
+      title: { type: String, required: true },
+      description: { type: String, default: "" },
+      category: { 
+        type: String, 
+        enum: ["daily", "weekly", "monthly", "cleaning", "inventory", "preparation", "safety", "finance", "other"],
+        default: "daily"
+      },
+      frequency: {
+        type: String,
+        enum: ["daily", "weekly", "monthly", "one_time"],
+        default: "daily"
+      },
+      status: {
+        type: String,
+        enum: ["incomplete", "complete"],
+        default: "incomplete"
+      },
+      priority: {
+        type: String,
+        enum: ["low", "medium", "high"],
+        default: "medium"
+      },
+      completedAt: { type: Date },
+      completedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now }
+    }],
+    // Emergency contacts for mobile roles
+    emergencyContacts: [{
+      name: { type: String, required: true },
+      phone: { type: String, required: true },
+      email: { type: String },
+      relationship: { type: String }, // e.g., "Spouse", "Parent", "Friend", etc.
+      isPrimary: { type: Boolean, default: false },
+      createdAt: { type: Date, default: Date.now },
+      updatedAt: { type: Date, default: Date.now }
+    }],
   },
   { timestamps: true }
 );

@@ -228,9 +228,10 @@ exports.listTables = async (req, res) => {
   try {
     await syncTableFields();
     
-    // Filter tables based on admin role:
+    // Filter tables based on role:
     // - Cafe admin: only see tables from their cafe (cartId matches their _id)
     // - Franchise admin: only see tables from cafes under their franchise (franchiseId matches their _id)
+    // - Mobile roles (waiter, manager, captain): only see tables from their cafe (cafeId)
     // - Super admin: see all tables (no filter)
     const query = {};
     if (req.user && req.user.role === "admin" && req.user._id) {
@@ -239,6 +240,35 @@ exports.listTables = async (req, res) => {
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       // Franchise admin - only see tables from cafes under their franchise
       query.franchiseId = req.user._id;
+    } else if (req.user && ["waiter", "manager", "captain"].includes(req.user.role)) {
+      // Mobile roles - filter by cartId (cafeId in user should match cartId in tables)
+      // First try to get cafeId from user (which should be populated from Employee during login)
+      let cafeId = req.user.cafeId;
+      
+      if (!cafeId) {
+        // Fallback: Try to get cafeId from Employee model by matching name
+        const Employee = require("../models/employeeModel");
+        const employee = await Employee.findOne({ 
+          name: req.user.name
+        }).select('cafeId franchiseId').lean();
+        if (employee && employee.cafeId) {
+          cafeId = employee.cafeId;
+        }
+      }
+      
+      if (cafeId) {
+        // Filter tables by cartId (which references the cafe admin's user ID)
+        query.cartId = cafeId;
+      } else if (req.user.franchiseId) {
+        // Fallback to franchiseId if cafeId not available
+        query.franchiseId = req.user.franchiseId;
+      } else {
+        // If no cafeId or franchiseId, return empty array in expected format
+        return res.json({
+          success: true,
+          data: []
+        });
+      }
     }
     // For super_admin, no filter (see all tables)
     
@@ -249,7 +279,11 @@ exports.listTables = async (req, res) => {
         waitlistLength: await countActiveWaitlist(table._id),
       }))
     );
-    return res.json(enriched);
+    // Return in the format expected by Flutter app
+    return res.json({
+      success: true,
+      data: enriched
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1384,13 +1418,39 @@ exports.unmergeTables = async (req, res) => {
 // Get table occupancy dashboard
 exports.getTableOccupancyDashboard = async (req, res) => {
   try {
-    // Filter tables based on admin role
+    // Filter tables based on role (same logic as listTables)
     const query = {};
     if (req.user && req.user.role === "admin" && req.user._id) {
       query.cartId = req.user._id;
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
+    } else if (req.user && ["waiter", "manager", "captain"].includes(req.user.role)) {
+      // Mobile roles - filter by cartId (cafeId in user should match cartId in tables)
+      let cafeId = req.user.cafeId;
+      
+      if (!cafeId) {
+        // Fallback: Try to get cafeId from Employee model by matching name
+        const Employee = require("../models/employeeModel");
+        const employee = await Employee.findOne({ 
+          name: req.user.name
+        }).select('cafeId franchiseId').lean();
+        if (employee && employee.cafeId) {
+          cafeId = employee.cafeId;
+        }
+      }
+      
+      if (cafeId) {
+        // Filter tables by cartId (which references the cafe admin's user ID)
+        query.cartId = cafeId;
+      } else if (req.user.franchiseId) {
+        // Fallback to franchiseId if cafeId not available
+        query.franchiseId = req.user.franchiseId;
+      } else {
+        // If no cafeId or franchiseId, return empty array
+        return res.json([]);
+      }
     }
+    // For super_admin, no filter (see all tables)
     
     const tables = await Table.find(query)
       .populate("currentOrder")

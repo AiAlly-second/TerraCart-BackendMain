@@ -95,6 +95,8 @@ const generateToken = (id) => {
 
 // @desc    Login user
 // @route   POST /api/users/login
+// @note    Mobile app login: requires x-app-login: mobile header, allows only cook, waiter, captain, manager
+// @note    Web login: allows admin roles (super_admin, franchise_admin, admin/cart_admin)
 exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -118,19 +120,96 @@ exports.loginUser = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Check if user is admin
-    if (user.role !== 'admin') {
-      return res.status(403).json({ message: "Access denied. Admin only." });
+    // Check if this is a mobile app login
+    const isMobileLogin = req.headers['x-app-login'] === 'mobile';
+
+    if (isMobileLogin) {
+      // Mobile app login: only allow cook, waiter, captain, manager
+      const allowedMobileRoles = ["cook", "waiter", "captain", "manager"];
+      if (!allowedMobileRoles.includes(user.role)) {
+        return res.status(403).json({ 
+          message: "Access denied. Mobile app login is only available for cook, waiter, captain, and manager roles.",
+          code: "MOBILE_LOGIN_RESTRICTED"
+        });
+      }
+    } else {
+      // Web login: allow admin roles (backward compatible with existing 'admin' role)
+      const allowedWebRoles = ["super_admin", "franchise_admin", "admin", "cart_admin"];
+      if (!allowedWebRoles.includes(user.role)) {
+        return res.status(403).json({ message: "Access denied. Admin access only." });
+      }
     }
 
     // Create token and send response
     const token = generateToken(user._id);
+    
+    // For mobile users, try to get cafeId from Employee model
+    let cafeId = user.cafeId || (user.role === 'admin' ? user._id : null);
+    let franchiseId = user.franchiseId;
+    let employeeId = null;
+    
+    if (isMobileLogin && ["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      // Try to get cafeId from Employee model by matching email or name
+      const Employee = require("../models/employeeModel");
+      const employee = await Employee.findOne({ 
+        name: user.name
+      }).select('_id cafeId franchiseId').lean();
+      
+      if (employee) {
+        employeeId = employee._id;
+        cafeId = employee.cafeId;
+        if (!franchiseId && employee.franchiseId) {
+          franchiseId = employee.franchiseId;
+        }
+
+        // Auto-create attendance if none exists for today
+        const EmployeeAttendance = require("../models/employeeAttendanceModel");
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        const existingAttendance = await EmployeeAttendance.findOne({
+          employeeId: employee._id,
+          date: { $gte: today, $lt: tomorrow },
+        });
+
+        if (!existingAttendance) {
+          // Create new attendance record with checkIn
+          await EmployeeAttendance.create({
+            employeeId: employee._id,
+            date: today,
+            checkIn: {
+              time: new Date(),
+              location: "",
+              notes: "Auto-checked in on mobile login",
+            },
+            status: "present",
+            cafeId: employee.cafeId,
+            franchiseId: employee.franchiseId,
+          });
+        }
+      }
+    }
+    
     res.json({
+      success: true,
       _id: user._id,
       name: user.name,
       email: user.email,
       role: user.role,
       token: token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        cafeId: cafeId,
+        franchiseId: franchiseId,
+        franchiseCode: user.franchiseCode || null,
+        cartCode: user.cartCode || null,
+        employeeId: employeeId?.toString(),
+      }
     });
   } catch (error) {
     console.error('[LOGIN] Error:', error.message);
@@ -276,8 +355,8 @@ exports.createUser = async (req, res) => {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    // Validate role
-    const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer"];
+    // Validate role - expanded to include new employee roles
+    const validRoles = ["super_admin", "franchise_admin", "admin", "cart_admin", "manager", "captain", "waiter", "cook", "employee", "customer"];
     if (!validRoles.includes(role)) {
       return res.status(400).json({ message: `Invalid role. Must be one of: ${validRoles.join(", ")}` });
     }
@@ -324,7 +403,66 @@ exports.createUser = async (req, res) => {
       console.log(`[FRANCHISE CODE] ✅ Generated: ${franchiseCodeData.franchiseCode} for "${name}"`);
     }
 
+    // Set hierarchy relationships for employee roles (manager, captain, waiter, cook)
+    const employeeRoles = ["manager", "captain", "waiter", "cook"];
+    if (employeeRoles.includes(role)) {
+      // Set cafeId/franchiseId based on who is creating the user
+      if (req.user) {
+        if (req.user.role === "admin") {
+          // Cart admin creating employee - link to their cart
+          userData.cafeId = req.user._id;
+          if (req.user.franchiseId) {
+            userData.franchiseId = req.user.franchiseId;
+          }
+        } else if (req.user.role === "franchise_admin") {
+          // Franchise admin creating employee - link to franchise
+          userData.franchiseId = req.user._id;
+          // If cafeId is provided in request, validate it belongs to this franchise
+          if (req.body.cafeId) {
+            const cafe = await User.findById(req.body.cafeId);
+            if (!cafe || cafe.franchiseId?.toString() !== req.user._id.toString()) {
+              return res.status(403).json({ message: "Invalid cafe selection" });
+            }
+            userData.cafeId = req.body.cafeId;
+          }
+        } else if (req.user.role === "super_admin") {
+          // Super admin can specify cafeId/franchiseId
+          if (req.body.cafeId) userData.cafeId = req.body.cafeId;
+          if (req.body.franchiseId) userData.franchiseId = req.body.franchiseId;
+        }
+      }
+    }
+
     const user = await User.create(userData);
+    
+    // If creating an employee role, also create Employee document
+    if (employeeRoles.includes(role)) {
+      try {
+        const Employee = require("../models/employeeModel");
+        const employeeData = {
+          name: user.name,
+          dateOfBirth: req.body.dateOfBirth ? new Date(req.body.dateOfBirth) : new Date(),
+          mobile: req.body.mobile || req.body.phone || '',
+          employeeRole: role, // Map user role to employeeRole
+          cafeId: user.cafeId,
+          franchiseId: user.franchiseId,
+          kycVerified: req.body.kycVerified || false,
+          isActive: req.body.isActive !== false,
+        };
+        
+        // Add optional employee fields
+        if (req.body.disability) employeeData.disability = req.body.disability;
+        if (req.body.deviceIssued) employeeData.deviceIssued = req.body.deviceIssued;
+        if (req.body.imei) employeeData.imei = req.body.imei;
+        if (req.body.documents) employeeData.documents = req.body.documents;
+        
+        const employee = await Employee.create(employeeData);
+        console.log(`[USER CREATION] ✅ Created User and Employee for ${role}: ${user.name} (User ID: ${user._id}, Employee ID: ${employee._id})`);
+      } catch (err) {
+        console.error("[USER CREATION] ❌ Failed to create Employee document:", err);
+        // Don't fail user creation if employee creation fails - user can still login
+      }
+    }
     
     // CRITICAL: When a new franchise is created, automatically clone the global default menu
     // This gives the franchise its own default menu template (independent from global)
@@ -724,6 +862,59 @@ exports.toggleCafeStatus = async (req, res) => {
   }
 };
 
+// @desc    Get current user (mobile app)
+// @route   GET /api/users/me
+exports.getCurrentUser = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ message: "Not authenticated" });
+    }
+    
+    const user = await User.findById(req.user._id).select('-password');
+    if (!user) return res.status(404).json({ message: "User not found" });
+    
+    // For mobile users, try to get cafeId from Employee model
+    let cafeId = user.cafeId || (user.role === 'admin' ? user._id : null);
+    let franchiseId = user.franchiseId;
+    
+    if (["waiter", "cook", "captain", "manager"].includes(user.role) && !cafeId) {
+      // Try to get cafeId from Employee model by matching name
+      const Employee = require("../models/employeeModel");
+      const employee = await Employee.findOne({ 
+        name: user.name
+      }).select('cafeId franchiseId').lean();
+      
+      if (employee) {
+        cafeId = employee.cafeId;
+        if (!franchiseId && employee.franchiseId) {
+          franchiseId = employee.franchiseId;
+        }
+      }
+    }
+    
+    const userResponse = {
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      cafeId: cafeId,
+      franchiseId: franchiseId,
+      // Short codes generated when franchise/cart are created
+      franchiseCode: user.franchiseCode || null,
+      cartCode: user.cartCode || null,
+      emergencyContacts: user.emergencyContacts || [], // Include emergency contacts
+    };
+    
+    res.json({
+      success: true,
+      data: userResponse, // Changed from 'user' to 'data' for consistency
+      user: userResponse, // Keep 'user' for backward compatibility
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Get single user
 // @route   GET /api/users/:id
 exports.getUserById = async (req, res) => {
@@ -762,6 +953,65 @@ exports.getUserById = async (req, res) => {
 
 // @desc    Update user
 // @route   PUT /api/users/:id
+// @desc    Update emergency contacts for current user (mobile roles)
+// @route   PATCH /api/users/me/emergency-contacts
+exports.updateEmergencyContacts = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const { emergencyContacts } = req.body;
+    
+    if (!Array.isArray(emergencyContacts)) {
+      return res.status(400).json({ message: "Emergency contacts must be an array" });
+    }
+
+    // Validate each contact
+    for (const contact of emergencyContacts) {
+      if (!contact.name || !contact.phone) {
+        return res.status(400).json({ message: "Each contact must have name and phone" });
+      }
+    }
+
+    // Update emergency contacts
+    user.emergencyContacts = emergencyContacts.map(contact => {
+      const now = new Date();
+      return {
+        name: contact.name?.trim() || '',
+        phone: contact.phone?.trim() || '',
+        email: contact.email?.trim() || '',
+        relationship: contact.relationship?.trim() || '',
+        isPrimary: contact.isPrimary === true || contact.isPrimary === 'true',
+        createdAt: contact.createdAt ? new Date(contact.createdAt) : now,
+        updatedAt: now,
+      };
+    });
+
+    await user.save();
+
+    // Convert to plain objects for JSON response
+    const savedContacts = user.emergencyContacts.map(contact => ({
+      name: contact.name,
+      phone: contact.phone,
+      email: contact.email || '',
+      relationship: contact.relationship || '',
+      isPrimary: contact.isPrimary || false,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+    }));
+
+    res.json({
+      success: true,
+      message: "Emergency contacts updated successfully",
+      data: savedContacts,
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
 exports.updateUser = async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
@@ -773,7 +1023,32 @@ exports.updateUser = async (req, res) => {
     // - Super admin: can update any user
     // - Franchise admin: can only update cafe admins under their franchise (cannot change role)
     // - Cafe admin: can only update themselves (cannot change role)
-    if (req.user.role === "franchise_admin") {
+    // - Mobile roles: can only update themselves (for emergency contacts)
+    const allowedMobileRoles = ["waiter", "cook", "captain", "manager"];
+    if (allowedMobileRoles.includes(req.user.role)) {
+      // Mobile users can only update themselves
+      if (user._id.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Access denied. You can only update your own profile." });
+      }
+      // Mobile users can only update emergency contacts
+      if (req.body.emergencyContacts) {
+        user.emergencyContacts = req.body.emergencyContacts.map(contact => ({
+          name: contact.name,
+          phone: contact.phone,
+          email: contact.email || '',
+          relationship: contact.relationship || '',
+          isPrimary: contact.isPrimary || false,
+          updatedAt: new Date(),
+        }));
+        await user.save();
+        return res.json({
+          success: true,
+          message: "Emergency contacts updated successfully",
+          data: user,
+        });
+      }
+      return res.status(403).json({ message: "Access denied. You can only update emergency contacts." });
+    } else if (req.user.role === "franchise_admin") {
       // Franchise admin can only update cafe admins (role: "admin") under their franchise
       if (user.role !== "admin") {
         return res.status(403).json({ message: "Access denied. You can only update cafe admins under your franchise." });

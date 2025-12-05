@@ -22,8 +22,10 @@ router.post("/:id/kot", addKot);           // Order More → Confirm - public fo
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);
 router.patch("/:id/customer-status", cancelOrderByCustomer);  // Customer cancel/return - public with sessionToken verification
 
-/* ---------- optional helpers (admin only) ---------- */
-router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin"]), getOrders);
+/* ---------- optional helpers (admin + mobile roles) ---------- */
+// IMPORTANT: Specific route (/) must come before parameterized route (/:id)
+// Mobile app access: waiter, cook, captain, manager can view orders
+router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getOrders);
 router.get("/:id", getOrderById);  // Public for customers to view their order
 router.patch("/:id/status", protect, authorize(["admin", "franchise_admin", "super_admin"]), updateOrderStatus);
 router.post("/:id/add-items", protect, authorize(["admin", "franchise_admin", "super_admin"]), addItemsToOrder);

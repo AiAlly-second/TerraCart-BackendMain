@@ -93,6 +93,11 @@ app.use("/api/employees", require("./routes/employeeRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));
 app.use("/api/employee-skills", require("./routes/employeeSkillsRoutes"));
+app.use("/api/dashboard", require("./routes/dashboardRoutes"));
+app.use("/api/tasks", require("./routes/taskRoutes"));
+app.use("/api/kot", require("./routes/kotRoutes"));
+app.use("/api/customer-requests", require("./routes/customerRequestRoutes"));
+app.use("/api/compliance", require("./routes/complianceRoutes"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {
@@ -152,8 +157,26 @@ const startServer = async () => {
     await connectDB();
     
     const PORT = process.env.PORT || 5001;
-    server.listen(PORT, () => {
-      // Server started
+    const HOST = process.env.HOST || '0.0.0.0'; // Listen on all interfaces for mobile access
+    server.listen(PORT, HOST, () => {
+      console.log(`🚀 Server running on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+      // Get network interfaces to show actual IP
+      const os = require('os');
+      const networkInterfaces = os.networkInterfaces();
+      let mobileIp = 'localhost';
+      for (const interfaceName in networkInterfaces) {
+        const interfaces = networkInterfaces[interfaceName];
+        for (const iface of interfaces) {
+          // Skip internal (i.e. 127.0.0.1) and non-IPv4 addresses
+          if (iface.family === 'IPv4' && !iface.internal) {
+            mobileIp = iface.address;
+            break;
+          }
+        }
+        if (mobileIp !== 'localhost') break;
+      }
+      console.log(`📱 Mobile access: http://${mobileIp}:${PORT}`);
+      console.log(`💡 Update Flutter app API config if IP changed: http://${mobileIp}:${PORT}/api`);
     });
   } catch (error) {
     process.exit(1);

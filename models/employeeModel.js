@@ -5,6 +5,8 @@ const employeeSchema = new mongoose.Schema(
     name: { type: String, required: true },
     dateOfBirth: { type: Date, required: true },
     mobile: { type: String, required: true },
+    // Optional email, kept in sync with linked User for convenience in admin UIs
+    email: { type: String },
     documents: {
       aadhar: { type: String },
       pan: { type: String },
@@ -26,8 +28,10 @@ const employeeSchema = new mongoose.Schema(
     employeeRole: {
       type: String,
       enum: [
-        // Cafe-level roles
-        "waiter", "chef", "manager", "cashier", "cleaner",
+        // Cafe-level roles (unified with User model)
+        "waiter", "cook", "captain", "manager", 
+        // Legacy roles (for backward compatibility)
+        "chef", "cashier", "cleaner",
         // Franchise-level roles
         "franchise_manager", "area_manager", "supervisor", "accountant", 
         "hr_manager", "operations_manager", "quality_auditor", "training_coordinator",
@@ -38,6 +42,8 @@ const employeeSchema = new mongoose.Schema(
     // Hierarchy relationships
     cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Link to User document for login access
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Status
     isActive: { type: Boolean, default: true },
   },

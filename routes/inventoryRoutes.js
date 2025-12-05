@@ -25,16 +25,33 @@ router.get("/", getAllInventory);
 router.get("/:id", getInventoryItem);
 
 // Create inventory item
-router.post("/", authorize(["admin", "franchise_admin", "super_admin"]), createInventoryItem);
+// Only managers (store managers) and web admins can add new items
+router.post(
+  "/",
+  authorize(["admin", "franchise_admin", "super_admin", "manager"]),
+  createInventoryItem
+);
 
-// Update inventory item
-router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin"]), updateInventoryItem);
+// Update inventory item (name, unit, thresholds, etc.) - manager + web admins
+router.patch(
+  "/:id",
+  authorize(["admin", "franchise_admin", "super_admin", "manager"]),
+  updateInventoryItem
+);
 
-// Update stock quantity
-router.patch("/:id/stock", authorize(["admin", "franchise_admin", "super_admin"]), updateStock);
+// Update stock quantity - allow manager and cook, plus web admins
+router.patch(
+  "/:id/stock",
+  authorize(["admin", "franchise_admin", "super_admin", "manager", "cook"]),
+  updateStock
+);
 
-// Delete inventory item
-router.delete("/:id", authorize(["admin", "franchise_admin", "super_admin"]), deleteInventoryItem);
+// Delete inventory item - manager + web admins
+router.delete(
+  "/:id",
+  authorize(["admin", "franchise_admin", "super_admin", "manager"]),
+  deleteInventoryItem
+);
 
 module.exports = router;
 
