@@ -260,6 +260,20 @@ exports.updateDefaultMenu = async (req, res) => {
       }
     }
 
+    // Sync default menu updates to costing menu items
+    try {
+      const { syncDefaultMenuToCosting } = require("../services/costing-v2/syncDefaultMenuToCosting");
+      const syncResult = await syncDefaultMenuToCosting(franchiseId);
+      if (syncResult.success && syncResult.updated > 0) {
+        console.log(`[DEFAULT MENU] ✅ Synced ${syncResult.updated} costing menu items with updated prices`);
+      } else if (syncResult.errors && syncResult.errors.length > 0) {
+        console.warn(`[DEFAULT MENU] ⚠️ Some costing items failed to sync:`, syncResult.errors);
+      }
+    } catch (syncError) {
+      console.error("[DEFAULT MENU] ❌ Error syncing to costing:", syncError);
+      // Don't fail the menu update if costing sync fails
+    }
+
     // Return the saved menu (convert to plain object for response)
     const responseMenu = defaultMenu.toObject ? defaultMenu.toObject() : defaultMenu;
 

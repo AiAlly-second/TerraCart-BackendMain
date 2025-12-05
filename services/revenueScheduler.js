@@ -280,7 +280,6 @@ const scheduleDailyRevenue = () => {
   
   // Check every minute
   setInterval(checkAndRunDaily, 60000);
-  console.log("✅ Daily revenue scheduler started (runs at 11:59 PM daily)");
 };
 
 // Schedule monthly revenue calculation (runs on the 1st of each month at 12:01 AM)
@@ -300,7 +299,6 @@ const scheduleMonthlyRevenue = () => {
   
   // Check every minute
   setInterval(checkAndRunMonthly, 60000);
-  console.log("✅ Monthly revenue scheduler started (runs on 1st of each month at 12:01 AM)");
 };
 
 module.exports = {

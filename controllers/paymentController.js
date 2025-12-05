@@ -256,11 +256,15 @@ exports.getPaymentsForOrder = async (req, res) => {
 exports.getLatestPaymentForOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
+    
+    // Order._id is a String (order number like "ORD-xxxxx"), and Payment.orderId stores the same string
+    // So we can directly use orderId to find the payment
     const payment = await Payment.findOne({ orderId })
       .sort({ createdAt: -1 })
       .lean();
     if (!payment) {
-      return res.status(404).json({ message: "No payments for this order" });
+      // Return 200 with null instead of 404 - no payment yet is a valid state
+      return res.json(null);
     }
     return res.json(formatPaymentResponse(payment));
   } catch (err) {

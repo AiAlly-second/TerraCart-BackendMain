@@ -5,6 +5,7 @@ const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const { printKOT } = require("../services/kotPrinter");
+const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
 
 // Money helpers
 const toPaise = (n) => Math.round(Number(n) * 100);
@@ -706,22 +707,26 @@ const finalizeOrder = async (req, res) => {
 // ---------------- GET ORDERS ----------------
 // IMPORTANT: This function returns ALL orders permanently - no date filtering or time limits
 // Orders are stored permanently in the database and will never be automatically deleted
+// CRITICAL: Each cart admin must only see their own orders (filtered by cartId)
 const getOrders = async (req, res) => {
   try {
     const query = {};
     
     // Filter orders based on admin role:
-    // - Cafe admin: only orders from their cafe (cartId matches their _id)
+    // - Cart admin (admin): ONLY see orders from their cart (cartId matches their _id) - CRITICAL FOR DATA ISOLATION
     // - Franchise admin: only orders from cafes under their franchise (franchiseId matches their _id)
     // - Super admin: all orders (no filter - they see everything)
     if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - only see orders from their cafe
+      // CRITICAL: Cart admin - ONLY see orders from their own cart
+      // This ensures complete data isolation between carts
       query.cartId = req.user._id;
+      console.log(`[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`);
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       // Franchise admin - only see orders from cafes under their franchise
       query.franchiseId = req.user._id;
+      console.log(`[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`);
     }
-    // For super_admin, no filter (see all orders)
+    // For super_admin, no query-level restriction (see all orders)
     
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
@@ -730,6 +735,27 @@ const getOrders = async (req, res) => {
       .limit(10000) // Safety limit to prevent infinite queries
       .populate("table")
       .lean();
+    
+    // Ensure franchiseId is set for orders that have cartId but missing franchiseId
+    const User = require("../models/userModel");
+    for (const order of orders) {
+      if (!order.franchiseId && order.cartId) {
+        try {
+          const cartId = order.cartId.toString ? order.cartId.toString() : order.cartId;
+          const cafe = await User.findById(cartId).select("franchiseId").lean();
+          if (cafe && cafe.franchiseId) {
+            order.franchiseId = cafe.franchiseId;
+            // Update order in database (non-blocking)
+            Order.findByIdAndUpdate(order._id, { franchiseId: cafe.franchiseId }).catch(err => {
+              console.warn(`[GET_ORDERS] Failed to update order ${order._id} franchiseId:`, err.message);
+            });
+          }
+        } catch (err) {
+          console.warn(`[GET_ORDERS] Error fetching franchiseId for order ${order._id}:`, err.message);
+        }
+      }
+    }
+    
     return res.json(orders);
   } catch (err) {
     console.error('[GET_ORDERS] Error:', err);
@@ -853,8 +879,13 @@ const addItemsToOrder = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cafe" });
+      // Cafe admin:
+      // - For DINE_IN orders, enforce strict cart ownership
+      // - For TAKEAWAY orders, allow modification even if cartId is missing/mismatched
+      if (order.serviceType !== "TAKEAWAY") {
+        if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Order does not belong to your cafe" });
+        }
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
@@ -862,11 +893,11 @@ const addItemsToOrder = async (req, res) => {
       }
     }
 
-    // Check if order can be modified (admin can add items to any status except Cancelled/Returned)
-    // Note: For Paid orders, items are added but invoice will need to be regenerated
-    if (["Cancelled", "Returned"].includes(order.status)) {
+    // Check if order can be modified - only allow adding items until payment is done
+    // Block adding items to Paid, Cancelled, or Returned orders
+    if (["Paid", "Cancelled", "Returned"].includes(order.status)) {
       return res.status(400).json({ 
-        message: `Cannot add items to order with status: ${order.status}. Order is already ${order.status.toLowerCase()}.`,
+        message: `Cannot add items to order with status: ${order.status}. Items can only be added to unpaid orders.`,
         currentStatus: order.status
       });
     }
@@ -930,13 +961,15 @@ const updateOrderStatus = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     // Check access permissions based on admin role:
-    // - Cafe admin: can only update orders from their cafe
+    // - Cafe admin: for DINE_IN, enforce cart ownership; for TAKEAWAY, allow flexible control
     // - Franchise admin: can only update orders from cafes under their franchise
     // - Super admin: can update all orders
     if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - check if order belongs to their cafe
-      if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cafe" });
+      // Cafe admin - only enforce cartId check for dine-in orders
+      if (order.serviceType !== "TAKEAWAY") {
+        if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Order does not belong to your cafe" });
+        }
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       // Franchise admin - check if order belongs to their franchise
@@ -993,6 +1026,56 @@ const updateOrderStatus = async (req, res) => {
     }
 
     await order.save();
+
+    // Automatically consume ingredients when order is marked as Ready, Paid, or Finalized
+    // This ensures ingredients are consumed when order is sold, even if it skips "Ready" status
+    const shouldConsumeIngredients = (status === "Ready" || status === "Paid" || status === "Finalized") && req.user;
+    
+    if (shouldConsumeIngredients) {
+      try {
+        console.log(`[COSTING] Order ${order._id} marked as ${status} - consuming ingredients...`);
+        console.log(`[COSTING] Order details:`, {
+          orderId: order._id,
+          cartId: order.cartId,
+          cafeId: order.cafeId,
+          kotLinesCount: order.kotLines?.length || 0,
+          itemsCount: order.kotLines?.reduce((sum, kot) => sum + (kot.items?.length || 0), 0) || 0,
+        });
+        
+        // Ensure order is populated before consumption
+        const orderForConsumption = await Order.findById(order._id).lean();
+        if (!orderForConsumption) {
+          console.error(`[COSTING] Order ${order._id} not found after save`);
+          return;
+        }
+        
+        const consumptionResult = await consumeIngredientsForOrder(orderForConsumption, req.user._id);
+        if (consumptionResult.success) {
+          console.log(`[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`);
+          if (consumptionResult.summary) {
+            console.log(`[COSTING] Consumption summary:`, {
+              itemsProcessed: consumptionResult.summary.itemsProcessed,
+              ingredientsConsumed: consumptionResult.summary.ingredientsConsumed.length,
+              totalCost: consumptionResult.summary.totalCost,
+              errors: consumptionResult.summary.errors.length,
+            });
+            if (consumptionResult.summary.errors.length > 0) {
+              console.warn(`[COSTING] ⚠️ Consumption errors:`, consumptionResult.summary.errors);
+            }
+          }
+        } else {
+          console.warn(`[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`, consumptionResult.error || consumptionResult.message);
+          if (consumptionResult.summary?.errors) {
+            console.warn(`[COSTING] Errors:`, consumptionResult.summary.errors);
+          }
+          // Don't fail the order status update if consumption fails - log warning only
+        }
+      } catch (consumptionError) {
+        console.error(`[COSTING] ❌ Error consuming ingredients for order ${order._id}:`, consumptionError);
+        console.error(`[COSTING] Error stack:`, consumptionError.stack);
+        // Don't fail the order status update if consumption fails - log error only
+      }
+    }
 
     if (status === "Paid") {
       const { payment, created } = await ensurePaymentRecord(order, {
@@ -1140,6 +1223,87 @@ const cancelOrderByCustomer = async (req, res) => {
     return res.json(order);
   } catch (err) {
     console.error('Customer cancel/return error:', err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ---------------- CUSTOMER CONFIRM PAYMENT ----------------
+const confirmPaymentByCustomer = async (req, res) => {
+  try {
+    const { sessionToken, paymentMethod } = req.body;
+    const orderId = req.params.id;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Verify sessionToken for dine-in orders
+    if (order.serviceType === "DINE_IN") {
+      if (!sessionToken) {
+        return res.status(401).json({ message: "Not authorized, no token" });
+      }
+      
+      // Check sessionToken matches order's sessionToken or table's sessionToken
+      let tokenMatches = false;
+      if (order.sessionToken === sessionToken) {
+        tokenMatches = true;
+      } else if (order.table) {
+        const table = await Table.findById(order.table);
+        if (table && table.sessionToken === sessionToken) {
+          tokenMatches = true;
+        }
+      }
+      
+      if (!tokenMatches) {
+        return res.status(403).json({ message: "Not authorized, invalid token" });
+      }
+    }
+
+    // Check if order can be confirmed as paid (must be Finalized or Completed)
+    const allowedStatuses = ["Finalized", "Completed"];
+    
+    if (!allowedStatuses.includes(order.status)) {
+      return res.status(400).json({ 
+        message: `Cannot confirm payment for order with status ${order.status}. Order must be Finalized or Completed.`,
+        currentStatus: order.status,
+        allowedStatuses
+      });
+    }
+
+    // Check if already paid
+    if (order.status === "Paid") {
+      return res.status(400).json({ message: "Order is already marked as paid" });
+    }
+
+    const io = req.app.get("io");
+
+    // Update order status to Paid
+    order.status = "Paid";
+    order.paidAt = new Date();
+    await order.save();
+
+    // Create or update payment record
+    const { payment, created } = await ensurePaymentRecord(order, {
+      status: "PAID",
+      method: paymentMethod || "CASH",
+      description: "Payment confirmed by customer",
+    });
+
+    if (payment && io) {
+      const payload = formatPaymentPayload(payment);
+      if (payload) {
+        io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
+      }
+    }
+
+    // Release table
+    await releaseTableForOrder(order, io);
+
+    io.emit("orderUpdated", order);
+
+    console.log('Payment confirmed by customer:', order._id);
+    return res.json(order);
+  } catch (err) {
+    console.error('Customer confirm payment error:', err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1534,6 +1698,7 @@ module.exports = {
   getOrderById,
   updateOrderStatus,
   cancelOrderByCustomer,
+  confirmPaymentByCustomer,
   deleteOrder,
   releaseTableForOrder,
   returnItems,

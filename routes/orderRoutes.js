@@ -7,6 +7,7 @@ const {
   getOrderById,
   updateOrderStatus,
   cancelOrderByCustomer,
+  confirmPaymentByCustomer,
   deleteOrder,
   returnItems,
   convertToTakeaway,
@@ -21,6 +22,7 @@ router.post("/", createOrder);             // first Confirm - public for custome
 router.post("/:id/kot", addKot);           // Order More → Confirm - public for customers
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);
 router.patch("/:id/customer-status", cancelOrderByCustomer);  // Customer cancel/return - public with sessionToken verification
+router.patch("/:id/confirm-payment", confirmPaymentByCustomer);  // Customer confirm payment - public with sessionToken verification
 
 /* ---------- optional helpers (admin only) ---------- */
 router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin"]), getOrders);
