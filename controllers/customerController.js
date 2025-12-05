@@ -3,10 +3,16 @@ const Feedback = require("../models/feedbackModel");
 const Order = require("../models/orderModel");
 
 // Helper function to build query based on user role
+// CRITICAL: Cart admins must only see their own data (filtered by cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cafeId = user._id;
+    // CRITICAL: Use cartId for proper data isolation (not cafeId)
+    // Check both cartId and cafeId for backward compatibility
+    query.$or = [
+      { cartId: user._id },
+      { cafeId: user._id }
+    ];
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   }

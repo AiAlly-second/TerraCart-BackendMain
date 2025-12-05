@@ -394,35 +394,56 @@ exports.getRevenueHistory = async (req, res) => {
 // Paid orders from deleted franchises are preserved in database but excluded from revenue calculations
 exports.getCurrentRevenue = async (req, res) => {
   try {
-    // First, get all ACTIVE franchises (franchise_admin users that exist AND are active)
+    // NOTE: current implementation uses in-memory aggregation over all paid orders.
+    // For high scale, replace this with a MongoDB aggregation pipeline like below:
+    //
+    // const pipeline = [
+    //   { $match: { status: "Paid" } },
+    //   {
+    //     $group: {
+    //       _id: "$franchiseId",
+    //       revenue: {
+    //         $sum: {
+    //           $sum: {
+    //             $map: {
+    //               input: "$kotLines",
+    //               as: "kot",
+    //               in: { $toDouble: { $ifNull: ["$$kot.totalAmount", 0] } }
+    //             }
+    //           }
+    //         }
+    //       },
+    //       orderCount: { $sum: 1 },
+    //       cartIds: { $addToSet: "$cartId" }
+    //     }
+    //   }
+    // ];
+    //
+    // const franchiseAgg = await Order.aggregate(pipeline);
+    //
+    // For now, keep existing logic but this comment shows the target approach.
+
+    // Existing implementation (works, but not optimal for millions of orders)
     const activeFranchises = await User.find({ 
       role: "franchise_admin",
-      isActive: true  // Only active franchises
+      isActive: true
     }).select("_id name").lean();
     
-    const activeFranchiseIds = new Set(
-      activeFranchises.map(f => f._id.toString())
-    );
-    
-    // Create a map for franchise names
+    const activeFranchiseIds = new Set(activeFranchises.map(f => f._id.toString()));
+
     const franchiseNameMap = new Map();
     activeFranchises.forEach((f) => {
       franchiseNameMap.set(f._id.toString(), f.name);
     });
 
-    // Get all paid orders (including from deleted franchises - they're preserved)
     const allOrders = await Order.find({ status: "Paid" }).lean();
-    
-    // Filter orders to only include those from ACTIVE franchises
     const activeOrders = allOrders.filter(order => {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       return franchiseId && activeFranchiseIds.has(franchiseId);
     });
 
-    // Calculate total revenue ONLY from active franchises
     const totalRevenue = calculateOrderRevenue(activeOrders);
 
-    // Get franchise breakdown (only active franchises)
     const franchiseMap = new Map();
     const cartMap = new Map();
 
@@ -430,7 +451,6 @@ exports.getCurrentRevenue = async (req, res) => {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       const cartId = order.cartId?.toString() || order.cartId;
 
-      // Only process orders from active franchises
       if (franchiseId && activeFranchiseIds.has(franchiseId)) {
         if (!franchiseMap.has(franchiseId)) {
           franchiseMap.set(franchiseId, {
@@ -440,14 +460,16 @@ exports.getCurrentRevenue = async (req, res) => {
           });
         }
         const franchise = franchiseMap.get(franchiseId);
-        const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+        const orderTotal = order.kotLines.reduce(
+          (sum, kot) => sum + Number(kot.totalAmount || 0),
+          0
+        );
         franchise.revenue += orderTotal;
         if (cartId) {
           franchise.cartIds.add(cartId);
         }
       }
 
-      // Only process cafes from active franchises
       if (cartId) {
         const orderFranchiseId = order.franchiseId?.toString() || order.franchiseId;
         if (orderFranchiseId && activeFranchiseIds.has(orderFranchiseId)) {
@@ -460,14 +482,16 @@ exports.getCurrentRevenue = async (req, res) => {
             });
           }
           const cart = cartMap.get(cartId);
-          const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+          const orderTotal = order.kotLines.reduce(
+            (sum, kot) => sum + Number(kot.totalAmount || 0),
+            0
+          );
           cart.revenue += orderTotal;
           cart.orderCount += 1;
         }
       }
     }
 
-    // Get cart names (only for active carts under active franchises)
     const cartIds = Array.from(cartMap.keys());
     const carts = await User.find({ 
       _id: { $in: cartIds },
@@ -482,7 +506,6 @@ exports.getCurrentRevenue = async (req, res) => {
       });
     });
 
-    // Build franchise revenue array (only active franchises)
     const franchiseRevenue = Array.from(franchiseMap.entries()).map(([id, data]) => ({
       franchiseId: id,
       franchiseName: franchiseNameMap.get(id) || "Unknown",
@@ -490,7 +513,6 @@ exports.getCurrentRevenue = async (req, res) => {
       cartCount: data.cartIds.size,
     }));
 
-    // Build cafe revenue array (only active cafes)
     const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
       cartId: id,
       cartName: cartMapNames.get(id)?.name || "Unknown",
@@ -500,7 +522,6 @@ exports.getCurrentRevenue = async (req, res) => {
       orderCount: data.orderCount,
     }));
 
-    // Count orders from deleted franchises (for information, not included in revenue)
     const deletedFranchiseOrders = allOrders.filter(order => {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       return franchiseId && !activeFranchiseIds.has(franchiseId);
@@ -510,17 +531,16 @@ exports.getCurrentRevenue = async (req, res) => {
     res.json({
       success: true,
       data: {
-        totalRevenue, // Only from active franchises
-        franchiseRevenue, // Only active franchises
-        cartRevenue, // Only active carts
-        totalOrders: activeOrders.length, // Only from active franchises
+        totalRevenue,
+        franchiseRevenue,
+        cartRevenue,
+        totalOrders: activeOrders.length,
         calculatedAt: new Date(),
-        // Additional info about preserved data from deleted franchises
         preservedData: {
           deletedFranchiseOrdersCount: deletedFranchiseOrders.length,
-          deletedFranchiseRevenue: deletedFranchiseRevenue,
-          note: "Paid orders from deleted franchises are preserved in database but excluded from active revenue calculations"
-        }
+          deletedFranchiseRevenue,
+          note: "Paid orders from deleted franchises are preserved in database but excluded from active revenue calculations",
+        },
       },
     });
   } catch (error) {

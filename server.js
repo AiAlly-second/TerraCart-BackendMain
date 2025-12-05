@@ -93,6 +93,8 @@ app.use("/api/employees", require("./routes/employeeRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));
 app.use("/api/employee-skills", require("./routes/employeeSkillsRoutes"));
+app.use("/api/admin/costing", require("./routes/costingRoutes"));
+app.use("/api/costing-v2", require("./routes/costing-v2Routes"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {

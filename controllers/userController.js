@@ -489,8 +489,26 @@ exports.registerCafeAdmin = async (req, res) => {
 
     const user = await User.create(userData);
 
+    // CRITICAL: Initialize new cart with EMPTY operational data
+    // This ensures the cart starts fresh with no orders, tables, or dashboard data
+    try {
+      const { initializeNewCart } = require("../utils/initializeNewCart");
+      const cartFranchiseId = user.franchiseId ? user.franchiseId.toString() : null;
+      
+      if (cartFranchiseId) {
+        await initializeNewCart(user._id, cartFranchiseId);
+      } else {
+        console.warn(`[CART INIT] ⚠️ No franchiseId for cart ${user.cartName} - skipping initialization`);
+      }
+    } catch (err) {
+      console.error("[CART INIT] ❌ Failed to initialize new cart:", err);
+      console.error("[CART INIT] Error details:", err.message);
+      // Don't fail user creation if initialization fails - cart will still work
+    }
+
     // CRITICAL: Push franchise's UNIQUE default menu to new cart
     // Each franchise has ONE unique menu, and cart gets EXACTLY that menu
+    // NOTE: Menu structure is copied (configuration), but NO operational data is copied
     try {
       const { pushDefaultMenuToCafe } = require("./defaultMenuController");
       // Use the saved user's franchiseId (which should be set from franchiseId variable)
@@ -500,6 +518,7 @@ exports.registerCafeAdmin = async (req, res) => {
       console.log(`[DEFAULT MENU] 🆕 NEW CART CREATED: ${user.cartName} (ID: ${user._id})`);
       console.log(`[DEFAULT MENU] Franchise ID: ${menuFranchiseId}`);
       console.log(`[DEFAULT MENU] Logic: Cart belongs to franchise → Cart gets franchise's UNIQUE menu`);
+      console.log(`[DEFAULT MENU] IMPORTANT: Only menu STRUCTURE is copied (configuration), NOT operational data`);
       
       if (!menuFranchiseId) {
         console.error(`[DEFAULT MENU] ❌ ERROR: No franchiseId for cart ${user.cartName}. Cart must belong to a franchise to get menu.`);
@@ -510,6 +529,7 @@ exports.registerCafeAdmin = async (req, res) => {
         console.log(`[DEFAULT MENU] 🔄 Syncing franchise ${menuFranchiseId}'s UNIQUE menu to NEW cart ${user.cartName}`);
         console.log(`[DEFAULT MENU] Cart will get EXACTLY what franchise admin defined in their default menu`);
         console.log(`[DEFAULT MENU] This is a clean sync - all old menu data will be deleted first`);
+        console.log(`[DEFAULT MENU] Operational data (orders, tables, dashboard) remains EMPTY - not copied`);
         
         const result = await pushDefaultMenuToCafe(user._id, menuFranchiseId, true); // true = replace mode (clean sync)
         
@@ -518,6 +538,7 @@ exports.registerCafeAdmin = async (req, res) => {
           console.log(`[DEFAULT MENU] Created: ${result.categoriesCreated} categories, ${result.itemsCreated} items`);
           console.log(`[DEFAULT MENU] Final: ${result.finalCategoryCount} categories, ${result.finalItemCount} items`);
           console.log(`[DEFAULT MENU] Cart menu matches franchise menu: ✅`);
+          console.log(`[DEFAULT MENU] Cart operational data (orders, tables, etc.) remains EMPTY: ✅`);
         } else {
           console.warn(`[DEFAULT MENU] ⚠️ Push to cart ${user.cartName} returned: ${result.message}`);
           console.warn(`[DEFAULT MENU] Franchise ${menuFranchiseId} may not have a default menu created yet.`);
@@ -734,7 +755,7 @@ exports.getUserById = async (req, res) => {
     // Authorization checks:
     // - Super admin: can view any user
     // - Franchise admin: can only view cafe admins under their franchise
-    // - Cafe admin: can only view themselves
+    // - Cafe admin: can view themselves OR their franchise admin (for invoice purposes)
     if (req.user.role === "franchise_admin") {
       // Franchise admin can only view cafe admins (role: "admin") under their franchise
       if (user.role !== "admin") {
@@ -744,9 +765,14 @@ exports.getUserById = async (req, res) => {
         return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
       }
     } else if (req.user.role === "admin") {
-      // Cafe admin can only view themselves
-      if (user._id.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Access denied. You can only view your own profile." });
+      // Cafe admin can view themselves OR their franchise admin (for invoice/billing purposes)
+      const isSelf = user._id.toString() === req.user._id.toString();
+      const isFranchiseAdmin = user.role === "franchise_admin" && 
+                               req.user.franchiseId && 
+                               user._id.toString() === req.user.franchiseId.toString();
+      
+      if (!isSelf && !isFranchiseAdmin) {
+        return res.status(403).json({ message: "Access denied. You can only view your own profile or your franchise admin's profile." });
       }
     }
     // Super admin can view anyone (no additional check needed)

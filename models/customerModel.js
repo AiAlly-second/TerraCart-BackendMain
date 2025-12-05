@@ -8,14 +8,12 @@ const customerSchema = new mongoose.Schema(
       type: String, 
       trim: true, 
       lowercase: true,
-      index: true,
       sparse: true // Allow multiple nulls
     },
     phone: { 
       type: String, 
       required: false, // Made optional to support email-only customers
       trim: true,
-      index: true,
       sparse: true // Allow multiple nulls
     },
     
@@ -55,9 +53,7 @@ const customerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Index for fast lookup by phone or email
-customerSchema.index({ phone: 1 });
-customerSchema.index({ email: 1 });
+// Indexes for fast lookup by customer within cafe or franchise
 customerSchema.index({ cafeId: 1, phone: 1 });
 customerSchema.index({ franchiseId: 1, phone: 1 });
 

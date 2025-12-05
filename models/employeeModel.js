@@ -5,6 +5,7 @@ const employeeSchema = new mongoose.Schema(
     name: { type: String, required: true },
     dateOfBirth: { type: Date, required: true },
     mobile: { type: String, required: true },
+    email: { type: String, trim: true, lowercase: true, sparse: true }, // Email for login access
     documents: {
       aadhar: { type: String },
       pan: { type: String },

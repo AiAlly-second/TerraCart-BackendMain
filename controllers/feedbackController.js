@@ -1,13 +1,19 @@
+const mongoose = require("mongoose");
 const Feedback = require("../models/feedbackModel");
 const Customer = require("../models/customerModel");
 const Order = require("../models/orderModel");
 
 // Helper function to build query based on user role
+// CRITICAL: Cart admins must only see their own data (filtered by cafeId/cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
+    // CRITICAL: Cart admin - ONLY see feedback from their own cart
+    // Feedback model uses cafeId (which should match cart admin's _id)
     query.cafeId = user._id;
+    console.log(`[FEEDBACK_QUERY] Cart admin ${user._id} - filtering by cafeId: ${user._id}`);
   } else if (user.role === "franchise_admin") {
+    // Franchise admin - see feedback from all cafes under their franchise
     query.franchiseId = user._id;
   }
   return query;
@@ -60,10 +66,11 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
   }
   
   // Also filter by cafe/franchise to avoid cross-cafe matches
+  // Convert ObjectId to string/ObjectId as needed
   if (cafeId) {
-    query.cafeId = cafeId;
+    query.cafeId = cafeId._id || cafeId;
   } else if (franchiseId) {
-    query.franchiseId = franchiseId;
+    query.franchiseId = franchiseId._id || franchiseId;
   }
   
   // Try to find existing customer
@@ -86,13 +93,19 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
     }
     
     // Update phone if provided and different (and not a placeholder)
-    if (normalizedPhone && !customer.phone.startsWith('email-') && customer.phone !== normalizedPhone) {
+    if (normalizedPhone && customer.phone && !customer.phone.startsWith('email-') && customer.phone !== normalizedPhone) {
       customer.phone = normalizedPhone;
       updated = true;
     }
     
     // If customer has placeholder phone but now has real phone, update it
     if (normalizedPhone && customer.phone && customer.phone.startsWith('email-')) {
+      customer.phone = normalizedPhone;
+      updated = true;
+    }
+    
+    // If customer has no phone but now has one, update it
+    if (normalizedPhone && !customer.phone) {
       customer.phone = normalizedPhone;
       updated = true;
     }
@@ -118,8 +131,8 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
       name: name ? name.trim() : "Guest",
       email: normalizedEmail || null,
       phone: phoneForNewCustomer,
-      cafeId: cafeId || null,
-      franchiseId: franchiseId || null,
+      cafeId: cafeId ? (cafeId._id || cafeId) : null,
+      franchiseId: franchiseId ? (franchiseId._id || franchiseId) : null,
       visitCount: 1,
       firstVisitAt: new Date(),
       lastVisitAt: new Date(),
@@ -172,27 +185,49 @@ exports.createFeedback = async (req, res) => {
     
     // If orderId is provided, fetch order to get cafeId, franchiseId, and tableId
     if (feedbackData.orderId) {
-      const order = await Order.findById(feedbackData.orderId);
-      if (order) {
-        feedbackData.cafeId = order.cafeId;
-        feedbackData.franchiseId = order.franchiseId;
-        cafeId = order.cafeId;
-        franchiseId = order.franchiseId;
-        if (order.table && !feedbackData.tableId) {
-          feedbackData.tableId = order.table;
+      try {
+        // Convert orderId to ObjectId if it's a string
+        const orderIdObj = mongoose.Types.ObjectId.isValid(feedbackData.orderId) 
+          ? new mongoose.Types.ObjectId(feedbackData.orderId)
+          : feedbackData.orderId;
+        
+        const order = await Order.findById(orderIdObj);
+        if (order) {
+          // Convert ObjectId to string/ObjectId as needed
+          feedbackData.cafeId = order.cafeId ? (order.cafeId._id || order.cafeId) : null;
+          feedbackData.franchiseId = order.franchiseId ? (order.franchiseId._id || order.franchiseId) : null;
+          cafeId = feedbackData.cafeId;
+          franchiseId = feedbackData.franchiseId;
+          if (order.table && !feedbackData.tableId) {
+            feedbackData.tableId = order.table._id || order.table;
+          }
+        } else {
+          console.warn(`Order not found for orderId: ${feedbackData.orderId}`);
         }
+      } catch (orderErr) {
+        console.error("Error fetching order:", orderErr);
+        // Continue without order data - feedback can still be created
       }
     }
     
     // Set hierarchy relationships if table is provided (but order wasn't)
     if (feedbackData.tableId && !feedbackData.cafeId) {
-      const Table = require("../models/tableModel");
-      const table = await Table.findById(feedbackData.tableId);
-      if (table) {
-        feedbackData.cafeId = table.cafeId;
-        feedbackData.franchiseId = table.franchiseId;
-        cafeId = table.cafeId;
-        franchiseId = table.franchiseId;
+      try {
+        const Table = require("../models/tableModel");
+        const tableIdObj = mongoose.Types.ObjectId.isValid(feedbackData.tableId) 
+          ? new mongoose.Types.ObjectId(feedbackData.tableId)
+          : feedbackData.tableId;
+        
+        const table = await Table.findById(tableIdObj);
+        if (table) {
+          feedbackData.cafeId = table.cafeId ? (table.cafeId._id || table.cafeId) : null;
+          feedbackData.franchiseId = table.franchiseId ? (table.franchiseId._id || table.franchiseId) : null;
+          cafeId = feedbackData.cafeId;
+          franchiseId = feedbackData.franchiseId;
+        }
+      } catch (tableErr) {
+        console.error("Error fetching table:", tableErr);
+        // Continue without table data
       }
     }
     
@@ -240,6 +275,18 @@ exports.createFeedback = async (req, res) => {
         // Continue with feedback creation even if customer processing fails
       }
     }
+    
+    // Validate required fields before creating feedback
+    if (!feedbackData.overallRating) {
+      return res.status(400).json({ message: "Overall rating is required" });
+    }
+    
+    // Ensure overallRating is a number between 1 and 5
+    const overallRating = Number(feedbackData.overallRating);
+    if (isNaN(overallRating) || overallRating < 1 || overallRating > 5) {
+      return res.status(400).json({ message: "Overall rating must be between 1 and 5" });
+    }
+    feedbackData.overallRating = overallRating;
     
     // Create feedback
     const feedback = await Feedback.create(feedbackData);

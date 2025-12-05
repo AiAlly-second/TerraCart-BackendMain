@@ -142,7 +142,8 @@ exports.getActivePaymentQRPublic = async (req, res) => {
     const qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
 
     if (!qrCode) {
-      return res.status(404).json({ message: "No active QR code found" });
+      // Return 200 with null instead of 404 - no active QR code is a valid state
+      return res.json(null);
     }
 
     return res.json({

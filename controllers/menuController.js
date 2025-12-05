@@ -319,6 +319,19 @@ exports.updateItem = async (req, res) => {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
+    // Auto-sync to costing if price was updated and user is cart admin
+    if (updates.price !== undefined && req.user.role === "admin" && item.cafeId) {
+      try {
+        const { syncDefaultMenuToCosting } = require("../services/costing-v2/syncDefaultMenuToCosting");
+        // Sync only this specific cart's menu to costing
+        await syncDefaultMenuToCosting(null, item.cafeId.toString(), item.cafeId.toString());
+        console.log(`[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${item.cafeId}`);
+      } catch (syncError) {
+        // Don't fail the request if sync fails - just log it
+        console.error(`[MENU CONTROLLER] Failed to auto-sync to costing:`, syncError.message);
+      }
+    }
+
     return res.json(item);
   } catch (err) {
     if (err.code === 11000) {

@@ -36,11 +36,14 @@ const validateDOB = (dateOfBirth) => {
 };
 
 // Helper function to build query based on user role
+// CRITICAL: Cart admins must only see their own data (filtered by cafeId/cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
-    // Cafe admin - only see employees from their cafe
+    // CRITICAL: Cart admin - ONLY see employees from their own cart
+    // Employee model uses cafeId (which should match cart admin's _id)
     query.cafeId = user._id;
+    console.log(`[EMPLOYEE_QUERY] Cart admin ${user._id} - filtering by cafeId: ${user._id}`);
   } else if (user.role === "franchise_admin") {
     // Franchise admin - see employees from all cafes under their franchise
     query.franchiseId = user._id;
@@ -114,7 +117,20 @@ exports.createEmployee = async (req, res) => {
       }
     }
     
-    const employee = await Employee.create(employeeData);
+    // Store email if provided (for login access)
+    if (employeeData.email) {
+      employeeData.email = employeeData.email.toLowerCase().trim();
+    }
+    
+    // Remove password from employeeData (it's only for User account creation if needed)
+    const { password, ...employeeDataToSave } = employeeData;
+    
+    const employee = await Employee.create(employeeDataToSave);
+    
+    // Populate relationships before returning
+    await employee.populate("cafeId", "name cafeName email");
+    await employee.populate("franchiseId", "name email");
+    
     return res.status(201).json(employee);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -173,7 +189,15 @@ exports.updateEmployee = async (req, res) => {
       delete req.body.franchiseId;
     }
     
-    Object.assign(employee, req.body);
+    // Handle email update (normalize if provided)
+    if (req.body.email !== undefined) {
+      req.body.email = req.body.email ? req.body.email.toLowerCase().trim() : null;
+    }
+    
+    // Remove password from update (it's only for User account creation if needed)
+    const { password, ...updateData } = req.body;
+    
+    Object.assign(employee, updateData);
     await employee.save();
     await employee.populate("cafeId", "name cafeName email");
     await employee.populate("franchiseId", "name email");
@@ -234,11 +258,11 @@ exports.getHierarchy = async (req, res) => {
 
         const cafesWithEmployees = franchiseCafes.map(cafe => {
           const cafeEmployees = employees.filter(
-            emp => emp.cafeId && emp.cafeId._id.toString() === cafe._id.toString()
+            emp => emp.cafeId && emp.cafeId && emp.cafeId._id && emp.cafeId._id.toString() === cafe._id.toString()
           );
           return {
             ...cafe.toObject(),
-            employees: cafeEmployees
+            employees: cafeEmployees || []
           };
         });
 
@@ -281,11 +305,11 @@ exports.getHierarchy = async (req, res) => {
 
       const cafesWithEmployees = cafes.map(cafe => {
         const cafeEmployees = employees.filter(
-          emp => emp.cafeId && emp.cafeId._id.toString() === cafe._id.toString()
+          emp => emp.cafeId && emp.cafeId && emp.cafeId._id && emp.cafeId._id.toString() === cafe._id.toString()
         );
         return {
           ...cafe.toObject(),
-          employees: cafeEmployees
+          employees: cafeEmployees || []
         };
       });
 
@@ -301,7 +325,7 @@ exports.getHierarchy = async (req, res) => {
       }];
 
     } else if (userRole === "admin") {
-      // Cafe admin sees only their cafe and employees
+      // Cafe admin sees only their cafe and employees (NO franchise-level employees)
       const cafe = await User.findById(userId)
         .select("_id name cafeName email franchiseId isActive")
         .populate("franchiseId", "name email")
@@ -311,43 +335,33 @@ exports.getHierarchy = async (req, res) => {
         return res.status(404).json({ message: "Cafe not found" });
       }
 
+      // IMPORTANT: Cart admin only sees employees assigned to their cart (cafeId = userId)
+      // They should NOT see franchise-level employees (employees with franchiseId but no cafeId)
       employees = await Employee.find({ cafeId: userId })
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
         .sort({ createdAt: -1 });
 
-      // If cafe has a franchise, include franchise info
-      if (cafe.franchiseId) {
-        const franchise = await User.findById(cafe.franchiseId._id)
-          .select("_id name email isActive")
-          .lean();
-
-        hierarchy = [{
-          ...franchise,
-          cafes: [{
-            ...cafe,
-            employees: employees
-          }],
-          employees: []
-        }];
-      } else {
-        // Cafe without franchise
-        hierarchy = [{
-          _id: cafe._id,
-          name: cafe.cafeName || cafe.name,
-          email: cafe.email,
-          isActive: cafe.isActive,
-          cafes: [],
-          employees: []
-        }];
-      }
+      // Cart admin view: Show only their cart with its employees
+      // Do NOT include franchise information or franchise-level employees
+      hierarchy = [{
+        _id: cafe._id,
+        name: cafe.cafeName || cafe.name,
+        email: cafe.email,
+        isActive: cafe.isActive,
+        cafes: [{
+          ...cafe,
+          employees: employees || []
+        }],
+        employees: [] // No franchise-level employees for cart admin
+      }];
     } else {
       return res.status(403).json({ message: "Access denied. Invalid role." });
     }
 
     // Employees with no franchise or cafe (orphaned)
     const orphanEmployees = employees.filter(
-      emp => !emp.franchiseId && !emp.cafeId
+      emp => (!emp.franchiseId || !emp.franchiseId._id) && (!emp.cafeId || !emp.cafeId._id)
     );
 
     return res.json({
