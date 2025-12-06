@@ -1,6 +1,8 @@
 const InventoryItem = require("../models/inventoryModel");
 const User = require("../models/userModel");
 const Employee = require("../models/employeeModel");
+const IngredientV2 = require("../models/costing-v2/ingredientModel");
+const { buildCostingQuery } = require("../utils/costing-v2/accessControl");
 
 // Helper to get cafeId based on user role
 const getCafeId = async (user) => {
@@ -119,37 +121,80 @@ exports.createInventoryItem = async (req, res) => {
       itemData.unit = 'piece';
     }
 
-    // Set hierarchy relationships
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      itemData.cafeId = req.user._id;
-      // Get franchiseId from cafe admin
-      const cafeAdmin = await User.findById(req.user._id);
-      if (cafeAdmin && cafeAdmin.franchiseId) {
-        itemData.franchiseId = cafeAdmin.franchiseId;
+    // If ingredientId is provided, fetch ingredient data and sync
+    if (itemData.ingredientId) {
+      const ingredient = await IngredientV2.findById(itemData.ingredientId);
+      if (!ingredient) {
+        return res.status(404).json({ message: "Ingredient not found" });
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      itemData.franchiseId = req.user._id;
-    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cafeId from employee record
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId) {
-        return res.status(403).json({ message: "No cafe associated with this user" });
+      
+      // Sync data from ingredient
+      if (!itemData.name) itemData.name = ingredient.name;
+      if (!itemData.category) itemData.category = ingredient.category;
+      if (!itemData.unit) {
+        // Map costing-v2 uom to inventory unit
+        const unitMap = {
+          'kg': 'kg', 'g': 'g', 'l': 'L', 'ml': 'mL',
+          'pcs': 'piece', 'pack': 'pack', 'box': 'box',
+          'bottle': 'bottle', 'dozen': 'dozen'
+        };
+        itemData.unit = unitMap[ingredient.uom] || 'piece';
       }
-      itemData.cafeId = cafeId;
-      // Get franchiseId from employee
-      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
-      if (employee && employee.franchiseId) {
-        itemData.franchiseId = employee.franchiseId;
+      if (itemData.quantity === undefined || itemData.quantity === null) {
+        itemData.quantity = ingredient.qtyOnHand || 0;
       }
-    } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId) {
-        return res.status(403).json({ message: "No cafe associated with this user" });
+      if (itemData.minStockLevel === undefined || itemData.minStockLevel === null) {
+        itemData.minStockLevel = ingredient.reorderLevel || 0;
       }
-      itemData.cafeId = cafeId;
-      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
-      if (employee && employee.franchiseId) {
-        itemData.franchiseId = employee.franchiseId;
+      if (itemData.unitPrice === undefined || itemData.unitPrice === null) {
+        itemData.unitPrice = ingredient.currentCostPerBaseUnit || 0;
+      }
+      if (!itemData.location) {
+        itemData.location = ingredient.storageLocation || "Main Storage";
+      }
+      
+      // Set outlet context from ingredient
+      if (ingredient.outletId) {
+        itemData.cafeId = ingredient.outletId;
+      }
+      if (ingredient.franchiseId) {
+        itemData.franchiseId = ingredient.franchiseId;
+      }
+    }
+
+    // Set hierarchy relationships (only if not set from ingredient)
+    if (!itemData.cafeId) {
+      if (req.user && req.user.role === "admin" && req.user._id) {
+        itemData.cafeId = req.user._id;
+        // Get franchiseId from cafe admin
+        const cafeAdmin = await User.findById(req.user._id);
+        if (cafeAdmin && cafeAdmin.franchiseId) {
+          itemData.franchiseId = cafeAdmin.franchiseId;
+        }
+      } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+        itemData.franchiseId = req.user._id;
+      } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+        // Mobile users - get cafeId from employee record
+        const cafeId = await getCafeId(req.user);
+        if (!cafeId) {
+          return res.status(403).json({ message: "No cafe associated with this user" });
+        }
+        itemData.cafeId = cafeId;
+        // Get franchiseId from employee
+        const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+        if (employee && employee.franchiseId) {
+          itemData.franchiseId = employee.franchiseId;
+        }
+      } else if (req.user?.role === "employee") {
+        const cafeId = await getCafeId(req.user);
+        if (!cafeId) {
+          return res.status(403).json({ message: "No cafe associated with this user" });
+        }
+        itemData.cafeId = cafeId;
+        const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+        if (employee && employee.franchiseId) {
+          itemData.franchiseId = employee.franchiseId;
+        }
       }
     }
 
@@ -307,6 +352,98 @@ exports.updateStock = async (req, res) => {
   } catch (err) {
     console.error('[INVENTORY] Update error:', err);
     return res.status(500).json({ message: err.message || 'Failed to update inventory item' });
+  }
+};
+
+// Get available ingredients from costing-v2 for managers to add to inventory
+exports.getAvailableIngredients = async (req, res) => {
+  try {
+    // Get cafeId for the manager/mobile user
+    const cafeId = await getCafeId(req.user);
+    if (!cafeId) {
+      return res.status(403).json({ 
+        success: false,
+        message: "No cafe associated with this user" 
+      });
+    }
+
+    console.log('[INVENTORY] getAvailableIngredients - cafeId:', cafeId, 'for user:', req.user._id, 'role:', req.user.role);
+
+    // Build query to get ingredients for this cart/cafe/kiosk
+    // For mobile users (manager, waiter, cook, captain), explicitly set outletId
+    const filter = { isActive: true };
+    
+    // For mobile roles, explicitly set outletId to their cafeId
+    if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      filter.outletId = cafeId;
+      console.log('[INVENTORY] getAvailableIngredients - Mobile user, setting outletId:', cafeId);
+    }
+    
+    // Build costing query (will handle admin, franchise_admin, super_admin)
+    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: false });
+    
+    console.log('[INVENTORY] getAvailableIngredients - Final filter:', JSON.stringify(costingFilter));
+    
+    // Get ingredients that are not already in inventory
+    const ingredients = await IngredientV2.find(costingFilter)
+      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation outletId")
+      .sort({ category: 1, name: 1 })
+      .lean();
+    
+    console.log('[INVENTORY] getAvailableIngredients - Found ingredients:', ingredients.length);
+
+    // Get existing inventory items linked to ingredients
+    const existingInventory = await InventoryItem.find({ 
+      cafeId: cafeId,
+      ingredientId: { $ne: null }
+    }).select("ingredientId").lean();
+    
+    const existingIngredientIds = new Set(
+      existingInventory.map(inv => inv.ingredientId?.toString()).filter(Boolean)
+    );
+
+    // Filter out ingredients that are already in inventory
+    // Also ensure ingredients belong to the correct outlet (for mobile users)
+    const availableIngredients = ingredients.filter(ing => {
+      // Check if already in inventory
+      if (existingIngredientIds.has(ing._id.toString())) {
+        return false;
+      }
+      
+      // For mobile users, ensure ingredient belongs to their cafe
+      if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+        // Ingredient should have outletId matching the manager's cafeId
+        if (ing.outletId) {
+          const ingredientOutletId = ing.outletId.toString();
+          const userCafeId = cafeId.toString();
+          if (ingredientOutletId !== userCafeId) {
+            console.log('[INVENTORY] Filtering out ingredient - outletId mismatch:', {
+              ingredientId: ing._id,
+              ingredientOutletId,
+              userCafeId
+            });
+            return false;
+          }
+        }
+        // If outletId is null/undefined, it might be a shared ingredient
+        // We'll include it, but you can exclude shared ingredients if needed
+      }
+      
+      return true;
+    });
+
+    console.log('[INVENTORY] getAvailableIngredients - Available ingredients after filtering:', availableIngredients.length);
+
+    res.json({ 
+      success: true, 
+      data: availableIngredients 
+    });
+  } catch (err) {
+    console.error('[INVENTORY] Get available ingredients error:', err);
+    return res.status(500).json({ 
+      success: false,
+      message: err.message || 'Failed to get available ingredients' 
+    });
   }
 };
 

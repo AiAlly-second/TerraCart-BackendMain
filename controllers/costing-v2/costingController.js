@@ -267,6 +267,14 @@ exports.createIngredient = async (req, res) => {
     const ingredient = new Ingredient(data);
     await ingredient.save();
     await ingredient.populate("outletId", "name cafeName");
+    
+    // Emit socket event for real-time sync
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (ingredient.outletId) {
+      emitToCafe(io, ingredient.outletId.toString(), "ingredient:created", ingredient);
+    }
+    
     res.status(201).json({ success: true, data: ingredient });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -287,6 +295,31 @@ exports.updateIngredient = async (req, res) => {
     if (!ingredient) {
       return res.status(404).json({ success: false, message: "Ingredient not found" });
     }
+    
+    // Emit socket event for real-time sync
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (ingredient.outletId) {
+      emitToCafe(io, ingredient.outletId.toString(), "ingredient:updated", ingredient);
+      
+      // Also sync to inventory if linked
+      try {
+        const InventoryItem = require("../../models/inventoryModel");
+        const linkedInventory = await InventoryItem.findOne({ ingredientId: ingredient._id });
+        if (linkedInventory) {
+          // Update inventory item with ingredient data
+          linkedInventory.quantity = ingredient.qtyOnHand || linkedInventory.quantity;
+          linkedInventory.minStockLevel = ingredient.reorderLevel || linkedInventory.minStockLevel;
+          linkedInventory.unitPrice = ingredient.currentCostPerBaseUnit || linkedInventory.unitPrice;
+          await linkedInventory.save();
+          emitToCafe(io, ingredient.outletId.toString(), "inventory:updated", linkedInventory);
+        }
+      } catch (syncError) {
+        console.error('[COSTING] Error syncing ingredient to inventory:', syncError);
+        // Don't fail the request if sync fails
+      }
+    }
+    
     res.json({ success: true, data: ingredient });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -580,6 +613,85 @@ exports.getInventoryTransactions = async (req, res) => {
 
     res.json({ success: true, data: transactions });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @route   GET /api/costing-v2/inventory
+ * @desc    Get inventory items from costing-v2 ingredients for mobile app
+ */
+exports.getCostingInventory = async (req, res) => {
+  try {
+    const Employee = require("../../models/employeeModel");
+    
+    // Get cafeId for mobile users (waiter, cook, captain, manager)
+    let outletId = null;
+    if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      // Mobile users - get cafeId from user or employee record
+      if (req.user.cafeId) {
+        outletId = req.user.cafeId;
+      } else {
+        // Fallback: find employee by email
+        const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+        if (employee && employee.cafeId) {
+          outletId = employee.cafeId;
+        }
+      }
+      
+      if (!outletId) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "No cafe associated with this user" 
+        });
+      }
+    } else if (req.user.role === "admin") {
+      // Cart admin - use their own ID as outletId
+      outletId = req.user._id;
+    }
+    
+    // Build filter for ingredients
+    const filter = { isActive: true };
+    if (outletId) {
+      filter.outletId = outletId;
+    }
+    
+    // Apply role-based filtering
+    const shouldSkipOutletFilter = (req.user.role === "franchise_admin" || req.user.role === "super_admin") && !outletId;
+    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: shouldSkipOutletFilter });
+    
+    // Get ingredients for this cart/cafe/kiosk
+    const ingredients = await Ingredient.find(costingFilter)
+      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt")
+      .sort({ category: 1, name: 1 })
+      .lean();
+    
+    // Format ingredients as inventory items for the app
+    const inventoryItems = ingredients.map(ing => ({
+      _id: ing._id,
+      name: ing.name,
+      category: ing.category,
+      quantity: ing.qtyOnHand || 0,
+      unit: ing.uom,
+      minStockLevel: ing.reorderLevel || 0,
+      unitPrice: ing.currentCostPerBaseUnit || 0,
+      location: ing.storageLocation || "Main Storage",
+      updatedAt: ing.updatedAt ? ing.updatedAt.toISOString() : new Date().toISOString(),
+      // Additional fields for compatibility
+      minStock: ing.reorderLevel || 0,
+      ingredientId: ing._id,
+      // Add cafeId for filtering
+      cafeId: outletId || ing.outletId,
+    }));
+    
+    console.log('[COSTING] getCostingInventory - Found items:', inventoryItems.length, 'for outletId:', outletId);
+    
+    res.json({ 
+      success: true, 
+      data: inventoryItems 
+    });
+  } catch (error) {
+    console.error('[COSTING] Get inventory error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -1244,12 +1356,8 @@ exports.getHierarchicalCosting = async (req, res) => {
     }
 
     const { from, to } = req.query;
-    const dateFilter = {};
-    if (from || to) {
-      dateFilter.date = {};
-      if (from) dateFilter.date.$gte = new Date(from);
-      if (to) dateFilter.date.$lte = new Date(to);
-    }
+    // Note: dateFilter is not used directly - we apply date filters per data type
+    // (transactions use 'date' field, orders use 'createdAt', labour/overhead use period ranges)
 
     let franchises = [];
     let kiosks = [];
@@ -1305,6 +1413,7 @@ exports.getHierarchicalCosting = async (req, res) => {
           foodCost: 0,
           labourCost: 0,
           overheadCost: 0,
+          expenseCost: 0,
           totalCost: 0,
           profit: 0,
           foodCostPercent: 0,
@@ -1314,112 +1423,173 @@ exports.getHierarchicalCosting = async (req, res) => {
 
       for (const kiosk of franchiseKiosks) {
         // Get P&L for this kiosk
-        const kioskDateFilter = { ...dateFilter, outletId: kiosk._id };
-        const kioskCostingFilter = await buildCostingQuery(
-          { ...req.user, _id: kiosk._id, role: "admin" },
-          kioskDateFilter
-        );
-
         // Get food cost from inventory transactions
+        // Use date field for transactions, ensure proper date filtering
+        const transactionDateFilter = {};
+        if (from || to) {
+          transactionDateFilter.date = {};
+          if (from) {
+            const fromDate = new Date(from);
+            fromDate.setHours(0, 0, 0, 0);
+            transactionDateFilter.date.$gte = fromDate;
+          }
+          if (to) {
+            const toDate = new Date(to);
+            toDate.setHours(23, 59, 59, 999);
+            transactionDateFilter.date.$lte = toDate;
+          }
+        }
         const consumptionTransactions = await InventoryTransaction.aggregate([
           {
             $match: {
               type: { $in: ["OUT", "WASTE"] },
-              ...kioskCostingFilter,
+              outletId: kiosk._id,
+              ...transactionDateFilter,
             },
           },
           {
             $group: {
               _id: null,
-              totalCost: { $sum: "$costAllocated" },
+              totalCost: { $sum: { $ifNull: ["$costAllocated", 0] } },
             },
           },
         ]);
-        const foodCost = consumptionTransactions[0]?.totalCost || 0;
+        const foodCost = Number((consumptionTransactions[0]?.totalCost || 0).toFixed(2));
 
-        // Get labour costs
+        // Get labour costs - filter by date range properly
         const labourFilter = { outletId: kiosk._id };
         if (from || to) {
+          // Include labour costs that overlap with the date range
+          const fromDate = from ? new Date(from) : new Date("1970-01-01");
+          fromDate.setHours(0, 0, 0, 0);
+          const toDate = to ? new Date(to) : new Date("2099-12-31");
+          toDate.setHours(23, 59, 59, 999);
           labourFilter.$or = [
-            { periodFrom: { $lte: new Date(to || "2099-12-31") }, periodTo: { $gte: new Date(from || "1970-01-01") } }
+            { 
+              periodFrom: { $lte: toDate }, 
+              periodTo: { $gte: fromDate } 
+            }
           ];
         }
-        const labourCosts = await LabourCost.find(labourFilter);
-        const labourCost = labourCosts.reduce((sum, l) => sum + l.amount, 0);
+        const labourCosts = await LabourCost.find(labourFilter).lean();
+        const labourCost = Number(labourCosts.reduce((sum, l) => sum + (Number(l.amount) || 0), 0).toFixed(2));
 
-        // Get overheads
+        // Get overheads - same filter as labour
         const overheadFilter = { ...labourFilter };
-        const overheads = await Overhead.find(overheadFilter);
-        const overheadCost = overheads.reduce((sum, o) => sum + o.amount, 0);
+        const overheads = await Overhead.find(overheadFilter).lean();
+        const overheadCost = Number(overheads.reduce((sum, o) => sum + (Number(o.amount) || 0), 0).toFixed(2));
+        
+        // Get expenses for this kiosk in the date range
+        const expenseFilter = { outletId: kiosk._id };
+        if (from || to) {
+          expenseFilter.expenseDate = {};
+          if (from) {
+            const fromDate = new Date(from);
+            fromDate.setHours(0, 0, 0, 0);
+            expenseFilter.expenseDate.$gte = fromDate;
+          }
+          if (to) {
+            const toDate = new Date(to);
+            toDate.setHours(23, 59, 59, 999);
+            expenseFilter.expenseDate.$lte = toDate;
+          }
+        }
+        const expenses = await CostingExpense.find(expenseFilter).lean();
+        const expenseCost = Number(expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0).toFixed(2));
 
         // Get sales from orders (use cartId, not cafeId)
-        const orderFilter = { cartId: kiosk._id, status: { $in: ["Paid", "Finalized"] } };
+        // Include "Exit" status for takeaway orders that are completed
+        const orderFilter = { cartId: kiosk._id, status: { $in: ["Paid", "Finalized", "Exit"] } };
         if (from || to) {
           orderFilter.createdAt = {};
-          if (from) orderFilter.createdAt.$gte = new Date(from);
-          if (to) orderFilter.createdAt.$lte = new Date(to);
+          if (from) {
+            const fromDate = new Date(from);
+            fromDate.setHours(0, 0, 0, 0);
+            orderFilter.createdAt.$gte = fromDate;
+          }
+          if (to) {
+            const toDate = new Date(to);
+            toDate.setHours(23, 59, 59, 999);
+            orderFilter.createdAt.$lte = toDate;
+          }
         }
-        const orders = await Order.find(orderFilter).lean();
-        const sales = orders.reduce((sum, order) => {
-          const orderTotal = order.kotLines?.reduce((s, kot) => s + Number(kot.totalAmount || 0), 0) || 0;
-          return sum + orderTotal;
-        }, 0);
+        // Use aggregation for accurate sales calculation
+        const salesData = await Order.aggregate([
+          { $match: orderFilter },
+          {
+            $unwind: {
+              path: "$kotLines",
+              preserveNullAndEmptyArrays: false, // Only include orders with kotLines
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalSales: { $sum: { $ifNull: ["$kotLines.totalAmount", 0] } },
+            },
+          },
+        ]);
+        const sales = salesData[0]?.totalSales || 0;
 
-        const totalCost = foodCost + labourCost + overheadCost;
-        const profit = sales - totalCost;
-        const foodCostPercent = sales > 0 ? (foodCost / sales) * 100 : 0;
-        const profitMargin = sales > 0 ? (profit / sales) * 100 : 0;
+        // Calculate totals with proper precision
+        const totalCost = Number((foodCost + labourCost + overheadCost + expenseCost).toFixed(2));
+        const profit = Number((sales - totalCost).toFixed(2));
+        const foodCostPercent = sales > 0 ? Number(((foodCost / sales) * 100).toFixed(2)) : 0;
+        const profitMargin = sales > 0 ? Number(((profit / sales) * 100).toFixed(2)) : 0;
 
         const kioskData = {
           kioskId: kiosk._id,
           kioskName: kiosk.cafeName || kiosk.name,
           kioskCode: kiosk.cartCode || kiosk._id.toString().slice(-8), // Use cartCode, fallback to last 8 chars of ID
-          sales,
-          foodCost,
-          labourCost,
-          overheadCost,
-          totalCost,
-          profit,
-          foodCostPercent,
-          profitMargin,
+          sales: Number(sales.toFixed(2)),
+          foodCost: Number(foodCost.toFixed(2)),
+          labourCost: Number(labourCost.toFixed(2)),
+          overheadCost: Number(overheadCost.toFixed(2)),
+          expenseCost: Number(expenseCost.toFixed(2)),
+          totalCost: Number(totalCost.toFixed(2)),
+          profit: Number(profit.toFixed(2)),
+          foodCostPercent: Number(foodCostPercent.toFixed(2)),
+          profitMargin: Number(profitMargin.toFixed(2)),
         };
 
         franchiseData.kiosks.push(kioskData);
 
-        // Aggregate franchise totals
-        franchiseData.totals.sales += sales;
-        franchiseData.totals.foodCost += foodCost;
-        franchiseData.totals.labourCost += labourCost;
-        franchiseData.totals.overheadCost += overheadCost;
-        franchiseData.totals.totalCost += totalCost;
-        franchiseData.totals.profit += profit;
+        // Aggregate franchise totals with proper precision
+        franchiseData.totals.sales = Number((franchiseData.totals.sales + sales).toFixed(2));
+        franchiseData.totals.foodCost = Number((franchiseData.totals.foodCost + foodCost).toFixed(2));
+        franchiseData.totals.labourCost = Number((franchiseData.totals.labourCost + labourCost).toFixed(2));
+        franchiseData.totals.overheadCost = Number((franchiseData.totals.overheadCost + overheadCost).toFixed(2));
+        franchiseData.totals.expenseCost = Number(((franchiseData.totals.expenseCost || 0) + expenseCost).toFixed(2));
+        franchiseData.totals.totalCost = Number((franchiseData.totals.totalCost + totalCost).toFixed(2));
+        franchiseData.totals.profit = Number((franchiseData.totals.profit + profit).toFixed(2));
       }
 
-      // Calculate franchise-level percentages
+      // Calculate franchise-level percentages with proper precision
       if (franchiseData.totals.sales > 0) {
-        franchiseData.totals.foodCostPercent = (franchiseData.totals.foodCost / franchiseData.totals.sales) * 100;
-        franchiseData.totals.profitMargin = (franchiseData.totals.profit / franchiseData.totals.sales) * 100;
+        franchiseData.totals.foodCostPercent = Number(((franchiseData.totals.foodCost / franchiseData.totals.sales) * 100).toFixed(2));
+        franchiseData.totals.profitMargin = Number(((franchiseData.totals.profit / franchiseData.totals.sales) * 100).toFixed(2));
       }
 
       hierarchicalData.push(franchiseData);
     }
 
-    // Calculate grand totals
+    // Calculate grand totals with proper precision
     const grandTotals = hierarchicalData.reduce(
       (acc, franchise) => ({
-        sales: acc.sales + franchise.totals.sales,
-        foodCost: acc.foodCost + franchise.totals.foodCost,
-        labourCost: acc.labourCost + franchise.totals.labourCost,
-        overheadCost: acc.overheadCost + franchise.totals.overheadCost,
-        totalCost: acc.totalCost + franchise.totals.totalCost,
-        profit: acc.profit + franchise.totals.profit,
+        sales: Number((acc.sales + franchise.totals.sales).toFixed(2)),
+        foodCost: Number((acc.foodCost + franchise.totals.foodCost).toFixed(2)),
+        labourCost: Number((acc.labourCost + franchise.totals.labourCost).toFixed(2)),
+        overheadCost: Number((acc.overheadCost + franchise.totals.overheadCost).toFixed(2)),
+        expenseCost: Number(((acc.expenseCost || 0) + (franchise.totals.expenseCost || 0)).toFixed(2)),
+        totalCost: Number((acc.totalCost + franchise.totals.totalCost).toFixed(2)),
+        profit: Number((acc.profit + franchise.totals.profit).toFixed(2)),
       }),
-      { sales: 0, foodCost: 0, labourCost: 0, overheadCost: 0, totalCost: 0, profit: 0 }
+      { sales: 0, foodCost: 0, labourCost: 0, overheadCost: 0, expenseCost: 0, totalCost: 0, profit: 0 }
     );
 
     if (grandTotals.sales > 0) {
-      grandTotals.foodCostPercent = (grandTotals.foodCost / grandTotals.sales) * 100;
-      grandTotals.profitMargin = (grandTotals.profit / grandTotals.sales) * 100;
+      grandTotals.foodCostPercent = Number(((grandTotals.foodCost / grandTotals.sales) * 100).toFixed(2));
+      grandTotals.profitMargin = Number(((grandTotals.profit / grandTotals.sales) * 100).toFixed(2));
     }
 
     res.json({
@@ -1609,8 +1779,6 @@ exports.getFoodCostReport = async (req, res) => {
       },
     ]);
 
-    const totalFoodCost = consumptionTransactions[0]?.totalFoodCost || 0;
-    console.log('[FOOD_COST_REPORT] Total food cost:', totalFoodCost, 'Filter:', JSON.stringify(transactionOutletFilter));
 
     // Get total sales (from orders - calculate from kotLines)
     const orderFilter = {};
@@ -1639,7 +1807,8 @@ exports.getFoodCostReport = async (req, res) => {
       }
     }
     
-    orderFilter.status = { $in: ["Paid", "Finalized"] };
+    // Include "Exit" status for takeaway orders
+    orderFilter.status = { $in: ["Paid", "Finalized", "Exit"] };
 
     // Calculate sales from kotLines (orders don't have top-level totalAmount)
     const salesData = await Order.aggregate([
@@ -1653,21 +1822,22 @@ exports.getFoodCostReport = async (req, res) => {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: "$kotLines.totalAmount" },
+          totalSales: { $sum: { $ifNull: ["$kotLines.totalAmount", 0] } },
         },
       },
     ]);
 
-    const totalSales = salesData[0]?.totalSales || 0;
-    console.log('[FOOD_COST_REPORT] Total sales:', totalSales, 'Order filter:', JSON.stringify(orderFilter));
-    const foodCostPercent = totalSales > 0 ? (totalFoodCost / totalSales) * 100 : 0;
+    const totalSales = Number((salesData[0]?.totalSales || 0).toFixed(2));
+    const totalFoodCost = Number((consumptionTransactions[0]?.totalFoodCost || 0).toFixed(2));
+    console.log('[FOOD_COST_REPORT] Total sales:', totalSales, 'Total food cost:', totalFoodCost, 'Order filter:', JSON.stringify(orderFilter));
+    const foodCostPercent = totalSales > 0 ? Number(((totalFoodCost / totalSales) * 100).toFixed(2)) : 0;
 
     res.json({
       success: true,
       data: {
         period: { from, to },
-        totalFoodCost,
-        totalSales,
+        totalFoodCost: Number(totalFoodCost.toFixed(2)),
+        totalSales: Number(totalSales.toFixed(2)),
         foodCostPercent: Number(foodCostPercent.toFixed(2)),
       },
     });
@@ -1886,7 +2056,7 @@ exports.getPnLReport = async (req, res) => {
       },
     ]);
 
-    const foodCost = consumptionTransactions[0]?.totalFoodCost || 0;
+    const foodCost = Number((consumptionTransactions[0]?.totalFoodCost || 0).toFixed(2));
     console.log('[PNL_REPORT] Total food cost:', foodCost, 'Transaction filter:', JSON.stringify(transactionOutletFilter));
 
     // Get total sales (from orders - calculate from kotLines)
@@ -1920,6 +2090,8 @@ exports.getPnLReport = async (req, res) => {
     orderFilter.status = { $in: ["Paid", "Finalized"] };
 
     // Calculate sales from kotLines (orders don't have top-level totalAmount)
+    // Include "Exit" status for takeaway orders
+    orderFilter.status = { $in: ["Paid", "Finalized", "Exit"] };
     const salesData = await Order.aggregate([
       { $match: orderFilter },
       {
@@ -1931,12 +2103,12 @@ exports.getPnLReport = async (req, res) => {
       {
         $group: {
           _id: null,
-          totalSales: { $sum: "$kotLines.totalAmount" },
+          totalSales: { $sum: { $ifNull: ["$kotLines.totalAmount", 0] } },
         },
       },
     ]);
 
-    const totalSales = salesData[0]?.totalSales || 0;
+    const totalSales = Number((salesData[0]?.totalSales || 0).toFixed(2));
     console.log('[PNL_REPORT] Total sales:', totalSales, 'Order filter:', JSON.stringify(orderFilter));
 
     // Get labour costs
@@ -1966,13 +2138,13 @@ exports.getPnLReport = async (req, res) => {
       ];
     }
 
-    const labourCosts = await LabourCost.find(labourFilter);
-    const totalLabour = labourCosts.reduce((sum, l) => sum + l.amount, 0);
+    const labourCosts = await LabourCost.find(labourFilter).lean();
+    const totalLabour = Number(labourCosts.reduce((sum, l) => sum + (Number(l.amount) || 0), 0).toFixed(2));
     console.log('[PNL_REPORT] Total labour:', totalLabour, 'Labour filter:', JSON.stringify(labourFilter), 'Count:', labourCosts.length);
 
     // Get overheads (same filter as labour)
-    const overheads = await Overhead.find(labourFilter);
-    const totalOverhead = overheads.reduce((sum, o) => sum + o.amount, 0);
+    const overheads = await Overhead.find(labourFilter).lean();
+    const totalOverhead = Number(overheads.reduce((sum, o) => sum + (Number(o.amount) || 0), 0).toFixed(2));
     console.log('[PNL_REPORT] Total overhead:', totalOverhead, 'Overhead count:', overheads.length);
 
     // Get expenses
@@ -2006,28 +2178,28 @@ exports.getPnLReport = async (req, res) => {
       }
     }
 
-    const expenses = await CostingExpense.find(expenseFilter);
-    const totalExpenses = expenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+    const expenses = await CostingExpense.find(expenseFilter).lean();
+    const totalExpenses = Number(expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0).toFixed(2));
     console.log('[PNL_REPORT] Total expenses:', totalExpenses, 'Expense filter:', JSON.stringify(expenseFilter), 'Count:', expenses.length);
 
-    // Calculate P&L
-    const totalCosts = foodCost + totalLabour + totalOverhead + totalExpenses;
-    const profit = totalSales - totalCosts;
-    const profitMargin = totalSales > 0 ? (profit / totalSales) * 100 : 0;
+    // Calculate P&L with proper precision
+    const totalCosts = Number((foodCost + totalLabour + totalOverhead + totalExpenses).toFixed(2));
+    const profit = Number((totalSales - totalCosts).toFixed(2));
+    const profitMargin = totalSales > 0 ? Number(((profit / totalSales) * 100).toFixed(2)) : 0;
 
     res.json({
       success: true,
       data: {
         period: { from, to },
-        sales: totalSales,
+        sales: Number(totalSales.toFixed(2)),
         costs: {
-          foodCost,
-          labour: totalLabour,
-          overhead: totalOverhead,
-          expenses: totalExpenses,
-          total: totalCosts,
+          foodCost: Number(foodCost.toFixed(2)),
+          labour: Number(totalLabour.toFixed(2)),
+          overhead: Number(totalOverhead.toFixed(2)),
+          expenses: Number(totalExpenses.toFixed(2)),
+          total: Number(totalCosts.toFixed(2)),
         },
-        profit,
+        profit: Number(profit.toFixed(2)),
         profitMargin: Number(profitMargin.toFixed(2)),
       },
     });
@@ -2048,7 +2220,10 @@ exports.getExpenses = async (req, res) => {
     const query = await buildCostingQuery(req.user, {});
     
     if (outletId) {
-      validateOutletAccess(req.user, outletId);
+      const hasAccess = await validateOutletAccess(req.user, outletId);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: "Access denied to this outlet" });
+      }
       query.outletId = outletId;
     }
     
@@ -2088,11 +2263,28 @@ exports.getExpenses = async (req, res) => {
  */
 exports.createExpense = async (req, res) => {
   try {
-    const expenseData = setOutletContext(req.user, req.body, true);
+    // setOutletContext is async, so we need to await it
+    const expenseData = await setOutletContext(req.user, req.body, true);
     expenseData.createdBy = req.user._id;
     
+    // Ensure expenseDate is a Date object
     if (!expenseData.expenseDate) {
       expenseData.expenseDate = new Date();
+    } else if (typeof expenseData.expenseDate === 'string') {
+      expenseData.expenseDate = new Date(expenseData.expenseDate);
+    }
+    
+    // Ensure amount is a number
+    if (expenseData.amount) {
+      expenseData.amount = Number(expenseData.amount);
+    }
+    
+    // Ensure category is provided
+    if (!expenseData.category) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Category is required" 
+      });
     }
     
     const expense = new CostingExpense(expenseData);
@@ -2100,6 +2292,7 @@ exports.createExpense = async (req, res) => {
     
     res.status(201).json({ success: true, data: expense });
   } catch (error) {
+    console.error('[COSTING] Create expense error:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -2115,13 +2308,26 @@ exports.updateExpense = async (req, res) => {
       return res.status(404).json({ success: false, message: "Expense not found" });
     }
     
-    validateOutletAccess(req.user, expense.outletId);
+    // Validate access (validateOutletAccess is async)
+    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+    
+    // Update fields with proper type conversion
+    if (req.body.expenseDate && typeof req.body.expenseDate === 'string') {
+      req.body.expenseDate = new Date(req.body.expenseDate);
+    }
+    if (req.body.amount) {
+      req.body.amount = Number(req.body.amount);
+    }
     
     Object.assign(expense, req.body);
     await expense.save();
     
     res.json({ success: true, data: expense });
   } catch (error) {
+    console.error('[COSTING] Update expense error:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -2137,11 +2343,16 @@ exports.deleteExpense = async (req, res) => {
       return res.status(404).json({ success: false, message: "Expense not found" });
     }
     
-    validateOutletAccess(req.user, expense.outletId);
+    // Validate access (validateOutletAccess is async)
+    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
     
     await CostingExpense.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Expense deleted successfully" });
   } catch (error) {
+    console.error('[COSTING] Delete expense error:', error);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -2156,7 +2367,10 @@ exports.getExpenseSummary = async (req, res) => {
     const query = await buildCostingQuery(req.user, {});
     
     if (outletId) {
-      validateOutletAccess(req.user, outletId);
+      const hasAccess = await validateOutletAccess(req.user, outletId);
+      if (!hasAccess) {
+        return res.status(403).json({ success: false, message: "Access denied to this outlet" });
+      }
       query.outletId = outletId;
     }
     

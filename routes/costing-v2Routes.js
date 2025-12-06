@@ -19,6 +19,7 @@ const {
   // Inventory
   consumeInventory,
   getInventoryTransactions,
+  getCostingInventory,
   getLowStock,
   // Waste
   recordWaste,
@@ -134,6 +135,12 @@ router.post(
 );
 
 // ==================== INVENTORY ====================
+// Get inventory from costing-v2 ingredients for mobile app
+router.get(
+  "/inventory",
+  authorize(["super_admin", "franchise_admin", "admin", "waiter", "cook", "captain", "manager"]),
+  getCostingInventory
+);
 router.post(
   "/inventory/consume",
   authorize(["super_admin", "franchise_admin", "admin"]),

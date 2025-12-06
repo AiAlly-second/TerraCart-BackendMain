@@ -9,9 +9,38 @@ const buildHierarchyQuery = async (user) => {
     query.cafeId = user._id;
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
-  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their employee record to find cafeId
-    const employee = await Employee.findOne({ userId: user._id }).lean();
+  } else if (user.role === "manager") {
+    // Managers should see all employees' attendance from their cart
+    // Get cafeId from user or employee record
+    let cafeId = null;
+    
+    // First check if User has cafeId directly
+    if (user.cafeId) {
+      cafeId = user.cafeId;
+      console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - has direct cafeId: ${cafeId}`);
+    } else {
+      // Fallback: find Employee record by email to get cafeId
+      const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+      if (employee && employee.cafeId) {
+        cafeId = employee.cafeId;
+        console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - found cafeId from employee record: ${cafeId}`);
+      } else {
+        console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - no cafeId found`);
+      }
+    }
+    
+    if (cafeId) {
+      query.cafeId = cafeId;
+      // Do NOT set employeeId - managers should see all employees' attendance
+    }
+  } else if (["waiter", "cook", "captain"].includes(user.role)) {
+    // Other mobile users (waiter, cook, captain) - only show their own attendance
+    // Get their employee record to find cafeId and employeeId
+    let employee = await Employee.findOne({ userId: user._id }).lean();
+    if (!employee && user.email) {
+      // Fallback: find by email
+      employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+    }
     if (employee) {
       query.cafeId = employee.cafeId;
       // For individual mobile users, only show their own attendance

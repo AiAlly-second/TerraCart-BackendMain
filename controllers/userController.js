@@ -940,10 +940,15 @@ exports.getUserById = async (req, res) => {
     const user = await User.findById(req.params.id).select('-password');
     if (!user) return res.status(404).json({ message: "User not found" });
 
+    console.log(`[GET_USER_BY_ID] Requested user ID: ${req.params.id}, Role: ${user.role}`);
+    console.log(`[GET_USER_BY_ID] Requesting user role: ${req.user.role}, ID: ${req.user._id}`);
+    console.log(`[GET_USER_BY_ID] Requested user address: ${user.address}, location: ${user.location}`);
+
     // Authorization checks:
     // - Super admin: can view any user
     // - Franchise admin: can only view cafe admins under their franchise
     // - Cafe admin: can view themselves OR their franchise admin (for invoice purposes)
+    // - Mobile app users (waiter, cook, captain, manager): can view their associated cart/cafe
     if (req.user.role === "franchise_admin") {
       // Franchise admin can only view cafe admins (role: "admin") under their franchise
       if (user.role !== "admin") {
@@ -962,14 +967,32 @@ exports.getUserById = async (req, res) => {
       if (!isSelf && !isFranchiseAdmin) {
         return res.status(403).json({ message: "Access denied. You can only view your own profile or your franchise admin's profile." });
       }
+    } else if (["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      // Mobile app users can view their associated cart/cafe (the cart they work at)
+      const isAssociatedCart = user.role === "admin" && 
+                               req.user.cafeId && 
+                               user._id.toString() === req.user.cafeId.toString();
+      
+      // Also allow viewing their own profile
+      const isSelf = user._id.toString() === req.user._id.toString();
+      
+      if (!isSelf && !isAssociatedCart) {
+        console.log(`[GET_USER_BY_ID] Access denied for mobile user. isSelf: ${isSelf}, isAssociatedCart: ${isAssociatedCart}`);
+        console.log(`[GET_USER_BY_ID] User cafeId: ${req.user.cafeId}, Requested user ID: ${user._id}`);
+        return res.status(403).json({ message: "Access denied. You can only view your own profile or your associated cart/cafe." });
+      }
+      
+      console.log(`[GET_USER_BY_ID] Access granted for mobile user to view cart/cafe`);
     }
     // Super admin can view anyone (no additional check needed)
 
     // Add signed URLs for documents
     const userWithSignedUrls = addSignedUrlsToUser(user);
 
+    console.log(`[GET_USER_BY_ID] Returning user data with address: ${userWithSignedUrls.address}, location: ${userWithSignedUrls.location}`);
     res.json(userWithSignedUrls);
   } catch (error) {
+    console.error(`[GET_USER_BY_ID] Error: ${error.message}`);
     res.status(500).json({ message: error.message });
   }
 };

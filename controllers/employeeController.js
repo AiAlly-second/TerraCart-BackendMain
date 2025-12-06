@@ -37,7 +37,7 @@ const validateDOB = (dateOfBirth) => {
 
 // Helper function to build query based on user role
 // CRITICAL: Cart admins must only see their own data (filtered by cafeId/cartId)
-const buildHierarchyQuery = (user) => {
+const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
     // CRITICAL: Cart admin - ONLY see employees from their own cart
@@ -47,6 +47,33 @@ const buildHierarchyQuery = (user) => {
   } else if (user.role === "franchise_admin") {
     // Franchise admin - see employees from all cafes under their franchise
     query.franchiseId = user._id;
+  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users (waiter, cook, captain, manager) - get cafeId from user or employee record
+    let cafeId = null;
+    
+    // First check if User has cafeId directly
+    if (user.cafeId) {
+      cafeId = user.cafeId;
+      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - has direct cafeId: ${cafeId}`);
+    } else {
+      // Fallback: find Employee record by email to get cafeId
+      const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+      if (employee && employee.cafeId) {
+        cafeId = employee.cafeId;
+        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - found cafeId from employee record: ${cafeId}`);
+      } else {
+        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cafeId found`);
+      }
+    }
+    
+    if (cafeId) {
+      query.cafeId = cafeId;
+    } else {
+      // If no cafeId found, return empty query (will return no employees)
+      // This ensures managers only see employees from their cart
+      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cafeId, returning empty query`);
+      query.cafeId = null; // This will match nothing
+    }
   }
   // For super_admin, no filter (see all employees)
   return query;
@@ -55,14 +82,27 @@ const buildHierarchyQuery = (user) => {
 // Get all employees
 exports.getAllEmployees = async (req, res) => {
   try {
-    const query = buildHierarchyQuery(req.user);
+    // buildHierarchyQuery is now async, so we need to await it
+    const query = await buildHierarchyQuery(req.user);
+    
+    // If query has cafeId: null, return empty array (no employees found for this user)
+    if (query.cafeId === null && Object.keys(query).length === 1) {
+      console.log(`[EMPLOYEE_QUERY] No cafeId found for user ${req.user._id}, returning empty array`);
+      return res.json({ success: true, data: [] });
+    }
+    
     const employees = await Employee.find(query)
       .populate("cafeId", "name cafeName email")
       .populate("franchiseId", "name email")
-      .sort({ createdAt: -1 });
-    return res.json(employees);
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    console.log(`[EMPLOYEE_QUERY] Found ${employees.length} employees for user ${req.user._id} (${req.user.role})`);
+    
+    return res.json({ success: true, data: employees });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[EMPLOYEE_QUERY] Error:', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -70,17 +110,26 @@ exports.getAllEmployees = async (req, res) => {
 exports.getEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const query = { _id: id, ...buildHierarchyQuery(req.user) };
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    const query = { _id: id, ...hierarchyQuery };
+    
+    // If hierarchy query has cafeId: null, employee not accessible
+    if (hierarchyQuery.cafeId === null && Object.keys(hierarchyQuery).length === 1) {
+      return res.status(403).json({ success: false, message: "Access denied: No cafe associated with this user" });
+    }
+    
     const employee = await Employee.findOne(query)
       .populate("cafeId", "name cafeName email")
-      .populate("franchiseId", "name email");
+      .populate("franchiseId", "name email")
+      .lean();
     
     if (!employee) {
-      return res.status(404).json({ message: "Employee not found" });
+      return res.status(404).json({ success: false, message: "Employee not found" });
     }
-    return res.json(employee);
+    return res.json({ success: true, data: employee });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error('[EMPLOYEE_QUERY] Get employee error:', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 

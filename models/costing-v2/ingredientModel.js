@@ -11,11 +11,13 @@ const ingredientSchema = new mongoose.Schema(
       required: true,
       trim: true,
       unique: true,
+      index: true,
     },
     category: {
       type: String,
       required: true,
       trim: true,
+      index: true,
       enum: [
         // Raw Ingredients
         "Vegetables",
@@ -79,7 +81,7 @@ const ingredientSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
-    leadTimeDays: {
+    shelfTimeDays: {
       type: Number,
       min: 0,
       default: 7,
@@ -135,10 +137,7 @@ const ingredientSchema = new mongoose.Schema(
   }
 );
 
-// Indexes
-ingredientSchema.index({ name: 1 });
-ingredientSchema.index({ category: 1 });
-ingredientSchema.index({ storageLocation: 1 });
+// Indexes (name, category, and storageLocation already indexed in schema with index: true)
 ingredientSchema.index({ preferredSupplierId: 1 });
 ingredientSchema.index({ isActive: 1 });
 

@@ -87,6 +87,13 @@ const inventoryItemSchema = new mongoose.Schema(
       ref: "User",
       index: true,
     },
+    // Link to costing-v2 ingredient
+    ingredientId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "IngredientV2",
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: true,

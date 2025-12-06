@@ -7,6 +7,7 @@ const {
   deleteInventoryItem,
   updateStock,
   getInventoryStats,
+  getAvailableIngredients,
 } = require("../controllers/inventoryController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 
@@ -14,6 +15,9 @@ const router = express.Router();
 
 // All routes require authentication
 router.use(protect);
+
+// Get available ingredients from costing-v2 for managers
+router.get("/available-ingredients", authorize(["admin", "franchise_admin", "super_admin", "manager"]), getAvailableIngredients);
 
 // Get inventory statistics
 router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "manager"]), getInventoryStats);

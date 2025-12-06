@@ -49,11 +49,20 @@ exports.getDashboardStats = async (req, res) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // Active orders (today, not finalized/cancelled)
+    // Active orders (today, excluding all completed/inactive statuses)
+    // Inactive statuses: Paid, Returned, Finalized, Cancelled, Exit (for takeaway)
     const activeOrders = await Order.countDocuments({
       cartId: cafeId,
       createdAt: { $gte: today },
-      status: { $nin: ["Finalized", "Cancelled"] },
+      status: { 
+        $nin: [
+          "Finalized", 
+          "Cancelled", 
+          "Paid", 
+          "Returned", 
+          "Exit" // Takeaway final status
+        ] 
+      },
     });
 
     // Today's revenue - from orders that are Paid, Finalized, or Exit (includes both DINE_IN and TAKEAWAY)
