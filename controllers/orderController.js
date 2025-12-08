@@ -5,7 +5,9 @@ const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const { printKOT } = require("../services/kotPrinter");
-const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
+const {
+  consumeIngredientsForOrder,
+} = require("../services/costing-v2/orderConsumptionService");
 
 // Money helpers
 const toPaise = (n) => Math.round(Number(n) * 100);
@@ -20,21 +22,25 @@ function buildKot(items) {
 
   const lines = items.map((it, index) => {
     // Validate each item
-    if (!it || typeof it !== 'object') {
+    if (!it || typeof it !== "object") {
       throw new Error(`Item at index ${index} is invalid: must be an object`);
     }
-    if (!it.name || typeof it.name !== 'string' || it.name.trim() === '') {
+    if (!it.name || typeof it.name !== "string" || it.name.trim() === "") {
       throw new Error(`Item at index ${index} is missing or has invalid name`);
     }
     const quantity = Number(it.quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) {
-      throw new Error(`Item at index ${index} (${it.name}) has invalid quantity: ${it.quantity}`);
+      throw new Error(
+        `Item at index ${index} (${it.name}) has invalid quantity: ${it.quantity}`
+      );
     }
     const price = Number(it.price);
     if (!Number.isFinite(price) || price < 0) {
-      throw new Error(`Item at index ${index} (${it.name}) has invalid price: ${it.price}`);
+      throw new Error(
+        `Item at index ${index} (${it.name}) has invalid price: ${it.price}`
+      );
     }
-    
+
     return {
       name: String(it.name).trim(),
       quantity: quantity,
@@ -78,8 +84,7 @@ async function ensurePaymentRecord(order, options = {}) {
       amount,
       method: options.method || "CASH",
       status: options.status || "PAID",
-      description:
-        options.description || "Payment settled by admin",
+      description: options.description || "Payment settled by admin",
       paidAt: options.status === "PAID" ? new Date() : undefined,
     });
     created = true;
@@ -162,14 +167,14 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
     const tableId = order.table._id || order.table;
     const table = await Table.findById(tableId);
     if (!table) return;
-    
+
     const oldStatus = table.status;
     table.status = "AVAILABLE";
     table.currentOrder = null;
     table.set("sessionToken", undefined);
     table.lastAssignedAt = null;
     await table.save();
-    
+
     // Emit socket event for table status update
     if (io && table.cartId && emitToCafe) {
       emitToCafe(io, table.cartId.toString(), "table:status:updated", {
@@ -179,34 +184,46 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
         currentOrder: null,
       });
     }
-    
+
     // Notify next person in waitlist when table becomes available
     if (io) {
       const { notifyNextWaitlist } = require("./waitlistController");
       await notifyNextWaitlist(tableId, io);
     }
-    
-    console.log(`[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE`);
+
+    console.log(
+      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE`
+    );
   } catch (err) {
     console.error("Failed to release table", err);
   }
 }
 
 const createOrder = async (req, res) => {
-  console.log('[ORDER] createOrder called', {
+  console.log("[ORDER] createOrder called", {
     hasUser: !!req.user,
     userRole: req.user?.role,
-    userId: req.user?._id?.toString()
+    userId: req.user?._id?.toString(),
   });
   try {
-    const { items, serviceType = "DINE_IN", tableId, sessionToken, customerName, customerMobile, customerEmail } = req.body;
+    const {
+      items,
+      serviceType = "DINE_IN",
+      tableId,
+      sessionToken,
+      customerName,
+      customerMobile,
+      customerEmail,
+      cartId: requestCartId, // Accept cartId from request body (for takeaway orders from customer frontend)
+    } = req.body;
     let { tableNumber } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: "No items supplied" });
     }
 
-    const isTableService = serviceType === "DINE_IN" || serviceType === "TAKEAWAY";
+    const isTableService =
+      serviceType === "DINE_IN" || serviceType === "TAKEAWAY";
     if (!isTableService) {
       return res.status(400).json({ message: "Invalid service type" });
     }
@@ -224,7 +241,9 @@ const createOrder = async (req, res) => {
       }
 
       if (!tableId && !tableNumber) {
-        return res.status(400).json({ message: "Table selection is required for dine-in orders" });
+        return res
+          .status(400)
+          .json({ message: "Table selection is required for dine-in orders" });
       }
 
       if (tableId) {
@@ -241,10 +260,13 @@ const createOrder = async (req, res) => {
       }
 
       if (tableDoc.sessionToken && tableDoc.sessionToken !== sessionToken) {
-        return res.status(403).json({ message: "This table is currently assigned to another guest." });
+        return res.status(403).json({
+          message: "This table is currently assigned to another guest.",
+        });
       }
 
-      tableNumber = tableNumber || String(tableDoc.number ?? tableDoc.tableNumber);
+      tableNumber =
+        tableNumber || String(tableDoc.number ?? tableDoc.tableNumber);
       if (!tableNumber) {
         tableNumber = String(tableDoc.number || "");
       }
@@ -261,17 +283,17 @@ const createOrder = async (req, res) => {
     let kot;
     try {
       kot = buildKot(items);
-      console.log('[ORDER] KOT built successfully:', {
+      console.log("[ORDER] KOT built successfully:", {
         itemsCount: kot.items.length,
         subtotal: kot.subtotal,
         gst: kot.gst,
-        totalAmount: kot.totalAmount
+        totalAmount: kot.totalAmount,
       });
     } catch (kotError) {
-      console.error('[ORDER] Failed to build KOT:', kotError);
-      return res.status(400).json({ 
+      console.error("[ORDER] Failed to build KOT:", kotError);
+      return res.status(400).json({
         message: `Invalid order items: ${kotError.message}`,
-        error: kotError.message
+        error: kotError.message,
       });
     }
 
@@ -289,31 +311,62 @@ const createOrder = async (req, res) => {
     const seqStr = String(counter.seq).padStart(3, "0");
     const orderId = `ORD-${dateStr}${seqStr}`;
 
-    // Set cartId: priority 1) from authenticated cafe admin, 2) from table's cartId (for dine-in only), 3) from first active cafe (for takeaway)
+    // Set cartId: priority 1) from authenticated cafe admin, 2) from request body (for takeaway from customer frontend), 3) from table's cartId (for dine-in only), 4) from first active cafe (for takeaway fallback)
     let cartId = null;
     if (req.user && req.user.role === "admin" && req.user._id) {
       cartId = req.user._id;
-      console.log('[ORDER] Using cartId from authenticated user:', cartId.toString());
+      console.log(
+        "[ORDER] Using cartId from authenticated user:",
+        cartId.toString()
+      );
+    } else if (isTakeaway && requestCartId) {
+      // For takeaway orders, use cartId from request body (sent by customer frontend)
+      // Validate that the cartId exists and is an active admin
+      const User = require("../models/userModel");
+      const cartAdmin = await User.findById(requestCartId)
+        .select("_id franchiseId role isActive isApproved")
+        .lean();
+      if (cartAdmin && cartAdmin.role === "admin" && cartAdmin.isActive && cartAdmin.isApproved) {
+        cartId = requestCartId;
+        console.log(
+          "[ORDER] Using cartId from request body for takeaway:",
+          cartId.toString()
+        );
+      } else {
+        console.warn(
+          `[ORDER] WARNING: Invalid cartId in request (${requestCartId}). Cart admin not found or not active/approved. Falling back to first active cafe.`
+        );
+        // Fall through to fallback logic below
+      }
     } else if (!isTakeaway && tableDoc && tableDoc.cartId) {
       cartId = tableDoc.cartId;
-      console.log('[ORDER] Using cartId from table:', cartId.toString());
-    } else if (isTakeaway && !cartId) {
-      // For takeaway orders without authentication, get the first active cafe admin
+      console.log("[ORDER] Using cartId from table:", cartId.toString());
+    }
+    
+    // Fallback: For takeaway orders without cartId, get the first active cafe admin
+    if (isTakeaway && !cartId) {
       const User = require("../models/userModel");
-      const firstCafe = await User.findOne({ 
-        role: "admin", 
+      const firstCafe = await User.findOne({
+        role: "admin",
         isActive: true,
-        isApproved: true 
-      }).select("_id franchiseId").lean();
+        isApproved: true,
+      })
+        .select("_id franchiseId")
+        .lean();
       if (firstCafe) {
         cartId = firstCafe._id;
-        console.log('[ORDER] Using cartId from first active cafe for takeaway:', cartId.toString());
+        console.log(
+          "[ORDER] Using cartId from first active cafe for takeaway (fallback):",
+          cartId.toString()
+        );
       } else {
-        console.warn('[ORDER] WARNING: No active cafe admin found for takeaway order. Order will be created without cartId.');
+        console.warn(
+          "[ORDER] WARNING: No active cafe admin found for takeaway order. Order will be created without cartId."
+        );
         // Allow order to be created without cartId - it will be visible to super admin only
       }
     }
-    
+
     // Set franchiseId: priority 1) from authenticated cafe admin's franchise, 2) from table's franchiseId, 3) from cafe's franchise
     let franchiseId = null;
     if (req.user && req.user.role === "admin" && req.user.franchiseId) {
@@ -323,16 +376,18 @@ const createOrder = async (req, res) => {
     } else if (cartId) {
       // If we have cartId but no franchiseId, get it from the cafe admin user
       const User = require("../models/userModel");
-      const cafeAdmin = await User.findById(cartId).select("franchiseId").lean();
+      const cafeAdmin = await User.findById(cartId)
+        .select("franchiseId")
+        .lean();
       if (cafeAdmin && cafeAdmin.franchiseId) {
         franchiseId = cafeAdmin.franchiseId;
       }
     }
-    
+
     const orderData = {
       _id: orderId,
       tableNumber: String(tableNumber),
-      table: isTakeaway ? null : (tableDoc?._id || null), // No table for takeaway
+      table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway
       serviceType,
       sessionToken: isTakeaway ? undefined : sessionToken, // No session token needed for takeaway
       kotLines: [kot],
@@ -349,45 +404,53 @@ const createOrder = async (req, res) => {
 
     // Add customer information for takeaway orders only
     if (isTakeaway) {
-      if (customerName && customerName.trim()) orderData.customerName = customerName.trim();
-      if (customerMobile && customerMobile.trim()) orderData.customerMobile = customerMobile.trim();
-      if (customerEmail && customerEmail.trim()) orderData.customerEmail = customerEmail.trim();
+      if (customerName && customerName.trim())
+        orderData.customerName = customerName.trim();
+      if (customerMobile && customerMobile.trim())
+        orderData.customerMobile = customerMobile.trim();
+      if (customerEmail && customerEmail.trim())
+        orderData.customerEmail = customerEmail.trim();
     }
 
     // Log order data before creation for debugging
-    console.log('[ORDER] Attempting to create order with data:', {
+    console.log("[ORDER] Attempting to create order with data:", {
       orderId,
       serviceType,
       tableNumber,
-      cartId: cartId ? cartId.toString() : 'null',
-      franchiseId: franchiseId ? franchiseId.toString() : 'null',
+      cartId: cartId ? cartId.toString() : "null",
+      franchiseId: franchiseId ? franchiseId.toString() : "null",
       kotLinesCount: orderData.kotLines?.length || 0,
-      customerInfo: isTakeaway ? {
-        name: orderData.customerName || 'not provided',
-        mobile: orderData.customerMobile || 'not provided',
-        email: orderData.customerEmail || 'not provided'
-      } : 'N/A (DINE_IN)'
+      customerInfo: isTakeaway
+        ? {
+            name: orderData.customerName || "not provided",
+            mobile: orderData.customerMobile || "not provided",
+            email: orderData.customerEmail || "not provided",
+          }
+        : "N/A (DINE_IN)",
     });
 
     let order;
     try {
       order = await Order.create(orderData);
     } catch (createError) {
-      console.error('[ORDER] Failed to create order:', createError);
-      console.error('[ORDER] Order data that failed:', JSON.stringify(orderData, null, 2));
-      return res.status(400).json({ 
+      console.error("[ORDER] Failed to create order:", createError);
+      console.error(
+        "[ORDER] Order data that failed:",
+        JSON.stringify(orderData, null, 2)
+      );
+      return res.status(400).json({
         message: `Failed to create order: ${createError.message}`,
         error: createError.message,
-        details: createError.errors || 'Unknown error'
+        details: createError.errors || "Unknown error",
       });
     }
-    
+
     // Log order creation with franchise info for debugging
     console.log(`[ORDER] Successfully created order ${orderId}:`, {
-      cartId: cartId ? cartId.toString() : 'none',
-      franchiseId: franchiseId ? franchiseId.toString() : 'none',
+      cartId: cartId ? cartId.toString() : "none",
+      franchiseId: franchiseId ? franchiseId.toString() : "none",
       serviceType,
-      tableNumber
+      tableNumber,
     });
 
     // Only update table status for dine-in orders
@@ -399,7 +462,11 @@ const createOrder = async (req, res) => {
     }
 
     // Create or update customer record for takeaway orders (non-blocking)
-    if (isTakeaway && (customerName || customerMobile || customerEmail) && cartId) {
+    if (
+      isTakeaway &&
+      (customerName || customerMobile || customerEmail) &&
+      cartId
+    ) {
       // Run asynchronously so it doesn't block order creation
       (async () => {
         try {
@@ -410,41 +477,73 @@ const createOrder = async (req, res) => {
           } else if (customerEmail) {
             customerQuery.email = customerEmail.trim().toLowerCase();
           }
-          
-          // Also filter by cartId to ensure customer belongs to the right cafe
+
+          // Also filter by cartId/cafeId to ensure customer belongs to the right cafe
+          // Check both cartId and cafeId for consistency (they should be the same for cart admins)
           if (cartId) {
-            customerQuery.cartId = cartId;
+            customerQuery.$and = [
+              ...(customerQuery.$and || []),
+              {
+                $or: [{ cartId: cartId }, { cafeId: cartId }],
+              },
+            ];
+            // Handle $or if it exists
+            if (customerQuery.$or) {
+              const orCondition = customerQuery.$or;
+              delete customerQuery.$or;
+              customerQuery.$and = [
+                { $or: orCondition },
+                {
+                  $or: [{ cartId: cartId }, { cafeId: cartId }],
+                },
+              ];
+            }
           }
-          
+
           let customer = null;
           if (customerMobile || customerEmail) {
             customer = await Customer.findOne(customerQuery);
           }
-          
+
           const orderTotal = kot.totalAmount || 0;
-          
+
           if (customer) {
             // Update existing customer
             customer.incrementVisit();
             customer.lastVisitAt = new Date();
             customer.totalSpent = (customer.totalSpent || 0) + orderTotal;
             customer.lastOrderId = order._id;
-            
+
             // Update name/email if provided and different
-            if (customerName && customerName.trim() && customer.name !== customerName.trim()) {
+            if (
+              customerName &&
+              customerName.trim() &&
+              customer.name !== customerName.trim()
+            ) {
               customer.name = customerName.trim();
             }
-            if (customerEmail && customerEmail.trim() && customer.email !== customerEmail.trim().toLowerCase()) {
+            if (
+              customerEmail &&
+              customerEmail.trim() &&
+              customer.email !== customerEmail.trim().toLowerCase()
+            ) {
               customer.email = customerEmail.trim().toLowerCase();
             }
-            if (customerMobile && customerMobile.trim() && customer.phone !== customerMobile.trim()) {
+            if (
+              customerMobile &&
+              customerMobile.trim() &&
+              customer.phone !== customerMobile.trim()
+            ) {
               customer.phone = customerMobile.trim();
             }
-            
+
             await customer.save();
-            console.log(`[ORDER] Updated customer record: ${customer._id} for order ${orderId}`);
+            console.log(
+              `[ORDER] Updated customer record: ${customer._id} for order ${orderId}`
+            );
           } else if (customerName || customerMobile || customerEmail) {
             // Create new customer record
+            // Set both cartId and cafeId for consistency (they should be the same for cart admins)
             const newCustomerData = {
               name: customerName ? customerName.trim() : "Guest",
               visitCount: 1,
@@ -453,22 +552,28 @@ const createOrder = async (req, res) => {
               totalSpent: orderTotal,
               lastOrderId: order._id,
               cartId: cartId,
+              cafeId: cartId, // Set cafeId to match cartId for consistency
               franchiseId: franchiseId,
             };
-            
+
             if (customerEmail && customerEmail.trim()) {
               newCustomerData.email = customerEmail.trim().toLowerCase();
             }
             if (customerMobile && customerMobile.trim()) {
               newCustomerData.phone = customerMobile.trim();
             }
-            
+
             customer = await Customer.create(newCustomerData);
-            console.log(`[ORDER] Created new customer record: ${customer._id} for order ${orderId}`);
+            console.log(
+              `[ORDER] Created new customer record: ${customer._id} for order ${orderId}`
+            );
           }
         } catch (customerError) {
           // Log error but don't fail the order creation
-          console.error('[ORDER] Failed to create/update customer record:', customerError);
+          console.error(
+            "[ORDER] Failed to create/update customer record:",
+            customerError
+          );
         }
       })();
     }
@@ -483,8 +588,8 @@ const createOrder = async (req, res) => {
     }
 
     // Print KOT to printer (non-blocking)
-    printKOT(order, kot, 0).catch(err => {
-      console.error('[ORDER] Failed to print KOT:', err);
+    printKOT(order, kot, 0).catch((err) => {
+      console.error("[ORDER] Failed to print KOT:", err);
     });
 
     return res.status(201).json(order);
@@ -495,29 +600,43 @@ const createOrder = async (req, res) => {
 
 // ---------------- ADD KOT ----------------
 const addKot = async (req, res) => {
-  console.log('[ORDER] addKot called - no auth required');
-  console.log('[ORDER] addKot - Order ID:', req.params.id);
-  console.log('[ORDER] addKot - Request body:', JSON.stringify(req.body, null, 2));
+  console.log("[ORDER] addKot called - no auth required");
+  console.log("[ORDER] addKot - Order ID:", req.params.id);
+  console.log(
+    "[ORDER] addKot - Request body:",
+    JSON.stringify(req.body, null, 2)
+  );
   try {
     const { items } = req.body;
-    
+
     // Enhanced validation with detailed error messages
     if (!items) {
-      console.error('[ORDER] addKot - Missing items field in request body');
-      return res.status(400).json({ message: "No items field supplied in request body" });
+      console.error("[ORDER] addKot - Missing items field in request body");
+      return res
+        .status(400)
+        .json({ message: "No items field supplied in request body" });
     }
     if (!Array.isArray(items)) {
-      console.error('[ORDER] addKot - Items is not an array:', typeof items, items);
-      return res.status(400).json({ message: `Items must be an array, received: ${typeof items}` });
+      console.error(
+        "[ORDER] addKot - Items is not an array:",
+        typeof items,
+        items
+      );
+      return res
+        .status(400)
+        .json({ message: `Items must be an array, received: ${typeof items}` });
     }
     if (items.length === 0) {
-      console.error('[ORDER] addKot - Items array is empty');
-      return res.status(400).json({ message: "Items array is empty. Please add at least one item to the order." });
+      console.error("[ORDER] addKot - Items array is empty");
+      return res.status(400).json({
+        message:
+          "Items array is empty. Please add at least one item to the order.",
+      });
     }
 
     const order = await Order.findById(req.params.id);
     if (!order) {
-      console.error('[ORDER] addKot - Order not found:', req.params.id);
+      console.error("[ORDER] addKot - Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
     }
 
@@ -526,34 +645,48 @@ const addKot = async (req, res) => {
     // For dine-in orders, also allow more statuses for flexibility
     const allowedStatusesForKot = [
       "Pending",
-      "Confirmed", 
-      "Preparing", 
-      "Ready"
+      "Confirmed",
+      "Preparing",
+      "Ready",
     ];
-    
+
     // Never allow adding KOTs to these final statuses
-    const blockedStatuses = ["Cancelled", "Returned", "Paid", "Served", "Finalized"];
-    
+    const blockedStatuses = [
+      "Cancelled",
+      "Returned",
+      "Paid",
+      "Served",
+      "Finalized",
+    ];
+
     if (blockedStatuses.includes(order.status)) {
-      console.error('[ORDER] addKot - Order is in a final status that blocks KOTs:', order.status);
-      return res.status(400).json({ 
-        message: `Cannot add items to order with status: ${order.status}. Order is already ${order.status.toLowerCase()}.`,
-        currentStatus: order.status
+      console.error(
+        "[ORDER] addKot - Order is in a final status that blocks KOTs:",
+        order.status
+      );
+      return res.status(400).json({
+        message: `Cannot add items to order with status: ${
+          order.status
+        }. Order is already ${order.status.toLowerCase()}.`,
+        currentStatus: order.status,
       });
     }
-    
+
     if (!allowedStatusesForKot.includes(order.status)) {
-      console.error('[ORDER] addKot - Order status does not allow adding KOTs:', order.status);
-      return res.status(400).json({ 
+      console.error(
+        "[ORDER] addKot - Order status does not allow adding KOTs:",
+        order.status
+      );
+      return res.status(400).json({
         message: `Order is not open for adding items. Current status: ${order.status}. Please contact staff if you need to modify your order.`,
         currentStatus: order.status,
-        allowedStatuses: allowedStatusesForKot
+        allowedStatuses: allowedStatusesForKot,
       });
     }
 
     // Ensure cartId and franchiseId are set if missing (for orders created before fix)
     let needsSave = false;
-    
+
     // For dine-in orders, get cartId/franchiseId from table
     if ((!order.cartId || !order.franchiseId) && order.table) {
       const tableDoc = await Table.findById(order.table);
@@ -568,16 +701,21 @@ const addKot = async (req, res) => {
         }
       }
     }
-    
+
     // For takeaway orders without cartId/franchiseId, assign from first active cafe
-    if (order.serviceType === "TAKEAWAY" && (!order.cartId || !order.franchiseId)) {
+    if (
+      order.serviceType === "TAKEAWAY" &&
+      (!order.cartId || !order.franchiseId)
+    ) {
       const User = require("../models/userModel");
       if (!order.cartId) {
-        const firstCafe = await User.findOne({ 
-          role: "admin", 
+        const firstCafe = await User.findOne({
+          role: "admin",
           isActive: true,
-          isApproved: true 
-        }).select("_id franchiseId").lean();
+          isApproved: true,
+        })
+          .select("_id franchiseId")
+          .lean();
         if (firstCafe) {
           order.cartId = firstCafe._id;
           needsSave = true;
@@ -588,29 +726,33 @@ const addKot = async (req, res) => {
         }
       } else if (!order.franchiseId && order.cartId) {
         // If we have cartId but no franchiseId, get it from cafe admin
-        const cafeAdmin = await User.findById(order.cartId).select("franchiseId").lean();
+        const cafeAdmin = await User.findById(order.cartId)
+          .select("franchiseId")
+          .lean();
         if (cafeAdmin && cafeAdmin.franchiseId) {
           order.franchiseId = cafeAdmin.franchiseId;
           needsSave = true;
         }
       }
     }
-    
+
     // If we still don't have franchiseId but have cartId, get it from cafe admin
     if (!order.franchiseId && order.cartId) {
       const User = require("../models/userModel");
-      const cafeAdmin = await User.findById(order.cartId).select("franchiseId").lean();
+      const cafeAdmin = await User.findById(order.cartId)
+        .select("franchiseId")
+        .lean();
       if (cafeAdmin && cafeAdmin.franchiseId) {
         order.franchiseId = cafeAdmin.franchiseId;
         needsSave = true;
       }
     }
-    
+
     if (needsSave) {
-      console.log('[ORDER] addKot - Updating order with cartId/franchiseId:', {
+      console.log("[ORDER] addKot - Updating order with cartId/franchiseId:", {
         orderId: order._id,
-        cartId: order.cartId ? order.cartId.toString() : 'none',
-        franchiseId: order.franchiseId ? order.franchiseId.toString() : 'none'
+        cartId: order.cartId ? order.cartId.toString() : "none",
+        franchiseId: order.franchiseId ? order.franchiseId.toString() : "none",
       });
       await order.save();
     }
@@ -619,34 +761,38 @@ const addKot = async (req, res) => {
     let newKot;
     try {
       newKot = buildKot(items);
-      console.log('[ORDER] addKot - KOT built successfully:', {
+      console.log("[ORDER] addKot - KOT built successfully:", {
         itemsCount: newKot.items.length,
         subtotal: newKot.subtotal,
         gst: newKot.gst,
-        totalAmount: newKot.totalAmount
+        totalAmount: newKot.totalAmount,
       });
     } catch (kotError) {
-      console.error('[ORDER] addKot - Failed to build KOT:', kotError);
-      return res.status(400).json({ 
+      console.error("[ORDER] addKot - Failed to build KOT:", kotError);
+      return res.status(400).json({
         message: `Invalid order items: ${kotError.message}`,
-        error: kotError.message
+        error: kotError.message,
       });
     }
 
     order.kotLines.push(newKot);
     try {
       await order.save();
-      console.log('[ORDER] addKot - Order updated successfully:', order._id);
+      console.log("[ORDER] addKot - Order updated successfully:", order._id);
     } catch (saveError) {
-      console.error('[ORDER] addKot - Failed to save order:', saveError);
-      return res.status(400).json({ 
+      console.error("[ORDER] addKot - Failed to save order:", saveError);
+      return res.status(400).json({
         message: `Failed to save order: ${saveError.message}`,
-        error: saveError.message
+        error: saveError.message,
       });
     }
 
     // Update customer record for takeaway orders (non-blocking)
-    if (order.serviceType === "TAKEAWAY" && (order.customerName || order.customerMobile || order.customerEmail) && order.cartId) {
+    if (
+      order.serviceType === "TAKEAWAY" &&
+      (order.customerName || order.customerMobile || order.customerEmail) &&
+      order.cartId
+    ) {
       // Run asynchronously so it doesn't block order update
       (async () => {
         try {
@@ -656,29 +802,34 @@ const addKot = async (req, res) => {
           } else if (order.customerEmail) {
             customerQuery.email = order.customerEmail.trim().toLowerCase();
           }
-          
+
           if (order.cartId) {
             customerQuery.cartId = order.cartId;
           }
-          
+
           let customer = null;
           if (order.customerMobile || order.customerEmail) {
             customer = await Customer.findOne(customerQuery);
           }
-          
+
           const newKotTotal = newKot.totalAmount || 0;
-          
+
           if (customer) {
             // Update existing customer's total spent
             customer.totalSpent = (customer.totalSpent || 0) + newKotTotal;
             customer.lastOrderId = order._id;
             customer.lastVisitAt = new Date();
             await customer.save();
-            console.log(`[ORDER] addKot - Updated customer record: ${customer._id} for order ${order._id}`);
+            console.log(
+              `[ORDER] addKot - Updated customer record: ${customer._id} for order ${order._id}`
+            );
           }
         } catch (customerError) {
           // Log error but don't fail the order update
-          console.error('[ORDER] addKot - Failed to update customer record:', customerError);
+          console.error(
+            "[ORDER] addKot - Failed to update customer record:",
+            customerError
+          );
         }
       })();
     }
@@ -694,8 +845,8 @@ const addKot = async (req, res) => {
 
     // Print new KOT to printer (non-blocking)
     const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex).catch(err => {
-      console.error('[ORDER] Failed to print KOT:', err);
+    printKOT(order, newKot, kotIndex).catch((err) => {
+      console.error("[ORDER] Failed to print KOT:", err);
     });
 
     return res.json(order);
@@ -709,23 +860,23 @@ const finalizeOrder = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) {
-      console.log('Order not found:', req.params.id);
+      console.log("Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
     }
-    
-    console.log('Attempting to finalize order:', {
+
+    console.log("Attempting to finalize order:", {
       orderId: order._id,
       currentStatus: order.status,
       allowedTransitions: Array.from(transitions[order.status] || []),
     });
-    
+
     if (!transitions[order.status]?.has("Finalized")) {
-      console.log('Invalid transition:', {
+      console.log("Invalid transition:", {
         from: order.status,
-        to: 'Finalized',
+        to: "Finalized",
         allowedTransitions: Array.from(transitions[order.status] || []),
       });
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Cannot finalize from ${order.status}. Order must be in 'Served' state.`,
         currentStatus: order.status,
         allowedTransitions: Array.from(transitions[order.status] || []),
@@ -760,7 +911,7 @@ const finalizeOrder = async (req, res) => {
 const getOrders = async (req, res) => {
   try {
     const query = {};
-    
+
     // Filter orders based on user role:
     // - Cart admin (admin): ONLY see orders from their cart (cartId matches their _id) - CRITICAL FOR DATA ISOLATION
     // - Franchise admin: only orders from cafes under their franchise (franchiseId matches their _id)
@@ -770,25 +921,40 @@ const getOrders = async (req, res) => {
       // CRITICAL: Cart admin - ONLY see orders from their own cart
       // This ensures complete data isolation between carts
       query.cartId = req.user._id;
-      console.log(`[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`);
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+      console.log(
+        `[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`
+      );
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
       // Franchise admin - only see orders from cafes under their franchise
       query.franchiseId = req.user._id;
-      console.log(`[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`);
-    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      console.log(
+        `[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`
+      );
+    } else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       // Mobile users - ONLY see orders from their assigned cart/kiosk
       // Use cafeId from req.user (populated by middleware)
       if (req.user.cafeId) {
         query.cartId = req.user.cafeId;
-        console.log(`[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`);
+        console.log(
+          `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`
+        );
       } else {
         // If cafeId not set, return empty array (should not happen if middleware works correctly)
-        console.warn(`[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`);
+        console.warn(
+          `[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`
+        );
         return res.json([]);
       }
     }
     // For super_admin, no query-level restriction (see all orders)
-    
+
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
     const orders = await Order.find(query)
@@ -796,30 +962,40 @@ const getOrders = async (req, res) => {
       .limit(10000) // Safety limit to prevent infinite queries
       .populate("table")
       .lean();
-    
+
     // Ensure franchiseId is set for orders that have cartId but missing franchiseId
     const User = require("../models/userModel");
     for (const order of orders) {
       if (!order.franchiseId && order.cartId) {
         try {
-          const cartId = order.cartId.toString ? order.cartId.toString() : order.cartId;
+          const cartId = order.cartId.toString
+            ? order.cartId.toString()
+            : order.cartId;
           const cafe = await User.findById(cartId).select("franchiseId").lean();
           if (cafe && cafe.franchiseId) {
             order.franchiseId = cafe.franchiseId;
             // Update order in database (non-blocking)
-            Order.findByIdAndUpdate(order._id, { franchiseId: cafe.franchiseId }).catch(err => {
-              console.warn(`[GET_ORDERS] Failed to update order ${order._id} franchiseId:`, err.message);
+            Order.findByIdAndUpdate(order._id, {
+              franchiseId: cafe.franchiseId,
+            }).catch((err) => {
+              console.warn(
+                `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
+                err.message
+              );
             });
           }
         } catch (err) {
-          console.warn(`[GET_ORDERS] Error fetching franchiseId for order ${order._id}:`, err.message);
+          console.warn(
+            `[GET_ORDERS] Error fetching franchiseId for order ${order._id}:`,
+            err.message
+          );
         }
       }
     }
-    
+
     return res.json(orders);
   } catch (err) {
-    console.error('[GET_ORDERS] Error:', err);
+    console.error("[GET_ORDERS] Error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -829,20 +1005,27 @@ const getOrderById = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id).populate("table").lean();
     if (!order) return res.status(404).json({ message: "Order not found" });
-    
+
     // Ensure franchiseId is set if missing (for old orders)
     if (!order.franchiseId && order.cartId) {
       const User = require("../models/userModel");
-      const cafe = await User.findById(order.cartId).select("franchiseId").lean();
+      const cafe = await User.findById(order.cartId)
+        .select("franchiseId")
+        .lean();
       if (cafe && cafe.franchiseId) {
         // Update order with franchiseId (non-blocking)
-        Order.findByIdAndUpdate(req.params.id, { franchiseId: cafe.franchiseId }).catch(err => {
-          console.warn(`[INVOICE] Failed to update order franchiseId:`, err.message);
+        Order.findByIdAndUpdate(req.params.id, {
+          franchiseId: cafe.franchiseId,
+        }).catch((err) => {
+          console.warn(
+            `[INVOICE] Failed to update order franchiseId:`,
+            err.message
+          );
         });
         order.franchiseId = cafe.franchiseId;
       }
     }
-    
+
     // Check access permissions based on user role:
     // - Cafe admin: can only access orders from their cafe
     // - Franchise admin: can only access orders from cafes under their franchise
@@ -851,32 +1034,60 @@ const getOrderById = async (req, res) => {
     // - Public (no auth): can access orders (for frontend customers)
     if (req.user && req.user.role === "admin" && req.user._id) {
       // Cafe admin - check if order belongs to their cafe
-      if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cafe" });
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
       // Franchise admin - check if order belongs to their franchise
-      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your franchise" });
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
       }
-    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+    } else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       // Mobile users - check if order belongs to their assigned cart/kiosk
       if (!req.user.cafeId) {
-        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+        return res
+          .status(403)
+          .json({ message: "No cart/kiosk assigned to your account" });
       }
-      if (!order.cartId || order.cartId.toString() !== req.user.cafeId.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user.cafeId.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
     // For super_admin, no restriction (they can see all orders)
-    
+
     // Populate franchise GST number if franchiseId exists
     if (order.franchiseId) {
       const User = require("../models/userModel");
-      const franchiseId = order.franchiseId.toString ? order.franchiseId.toString() : order.franchiseId;
+      const franchiseId = order.franchiseId.toString
+        ? order.franchiseId.toString()
+        : order.franchiseId;
       console.log(`[INVOICE] Fetching franchise data for ID: ${franchiseId}`);
-      
-      const franchise = await User.findById(franchiseId).select("gstNumber name address").lean();
+
+      const franchise = await User.findById(franchiseId)
+        .select("gstNumber name address")
+        .lean();
       if (franchise) {
         order.franchise = {
           gstNumber: franchise.gstNumber,
@@ -886,7 +1097,7 @@ const getOrderById = async (req, res) => {
         console.log(`[INVOICE] Franchise data loaded:`, {
           name: franchise.name,
           gstNumber: franchise.gstNumber,
-          hasAddress: !!franchise.address
+          hasAddress: !!franchise.address,
         });
       } else {
         console.warn(`[INVOICE] Franchise not found for ID: ${franchiseId}`);
@@ -894,14 +1105,18 @@ const getOrderById = async (req, res) => {
     } else {
       console.warn(`[INVOICE] Order ${order._id} has no franchiseId`);
     }
-    
+
     // Populate cafe address if cartId exists
     if (order.cartId) {
       const User = require("../models/userModel");
-      const cartId = order.cartId.toString ? order.cartId.toString() : order.cartId;
+      const cartId = order.cartId.toString
+        ? order.cartId.toString()
+        : order.cartId;
       console.log(`[INVOICE] Fetching cafe data for ID: ${cartId}`);
-      
-      const cafe = await User.findById(cartId).select("address cartName location name").lean();
+
+      const cafe = await User.findById(cartId)
+        .select("address cartName location name")
+        .lean();
       if (cafe) {
         order.cafe = {
           address: cafe.address || cafe.location,
@@ -909,7 +1124,7 @@ const getOrderById = async (req, res) => {
         };
         console.log(`[INVOICE] Cafe data loaded:`, {
           cartName: order.cafe.cartName,
-          address: order.cafe.address
+          address: order.cafe.address,
         });
       } else {
         console.warn(`[INVOICE] Cafe not found for ID: ${cartId}`);
@@ -917,7 +1132,7 @@ const getOrderById = async (req, res) => {
     } else {
       console.warn(`[INVOICE] Order ${order._id} has no cartId`);
     }
-    
+
     return res.json(order);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -932,13 +1147,19 @@ const addItemsToOrder = async (req, res) => {
 
     // Validate items
     if (!items) {
-      return res.status(400).json({ message: "No items field supplied in request body" });
+      return res
+        .status(400)
+        .json({ message: "No items field supplied in request body" });
     }
     if (!Array.isArray(items)) {
-      return res.status(400).json({ message: `Items must be an array, received: ${typeof items}` });
+      return res
+        .status(400)
+        .json({ message: `Items must be an array, received: ${typeof items}` });
     }
     if (items.length === 0) {
-      return res.status(400).json({ message: "Items array is empty. Please add at least one item." });
+      return res.status(400).json({
+        message: "Items array is empty. Please add at least one item.",
+      });
     }
 
     // Find the order
@@ -953,30 +1174,54 @@ const addItemsToOrder = async (req, res) => {
       // - For DINE_IN orders, enforce strict cart ownership
       // - For TAKEAWAY orders, allow modification even if cartId is missing/mismatched
       if (order.serviceType !== "TAKEAWAY") {
-        if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Order does not belong to your cafe" });
+        if (
+          !order.cartId ||
+          order.cartId.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({ message: "Order does not belong to your cafe" });
         }
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your franchise" });
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
       }
-    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+    } else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       // Mobile users - can only add items to orders from their assigned cart/kiosk
       if (!req.user.cafeId) {
-        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+        return res
+          .status(403)
+          .json({ message: "No cart/kiosk assigned to your account" });
       }
-      if (!order.cartId || order.cartId.toString() !== req.user.cafeId.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user.cafeId.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
 
     // Check if order can be modified - only allow adding items until payment is done
     // Block adding items to Paid, Cancelled, or Returned orders
     if (["Paid", "Cancelled", "Returned"].includes(order.status)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Cannot add items to order with status: ${order.status}. Items can only be added to unpaid orders.`,
-        currentStatus: order.status
+        currentStatus: order.status,
       });
     }
 
@@ -984,31 +1229,37 @@ const addItemsToOrder = async (req, res) => {
     let newKot;
     try {
       newKot = buildKot(items);
-      console.log('[ORDER] addItemsToOrder - KOT built successfully:', {
+      console.log("[ORDER] addItemsToOrder - KOT built successfully:", {
         itemsCount: newKot.items.length,
         subtotal: newKot.subtotal,
         gst: newKot.gst,
-        totalAmount: newKot.totalAmount
+        totalAmount: newKot.totalAmount,
       });
     } catch (kotError) {
-      console.error('[ORDER] addItemsToOrder - Failed to build KOT:', kotError);
-      return res.status(400).json({ 
+      console.error("[ORDER] addItemsToOrder - Failed to build KOT:", kotError);
+      return res.status(400).json({
         message: `Invalid order items: ${kotError.message}`,
-        error: kotError.message
+        error: kotError.message,
       });
     }
 
     // Add the new KOT to the order
     order.kotLines.push(newKot);
-    
+
     try {
       await order.save();
-      console.log('[ORDER] addItemsToOrder - Order updated successfully:', order._id);
+      console.log(
+        "[ORDER] addItemsToOrder - Order updated successfully:",
+        order._id
+      );
     } catch (saveError) {
-      console.error('[ORDER] addItemsToOrder - Failed to save order:', saveError);
-      return res.status(400).json({ 
+      console.error(
+        "[ORDER] addItemsToOrder - Failed to save order:",
+        saveError
+      );
+      return res.status(400).json({
         message: `Failed to save order: ${saveError.message}`,
-        error: saveError.message
+        error: saveError.message,
       });
     }
 
@@ -1024,13 +1275,13 @@ const addItemsToOrder = async (req, res) => {
 
     // Print new KOT to printer (non-blocking)
     const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex).catch(err => {
-      console.error('[ORDER] Failed to print KOT:', err);
+    printKOT(order, newKot, kotIndex).catch((err) => {
+      console.error("[ORDER] Failed to print KOT:", err);
     });
 
     return res.json(order);
   } catch (err) {
-    console.error('[ORDER] addItemsToOrder - Error:', err);
+    console.error("[ORDER] addItemsToOrder - Error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1051,14 +1302,28 @@ const updateOrderStatus = async (req, res) => {
     if (req.user && req.user.role === "admin" && req.user._id) {
       // Cafe admin - only enforce cartId check for dine-in orders
       if (order.serviceType !== "TAKEAWAY") {
-        if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Order does not belong to your cafe" });
+        if (
+          !order.cartId ||
+          order.cartId.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({ message: "Order does not belong to your cafe" });
         }
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
       // Franchise admin - check if order belongs to their franchise
-      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your franchise" });
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
       }
     }
     // For super_admin, no restriction (they can update all orders)
@@ -1067,51 +1332,76 @@ const updateOrderStatus = async (req, res) => {
     // This gives admins full control over order status regardless of normal flow
     // Include both DINE_IN and TAKEAWAY statuses
     const validStatuses = [
-      "Pending", "Confirmed", "Preparing", "Ready", "Served", "Finalized", "Paid", "Cancelled", "Returned",
+      "Pending",
+      "Confirmed",
+      "Preparing",
+      "Ready",
+      "Served",
+      "Finalized",
+      "Paid",
+      "Cancelled",
+      "Returned",
       // TAKEAWAY statuses
-      "Accept", "Accepted", "Being Prepared", "BeingPrepared", "Completed", "Exit"
+      "Accept",
+      "Accepted",
+      "Being Prepared",
+      "BeingPrepared",
+      "Completed",
+      "Exit",
     ];
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Invalid status: ${status}`,
-        validStatuses
+        validStatuses,
       });
     }
-    
+
     // For non-admin users, validate status transitions based on service type
-    if (req.user && !["admin", "franchise_admin", "super_admin"].includes(req.user.role)) {
+    if (
+      req.user &&
+      !["admin", "franchise_admin", "super_admin"].includes(req.user.role)
+    ) {
       const currentStatus = order.status;
       const allowedTransitions = transitions[currentStatus] || new Set();
-      
+
       // Normalize status names for comparison (handle "Being Prepared" vs "BeingPrepared")
-      const normalizedStatus = status === "Being Prepared" ? "BeingPrepared" : status;
-      const normalizedCurrent = currentStatus === "Being Prepared" ? "BeingPrepared" : currentStatus;
-      
+      const normalizedStatus =
+        status === "Being Prepared" ? "BeingPrepared" : status;
+      const normalizedCurrent =
+        currentStatus === "Being Prepared" ? "BeingPrepared" : currentStatus;
+
       // Check if transition is allowed
-      if (!allowedTransitions.has(status) && !allowedTransitions.has(normalizedStatus)) {
+      if (
+        !allowedTransitions.has(status) &&
+        !allowedTransitions.has(normalizedStatus)
+      ) {
         // Special handling: Allow "Accept" -> "Being Prepared" for takeaway orders starting from Pending
-        if (order.serviceType === "TAKEAWAY" && 
-            (currentStatus === "Pending" || currentStatus === "Accept" || currentStatus === "Accepted") &&
-            (status === "Being Prepared" || status === "BeingPrepared")) {
+        if (
+          order.serviceType === "TAKEAWAY" &&
+          (currentStatus === "Pending" ||
+            currentStatus === "Accept" ||
+            currentStatus === "Accepted") &&
+          (status === "Being Prepared" || status === "BeingPrepared")
+        ) {
           // Allow this transition
         } else {
-          return res.status(400).json({ 
+          return res.status(400).json({
             message: `Invalid status transition from ${currentStatus} to ${status}`,
             currentStatus,
             requestedStatus: status,
-            allowedTransitions: Array.from(allowedTransitions)
+            allowedTransitions: Array.from(allowedTransitions),
           });
         }
       }
     }
 
     // Log the status change (admin has full control)
-    console.log('Status update (admin flexible):', {
+    console.log("Status update (admin flexible):", {
       orderId: order._id,
       serviceType: order.serviceType,
       currentStatus: order.status,
       requestedStatus: status,
-      isAdmin: !!req.user
+      isAdmin: !!req.user,
     });
 
     const io = req.app.get("io");
@@ -1145,49 +1435,72 @@ const updateOrderStatus = async (req, res) => {
 
     // Automatically consume ingredients when order is marked as Ready, Paid, or Finalized
     // This ensures ingredients are consumed when order is sold, even if it skips "Ready" status
-    const shouldConsumeIngredients = (status === "Ready" || status === "Paid" || status === "Finalized") && req.user;
-    
+    const shouldConsumeIngredients =
+      (status === "Ready" || status === "Paid" || status === "Finalized") &&
+      req.user;
+
     if (shouldConsumeIngredients) {
       try {
-        console.log(`[COSTING] Order ${order._id} marked as ${status} - consuming ingredients...`);
+        console.log(
+          `[COSTING] Order ${order._id} marked as ${status} - consuming ingredients...`
+        );
         console.log(`[COSTING] Order details:`, {
           orderId: order._id,
           cartId: order.cartId,
           cafeId: order.cafeId,
           kotLinesCount: order.kotLines?.length || 0,
-          itemsCount: order.kotLines?.reduce((sum, kot) => sum + (kot.items?.length || 0), 0) || 0,
+          itemsCount:
+            order.kotLines?.reduce(
+              (sum, kot) => sum + (kot.items?.length || 0),
+              0
+            ) || 0,
         });
-        
+
         // Ensure order is populated before consumption
         const orderForConsumption = await Order.findById(order._id).lean();
         if (!orderForConsumption) {
           console.error(`[COSTING] Order ${order._id} not found after save`);
           return;
         }
-        
-        const consumptionResult = await consumeIngredientsForOrder(orderForConsumption, req.user._id);
+
+        const consumptionResult = await consumeIngredientsForOrder(
+          orderForConsumption,
+          req.user._id
+        );
         if (consumptionResult.success) {
-          console.log(`[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`);
+          console.log(
+            `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`
+          );
           if (consumptionResult.summary) {
             console.log(`[COSTING] Consumption summary:`, {
               itemsProcessed: consumptionResult.summary.itemsProcessed,
-              ingredientsConsumed: consumptionResult.summary.ingredientsConsumed.length,
+              ingredientsConsumed:
+                consumptionResult.summary.ingredientsConsumed.length,
               totalCost: consumptionResult.summary.totalCost,
               errors: consumptionResult.summary.errors.length,
             });
             if (consumptionResult.summary.errors.length > 0) {
-              console.warn(`[COSTING] ⚠️ Consumption errors:`, consumptionResult.summary.errors);
+              console.warn(
+                `[COSTING] ⚠️ Consumption errors:`,
+                consumptionResult.summary.errors
+              );
             }
           }
         } else {
-          console.warn(`[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`, consumptionResult.error || consumptionResult.message);
+          console.warn(
+            `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
+            consumptionResult.error || consumptionResult.message
+          );
           if (consumptionResult.summary?.errors) {
             console.warn(`[COSTING] Errors:`, consumptionResult.summary.errors);
           }
           // Don't fail the order status update if consumption fails - log warning only
         }
       } catch (consumptionError) {
-        console.error(`[COSTING] ❌ Error consuming ingredients for order ${order._id}:`, consumptionError);
+        console.error(
+          `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
+          consumptionError
+        );
         console.error(`[COSTING] Error stack:`, consumptionError.stack);
         // Don't fail the order status update if consumption fails - log error only
       }
@@ -1235,10 +1548,10 @@ const updateOrderStatus = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
     }
 
-    console.log('Status updated successfully:', order._id, '→', status);
+    console.log("Status updated successfully:", order._id, "→", status);
     return res.json(order);
   } catch (err) {
-    console.error('Status update error:', err);
+    console.error("Status update error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1248,10 +1561,12 @@ const cancelOrderByCustomer = async (req, res) => {
   try {
     const { status, sessionToken } = req.body;
     const orderId = req.params.id;
-    
+
     if (!status) return res.status(400).json({ message: "Status required" });
     if (status !== "Cancelled" && status !== "Returned") {
-      return res.status(400).json({ message: "Only Cancelled or Returned status allowed for customers" });
+      return res.status(400).json({
+        message: "Only Cancelled or Returned status allowed for customers",
+      });
     }
 
     const order = await Order.findById(orderId);
@@ -1262,7 +1577,7 @@ const cancelOrderByCustomer = async (req, res) => {
       if (!sessionToken) {
         return res.status(401).json({ message: "Not authorized, no token" });
       }
-      
+
       // Check sessionToken matches order's sessionToken or table's sessionToken
       let tokenMatches = false;
       if (order.sessionToken === sessionToken) {
@@ -1273,23 +1588,36 @@ const cancelOrderByCustomer = async (req, res) => {
           tokenMatches = true;
         }
       }
-      
+
       if (!tokenMatches) {
-        return res.status(403).json({ message: "Not authorized, invalid token" });
+        return res
+          .status(403)
+          .json({ message: "Not authorized, invalid token" });
       }
     }
     // For takeaway orders, allow cancellation without sessionToken verification
 
     // Check if status transition is allowed
-    const allowedStatuses = status === "Cancelled" 
-      ? ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Finalized", "Completed"]
-      : ["Paid"];
-    
+    const allowedStatuses =
+      status === "Cancelled"
+        ? [
+            "Pending",
+            "Confirmed",
+            "Preparing",
+            "Ready",
+            "Served",
+            "Finalized",
+            "Completed",
+          ]
+        : ["Paid"];
+
     if (!allowedStatuses.includes(order.status)) {
-      return res.status(400).json({ 
-        message: `Cannot ${status.toLowerCase()} order with status ${order.status}`,
+      return res.status(400).json({
+        message: `Cannot ${status.toLowerCase()} order with status ${
+          order.status
+        }`,
         currentStatus: order.status,
-        allowedStatuses
+        allowedStatuses,
       });
     }
 
@@ -1349,7 +1677,7 @@ const cancelOrderByCustomer = async (req, res) => {
 
     return res.json(order);
   } catch (err) {
-    console.error('Customer cancel/return error:', err);
+    console.error("Customer cancel/return error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1368,7 +1696,7 @@ const confirmPaymentByCustomer = async (req, res) => {
       if (!sessionToken) {
         return res.status(401).json({ message: "Not authorized, no token" });
       }
-      
+
       // Check sessionToken matches order's sessionToken or table's sessionToken
       let tokenMatches = false;
       if (order.sessionToken === sessionToken) {
@@ -1379,26 +1707,30 @@ const confirmPaymentByCustomer = async (req, res) => {
           tokenMatches = true;
         }
       }
-      
+
       if (!tokenMatches) {
-        return res.status(403).json({ message: "Not authorized, invalid token" });
+        return res
+          .status(403)
+          .json({ message: "Not authorized, invalid token" });
       }
     }
 
     // Check if order can be confirmed as paid (must be Finalized or Completed)
     const allowedStatuses = ["Finalized", "Completed"];
-    
+
     if (!allowedStatuses.includes(order.status)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Cannot confirm payment for order with status ${order.status}. Order must be Finalized or Completed.`,
         currentStatus: order.status,
-        allowedStatuses
+        allowedStatuses,
       });
     }
 
     // Check if already paid
     if (order.status === "Paid") {
-      return res.status(400).json({ message: "Order is already marked as paid" });
+      return res
+        .status(400)
+        .json({ message: "Order is already marked as paid" });
     }
 
     const io = req.app.get("io");
@@ -1424,7 +1756,7 @@ const confirmPaymentByCustomer = async (req, res) => {
 
     // Emit socket event to cafe room
     const emitToCafe = req.app.get("emitToCafe");
-    
+
     // Release table
     await releaseTableForOrder(order, io, emitToCafe);
     if (order.cartId) {
@@ -1432,10 +1764,10 @@ const confirmPaymentByCustomer = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
     }
 
-    console.log('Payment confirmed by customer:', order._id);
+    console.log("Payment confirmed by customer:", order._id);
     return res.json(order);
   } catch (err) {
-    console.error('Customer confirm payment error:', err);
+    console.error("Customer confirm payment error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1445,10 +1777,11 @@ const confirmPaymentByCustomer = async (req, res) => {
 // This function is kept for emergency use only but is disabled by default
 const deleteOrder = async (req, res) => {
   // Orders are stored permanently - deletion is disabled
-  return res.status(403).json({ 
-    message: "Order deletion is disabled. Orders are stored permanently with no time limit." 
+  return res.status(403).json({
+    message:
+      "Order deletion is disabled. Orders are stored permanently with no time limit.",
   });
-  
+
   /* DISABLED CODE - Keep for reference only
   try {
     const order = await Order.findById(req.params.id);
@@ -1526,9 +1859,11 @@ const deleteOrder = async (req, res) => {
 const returnItems = async (req, res) => {
   try {
     const { itemIds } = req.body; // Array of item identifiers: [{ kotIndex, itemIndex }]
-    
+
     if (!Array.isArray(itemIds) || itemIds.length === 0) {
-      return res.status(400).json({ message: "Please select at least one item to return" });
+      return res
+        .status(400)
+        .json({ message: "Please select at least one item to return" });
     }
 
     const order = await Order.findById(req.params.id);
@@ -1536,28 +1871,48 @@ const returnItems = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cafe" });
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your franchise" });
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
       }
     }
 
     // Check if order can be modified (admin can remove items from any status except Cancelled/Returned)
     if (["Cancelled", "Returned"].includes(order.status)) {
-      return res.status(400).json({ 
-        message: `Cannot remove items from order with status ${order.status}. Order is already ${order.status.toLowerCase()}.` 
+      return res.status(400).json({
+        message: `Cannot remove items from order with status ${
+          order.status
+        }. Order is already ${order.status.toLowerCase()}.`,
       });
     }
 
     // Mark selected items as returned
     let totalReturnedAmount = 0;
     const kotLines = Array.isArray(order.kotLines) ? order.kotLines : [];
-    
+
     itemIds.forEach(({ kotIndex, itemIndex }) => {
-      if (kotLines[kotIndex] && kotLines[kotIndex].items && kotLines[kotIndex].items[itemIndex]) {
+      if (
+        kotLines[kotIndex] &&
+        kotLines[kotIndex].items &&
+        kotLines[kotIndex].items[itemIndex]
+      ) {
         const item = kotLines[kotIndex].items[itemIndex];
         if (!item.returned) {
           item.returned = true;
@@ -1572,16 +1927,16 @@ const returnItems = async (req, res) => {
     kotLines.forEach((kot, kotIdx) => {
       const items = Array.isArray(kot.items) ? kot.items : [];
       let subtotalP = 0;
-      
+
       items.forEach((item) => {
         if (!item.returned) {
           subtotalP += (item.price || 0) * (item.quantity || 1);
         }
       });
-      
+
       const gstP = Math.round(subtotalP * 0.05);
       const totalP = subtotalP + gstP;
-      
+
       kot.subtotal = toRupees(subtotalP);
       kot.gst = toRupees(gstP);
       kot.totalAmount = toRupees(totalP);
@@ -1599,7 +1954,7 @@ const returnItems = async (req, res) => {
     if (allItemsReturned) {
       order.status = "Returned";
       order.returnedAt = new Date();
-      
+
       // Cancel associated payments
       const payments = await Payment.find({ orderId: order._id });
       for (const payment of payments) {
@@ -1615,7 +1970,7 @@ const returnItems = async (req, res) => {
     // Emit socket event to cafe room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    
+
     // Release table if order is fully returned
     if (order.status === "Returned") {
       await releaseTableForOrder(order, io, emitToCafe);
@@ -1629,10 +1984,10 @@ const returnItems = async (req, res) => {
       message: `${itemIds.length} item(s) returned successfully`,
       order,
       returnedAmount: totalReturnedAmount,
-      allItemsReturned
+      allItemsReturned,
     });
   } catch (err) {
-    console.error('Return items error:', err);
+    console.error("Return items error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1646,37 +2001,59 @@ const convertToTakeaway = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your cafe" });
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Order does not belong to your franchise" });
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
       }
     }
 
     // Only allow conversion for dine-in orders
     if (order.serviceType !== "DINE_IN") {
-      return res.status(400).json({ 
-        message: `Cannot convert order. Current service type is ${order.serviceType}. Only DINE_IN orders can be converted.` 
+      return res.status(400).json({
+        message: `Cannot convert order. Current service type is ${order.serviceType}. Only DINE_IN orders can be converted.`,
       });
     }
 
     // Check if order can be converted (not cancelled or returned)
     if (["Cancelled", "Returned"].includes(order.status)) {
-      return res.status(400).json({ 
-        message: `Cannot convert order with status ${order.status}` 
+      return res.status(400).json({
+        message: `Cannot convert order with status ${order.status}`,
       });
     }
 
     // For paid orders with item selection, create a new takeaway order with selected items
-    if (order.status === "Paid" && Array.isArray(itemIds) && itemIds.length > 0) {
+    if (
+      order.status === "Paid" &&
+      Array.isArray(itemIds) &&
+      itemIds.length > 0
+    ) {
       // Get selected items from the order
       const kotLines = Array.isArray(order.kotLines) ? order.kotLines : [];
       const selectedItems = [];
-      
+
       itemIds.forEach(({ kotIndex, itemIndex }) => {
-        if (kotLines[kotIndex] && kotLines[kotIndex].items && kotLines[kotIndex].items[itemIndex]) {
+        if (
+          kotLines[kotIndex] &&
+          kotLines[kotIndex].items &&
+          kotLines[kotIndex].items[itemIndex]
+        ) {
           const item = kotLines[kotIndex].items[itemIndex];
           if (!item.returned && !item.convertedToTakeaway) {
             // Convert price from paise to rupees (buildKot expects rupees and will convert back to paise)
@@ -1684,20 +2061,26 @@ const convertToTakeaway = async (req, res) => {
             selectedItems.push({
               name: item.name,
               quantity: item.quantity,
-              price: priceInRupees  // Pass price in rupees, buildKot will convert to paise
+              price: priceInRupees, // Pass price in rupees, buildKot will convert to paise
             });
           }
         }
       });
 
       if (selectedItems.length === 0) {
-        return res.status(400).json({ message: "No valid items selected for takeaway conversion" });
+        return res
+          .status(400)
+          .json({ message: "No valid items selected for takeaway conversion" });
       }
 
       // Mark selected items as converted to takeaway in the original order
       // This is similar to marking items as returned
       itemIds.forEach(({ kotIndex, itemIndex }) => {
-        if (kotLines[kotIndex] && kotLines[kotIndex].items && kotLines[kotIndex].items[itemIndex]) {
+        if (
+          kotLines[kotIndex] &&
+          kotLines[kotIndex].items &&
+          kotLines[kotIndex].items[itemIndex]
+        ) {
           const item = kotLines[kotIndex].items[itemIndex];
           if (!item.returned) {
             // Mark item as converted (we'll use a flag or remove it from calculations)
@@ -1711,17 +2094,17 @@ const convertToTakeaway = async (req, res) => {
       kotLines.forEach((kot, kotIdx) => {
         const items = Array.isArray(kot.items) ? kot.items : [];
         let subtotalP = 0;
-        
+
         items.forEach((item) => {
           // Exclude returned and converted items from calculations
           if (!item.returned && !item.convertedToTakeaway) {
             subtotalP += (item.price || 0) * (item.quantity || 1);
           }
         });
-        
+
         const gstP = Math.round(subtotalP * 0.05);
         const totalP = subtotalP + gstP;
-        
+
         kot.subtotal = toRupees(subtotalP);
         kot.gst = toRupees(gstP);
         kot.totalAmount = toRupees(totalP);
@@ -1766,7 +2149,7 @@ const convertToTakeaway = async (req, res) => {
       if (originalPayment) {
         originalPayment.amount = originalOrderAmount;
         await originalPayment.save();
-        
+
         const io = req.app.get("io");
         if (io) {
           const payload = formatPaymentPayload(originalPayment);
@@ -1784,11 +2167,26 @@ const convertToTakeaway = async (req, res) => {
       const emitToCafe = req.app.get("emitToCafe");
       if (io) {
         if (newTakeawayOrder.cartId) {
-          emitToCafe(io, newTakeawayOrder.cartId.toString(), "order:created", newTakeawayOrder);
-          emitToCafe(io, newTakeawayOrder.cartId.toString(), "newOrder", newTakeawayOrder); // Legacy support
+          emitToCafe(
+            io,
+            newTakeawayOrder.cartId.toString(),
+            "order:created",
+            newTakeawayOrder
+          );
+          emitToCafe(
+            io,
+            newTakeawayOrder.cartId.toString(),
+            "newOrder",
+            newTakeawayOrder
+          ); // Legacy support
         }
         if (order.cartId) {
-          emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+          emitToCafe(
+            io,
+            order.cartId.toString(),
+            "order:status:updated",
+            order
+          );
           emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
         }
       }
@@ -1796,7 +2194,7 @@ const convertToTakeaway = async (req, res) => {
       return res.json({
         message: `${selectedItems.length} item(s) converted to takeaway successfully. New takeaway order created. Original order updated.`,
         order: newTakeawayOrder,
-        originalOrder: order
+        originalOrder: order,
       });
     }
 
@@ -1830,10 +2228,10 @@ const convertToTakeaway = async (req, res) => {
 
     res.json({
       message: "Order converted to takeaway successfully",
-      order
+      order,
     });
   } catch (err) {
-    console.error('Convert to takeaway error:', err);
+    console.error("Convert to takeaway error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1851,5 +2249,5 @@ module.exports = {
   deleteOrder,
   releaseTableForOrder,
   returnItems,
-  convertToTakeaway
+  convertToTakeaway,
 };
