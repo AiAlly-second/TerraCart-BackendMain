@@ -1543,16 +1543,44 @@ exports.getTableOccupancyDashboard = async (req, res) => {
     const dashboard = tables.map((table) => {
       const isOccupied = ["OCCUPIED", "RESERVED"].includes(table.status);
       const isMerged = table.status === "MERGED" || table.mergedWith;
-      const mergedCapacity = table.mergedTables?.reduce((sum, t) => sum + (t.capacity || 0), 0) || 0;
-      const totalCapacity = (table.capacity || 0) + mergedCapacity;
+      
+      // Calculate total capacity for merged tables
+      // For primary tables: capacity already includes all merged tables (set during merge)
+      // For secondary merged tables: need to find the primary table and use its total capacity
+      let totalCapacity = table.capacity || 0;
+      
+      // If this is a secondary merged table (has mergedWith), find the primary table
+      if (table.mergedWith) {
+        const primaryTable = tables.find(t => 
+          t._id && t._id.toString() === table.mergedWith.toString()
+        );
+        if (primaryTable) {
+          // Use the primary table's capacity which already includes all merged tables
+          totalCapacity = primaryTable.capacity || 0;
+        } else {
+          // Fallback: calculate from this table's capacity + find other merged tables
+          // But this shouldn't happen if data is consistent
+          totalCapacity = table.capacity || 0;
+        }
+      } else if (table.mergedTables && table.mergedTables.length > 0) {
+        // This is a primary table with merged tables
+        // Capacity already includes all merged tables, so use it directly
+        totalCapacity = table.capacity || 0;
+      } else {
+        // Regular table (not merged)
+        totalCapacity = table.capacity || 0;
+      }
       
       return {
         id: table._id.toString(), // Ensure ID is a string
         _id: table._id.toString(), // Also include _id for compatibility
         number: table.number,
         name: table.name,
-        capacity: table.capacity,
-        totalCapacity,
+        // For merged tables, show total capacity (table m + table n) in both capacity and totalCapacity
+        // For primary tables: capacity already includes merged tables
+        // For secondary merged tables: use the total from primary table
+        capacity: totalCapacity, // Show total merged capacity for all merged tables
+        totalCapacity, // Same value for consistency
         status: table.status,
         isOccupied,
         isMerged,

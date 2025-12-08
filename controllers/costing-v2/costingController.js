@@ -287,11 +287,29 @@ exports.createIngredient = async (req, res) => {
  */
 exports.updateIngredient = async (req, res) => {
   try {
+    // First find the ingredient to check access
+    const existingIngredient = await Ingredient.findById(req.params.id);
+    if (!existingIngredient) {
+      return res.status(404).json({ success: false, message: "Ingredient not found" });
+    }
+
+    // Check access control - cart admins can only update their own ingredients
+    if (req.user.role === "admin") {
+      if (existingIngredient.outletId && existingIngredient.outletId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied. You can only update ingredients belonging to your cart." 
+        });
+      }
+    }
+
+    // Update the ingredient
     const ingredient = await Ingredient.findByIdAndUpdate(
       req.params.id,
       req.body,
       { new: true, runValidators: true }
     );
+    
     if (!ingredient) {
       return res.status(404).json({ success: false, message: "Ingredient not found" });
     }
@@ -322,7 +340,8 @@ exports.updateIngredient = async (req, res) => {
     
     res.json({ success: true, data: ingredient });
   } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
+    console.error('[COSTING] Update ingredient error:', error);
+    res.status(400).json({ success: false, message: error.message || "Failed to update ingredient" });
   }
 };
 
@@ -332,13 +351,58 @@ exports.updateIngredient = async (req, res) => {
  */
 exports.deleteIngredient = async (req, res) => {
   try {
-    const ingredient = await Ingredient.findByIdAndDelete(req.params.id);
+    // First find the ingredient to check access and validate
+    const ingredient = await Ingredient.findById(req.params.id);
     if (!ingredient) {
       return res.status(404).json({ success: false, message: "Ingredient not found" });
     }
-    res.json({ success: true, message: "Ingredient deleted" });
+
+    // Check access control - cart admins can only delete their own ingredients
+    if (req.user.role === "admin") {
+      if (ingredient.outletId && ingredient.outletId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied. You can only delete ingredients belonging to your cart." 
+        });
+      }
+    }
+
+    // Check if ingredient is used in recipes
+    const Recipe = require("../../models/costing-v2/recipeModel");
+    const recipesUsingIngredient = await Recipe.find({
+      "ingredients.ingredientId": ingredient._id
+    });
+    
+    if (recipesUsingIngredient.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Cannot delete ingredient. It is used in ${recipesUsingIngredient.length} recipe(s). Please remove it from recipes first.` 
+      });
+    }
+
+    // Check if ingredient has active inventory transactions
+    const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
+    const hasTransactions = await InventoryTransaction.exists({ ingredientId: ingredient._id });
+    
+    if (hasTransactions) {
+      // Allow deletion but warn - or we could prevent it
+      console.log(`[COSTING] Warning: Deleting ingredient ${ingredient._id} with existing inventory transactions`);
+    }
+
+    // Delete the ingredient
+    await Ingredient.findByIdAndDelete(req.params.id);
+    
+    // Emit socket event for real-time sync
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (ingredient.outletId) {
+      emitToCafe(io, ingredient.outletId.toString(), "ingredient:deleted", { id: ingredient._id });
+    }
+
+    res.json({ success: true, message: "Ingredient deleted successfully" });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('[COSTING] Delete ingredient error:', error);
+    res.status(500).json({ success: false, message: error.message || "Failed to delete ingredient" });
   }
 };
 
@@ -348,10 +412,28 @@ exports.deleteIngredient = async (req, res) => {
  */
 exports.getFIFOLayers = async (req, res) => {
   try {
+    // First verify the ingredient exists and check access
+    const ingredient = await Ingredient.findById(req.params.id);
+    if (!ingredient) {
+      return res.status(404).json({ success: false, message: "Ingredient not found" });
+    }
+
+    // Check access control - cart admins can only view FIFO for their own ingredients
+    if (req.user.role === "admin") {
+      if (ingredient.outletId && ingredient.outletId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied. You can only view FIFO layers for ingredients belonging to your cart." 
+        });
+      }
+    }
+
+    // Get FIFO layers
     const layers = await FIFOService.getLayers(req.params.id);
-    res.json({ success: true, data: layers });
+    res.json({ success: true, data: layers || [] });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error('[COSTING] Get FIFO layers error:', error);
+    res.status(500).json({ success: false, message: error.message || "Failed to fetch FIFO layers" });
   }
 };
 
@@ -1882,8 +1964,33 @@ exports.getMenuEngineeringReport = async (req, res) => {
       }
     }
 
+    // Build menu item filter based on role
+    const menuItemFilter = { isActive: true };
+    if (req.user.role === "admin") {
+      // Cart admin - only their own kiosk's menu items
+      menuItemFilter.outletId = req.user._id;
+      console.log('[MENU_ENGINEERING_REPORT] Cart admin filter - outletId:', req.user._id.toString());
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin - specific outlet or all their franchise outlets
+      if (outletId) {
+        const outlet = await User.findById(outletId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ success: false, message: "Access denied: Kiosk does not belong to your franchise" });
+        }
+        menuItemFilter.outletId = outletId;
+      } else {
+        const outlets = await User.find({ role: "admin", franchiseId: req.user._id, isActive: true }).select("_id");
+        menuItemFilter.outletId = { $in: outlets.map(o => o._id) };
+      }
+    } else if (req.user.role === "super_admin") {
+      // Super admin - specific outlet or all
+      if (outletId) {
+        menuItemFilter.outletId = outletId;
+      }
+    }
+
     // Get menu items with sales data
-    const menuItems = await MenuItem.find({ isActive: true })
+    const menuItems = await MenuItem.find(menuItemFilter)
       .populate("recipeId", "name costPerPortion");
 
     const menuEngineeringData = [];
@@ -1954,10 +2061,34 @@ exports.getMenuEngineeringReport = async (req, res) => {
  */
 exports.getSupplierPriceHistory = async (req, res) => {
   try {
-    const { supplierId, ingredientId } = req.query;
+    const { supplierId, ingredientId, outletId } = req.query;
     const filter = { status: "received" };
 
     if (supplierId) filter.supplierId = supplierId;
+
+    // Apply role-based outlet filtering
+    if (req.user.role === "admin") {
+      // Cart admin - only their own kiosk
+      filter.outletId = req.user._id;
+      console.log('[SUPPLIER_PRICE_HISTORY] Cart admin filter - outletId:', req.user._id.toString());
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin - specific outlet or all their franchise outlets
+      if (outletId) {
+        const outlet = await User.findById(outletId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ success: false, message: "Access denied: Kiosk does not belong to your franchise" });
+        }
+        filter.outletId = outletId;
+      } else {
+        const outlets = await User.find({ role: "admin", franchiseId: req.user._id, isActive: true }).select("_id");
+        filter.outletId = { $in: outlets.map(o => o._id) };
+      }
+    } else if (req.user.role === "super_admin") {
+      // Super admin - specific outlet or all
+      if (outletId) {
+        filter.outletId = outletId;
+      }
+    }
 
     const purchases = await Purchase.find(filter)
       .populate("supplierId", "name")

@@ -108,7 +108,7 @@ router.put(
 );
 router.delete(
   "/ingredients/:id",
-  authorize(["super_admin", "franchise_admin"]),
+  authorize(["super_admin", "franchise_admin", "admin"]),
   deleteIngredient
 );
 router.get(

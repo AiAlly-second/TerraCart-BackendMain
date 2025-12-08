@@ -506,21 +506,63 @@ exports.getCurrentRevenue = async (req, res) => {
       });
     });
 
+    // Get ALL active carts for each franchise (not just those with orders)
+    const allActiveCarts = await User.find({
+      role: "admin",
+      franchiseId: { $in: Array.from(activeFranchiseIds) },
+      isActive: true
+    }).select("_id name franchiseId").lean();
+
+    // Count carts per franchise
+    const franchiseCartCountMap = new Map();
+    allActiveCarts.forEach((cart) => {
+      const cartFranchiseId = cart.franchiseId?.toString();
+      if (cartFranchiseId && activeFranchiseIds.has(cartFranchiseId)) {
+        const currentCount = franchiseCartCountMap.get(cartFranchiseId) || 0;
+        franchiseCartCountMap.set(cartFranchiseId, currentCount + 1);
+      }
+    });
+
     const franchiseRevenue = Array.from(franchiseMap.entries()).map(([id, data]) => ({
       franchiseId: id,
       franchiseName: franchiseNameMap.get(id) || "Unknown",
       revenue: data.revenue,
-      cartCount: data.cartIds.size,
+      cartCount: franchiseCartCountMap.get(id) || 0, // Use actual cart count, not just carts with orders
     }));
 
-    const cartRevenue = Array.from(cartMap.entries()).map(([id, data]) => ({
-      cartId: id,
-      cartName: cartMapNames.get(id)?.name || "Unknown",
-      franchiseId: data.franchiseId,
-      franchiseName: franchiseNameMap.get(data.franchiseId) || "Unknown",
-      revenue: data.revenue,
-      orderCount: data.orderCount,
-    }));
+    // Include all active carts, even if they have no orders (with 0 revenue)
+    const allCartMap = new Map();
+    
+    // Add carts with orders
+    cartMap.forEach((data, cartId) => {
+      allCartMap.set(cartId, {
+        cartId,
+        cartName: cartMapNames.get(cartId)?.name || "Unknown",
+        franchiseId: data.franchiseId,
+        franchiseName: franchiseNameMap.get(data.franchiseId) || "Unknown",
+        revenue: data.revenue,
+        orderCount: data.orderCount,
+      });
+    });
+    
+    // Add carts without orders (to show all carts under each franchise)
+    allActiveCarts.forEach((cart) => {
+      const cartId = cart._id.toString();
+      const cartFranchiseId = cart.franchiseId?.toString();
+      
+      if (cartFranchiseId && activeFranchiseIds.has(cartFranchiseId) && !allCartMap.has(cartId)) {
+        allCartMap.set(cartId, {
+          cartId,
+          cartName: cart.name || "Unknown",
+          franchiseId: cartFranchiseId,
+          franchiseName: franchiseNameMap.get(cartFranchiseId) || "Unknown",
+          revenue: 0,
+          orderCount: 0,
+        });
+      }
+    });
+
+    const cartRevenue = Array.from(allCartMap.values());
 
     const deletedFranchiseOrders = allOrders.filter(order => {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
