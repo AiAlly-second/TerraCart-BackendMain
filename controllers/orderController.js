@@ -467,106 +467,249 @@ const createOrder = async (req, res) => {
       (customerName || customerMobile || customerEmail) &&
       cartId
     ) {
+      console.log("[ORDER] Starting customer creation process:", {
+        orderId,
+        isTakeaway,
+        hasCustomerName: !!customerName,
+        hasCustomerMobile: !!customerMobile,
+        hasCustomerEmail: !!customerEmail,
+        cartId: cartId ? cartId.toString() : "null",
+        franchiseId: franchiseId ? franchiseId.toString() : "null",
+      });
+      
       // Run asynchronously so it doesn't block order creation
       (async () => {
         try {
-          // Find existing customer by phone or email
-          const customerQuery = {};
-          if (customerMobile) {
-            customerQuery.phone = customerMobile.trim();
-          } else if (customerEmail) {
-            customerQuery.email = customerEmail.trim().toLowerCase();
+          // Helper function to normalize phone number
+          const normalizePhone = (phone) => {
+            if (!phone) return null;
+            // Remove all non-digit characters
+            return phone.replace(/\D/g, "");
+          };
+
+          const normalizedPhone = customerMobile ? normalizePhone(customerMobile) : null;
+          const normalizedEmail = customerEmail ? customerEmail.trim().toLowerCase() : null;
+
+          console.log("[ORDER] Customer data normalized:", {
+            normalizedPhone,
+            normalizedEmail,
+            customerName: customerName?.trim(),
+          });
+
+          // Phone or email is required to create customer
+          if (!normalizedPhone && !normalizedEmail) {
+            console.log("[ORDER] Skipping customer creation - no phone or email provided");
+            return;
           }
 
-          // Also filter by cartId/cafeId to ensure customer belongs to the right cafe
-          // Check both cartId and cafeId for consistency (they should be the same for cart admins)
+          // Build search query - match by phone (primary) or email (secondary)
+          let query = {};
+
+          if (normalizedPhone && normalizedEmail) {
+            // Both phone and email provided - search by either
+            query = {
+              $or: [{ phone: normalizedPhone }, { email: normalizedEmail }],
+            };
+          } else if (normalizedPhone) {
+            // Only phone provided
+            query = { phone: normalizedPhone };
+          } else if (normalizedEmail) {
+            // Only email provided
+            query = { email: normalizedEmail };
+          }
+
+          // Filter by cafeId to ensure customer belongs to the right cafe
+          // Customer model uses cafeId (not cartId)
           if (cartId) {
-            customerQuery.$and = [
-              ...(customerQuery.$and || []),
-              {
-                $or: [{ cartId: cartId }, { cafeId: cartId }],
-              },
-            ];
-            // Handle $or if it exists
-            if (customerQuery.$or) {
-              const orCondition = customerQuery.$or;
-              delete customerQuery.$or;
-              customerQuery.$and = [
-                { $or: orCondition },
-                {
-                  $or: [{ cartId: cartId }, { cafeId: cartId }],
-                },
-              ];
+            const mongoose = require("mongoose");
+            const cafeIdValue = cartId._id || cartId;
+            // Ensure cafeId is ObjectId for proper matching
+            const cafeIdObj = mongoose.Types.ObjectId.isValid(cafeIdValue) 
+              ? (typeof cafeIdValue === 'string' ? new mongoose.Types.ObjectId(cafeIdValue) : cafeIdValue)
+              : cafeIdValue;
+            
+            console.log("[ORDER] Setting cafeId for customer query:", {
+              cartId: cartId.toString(),
+              cafeIdValue: cafeIdValue.toString(),
+              cafeIdObj: cafeIdObj.toString(),
+              cafeIdType: typeof cafeIdObj,
+            });
+            
+            if (query.$or) {
+              // If we have $or, wrap it in $and with cafeId filter
+              query = {
+                $and: [
+                  { $or: query.$or },
+                  { cafeId: cafeIdObj }
+                ]
+              };
+            } else {
+              query.cafeId = cafeIdObj;
             }
           }
 
-          let customer = null;
-          if (customerMobile || customerEmail) {
-            customer = await Customer.findOne(customerQuery);
-          }
+          console.log("[ORDER] Customer search query:", JSON.stringify(query, null, 2));
 
+          // Try to find existing customer
+          let customer = await Customer.findOne(query);
           const orderTotal = kot.totalAmount || 0;
+          
+          console.log("[ORDER] Customer lookup result:", {
+            found: !!customer,
+            customerId: customer?._id?.toString(),
+            customerName: customer?.name,
+            customerCafeId: customer?.cafeId?.toString(),
+          });
 
           if (customer) {
             // Update existing customer
+            let updated = false;
+
+            // Update name if provided and different
+            if (customerName && customerName.trim() && customer.name !== customerName.trim()) {
+              customer.name = customerName.trim();
+              updated = true;
+            }
+
+            // Update email if provided and different
+            if (normalizedEmail && (!customer.email || customer.email !== normalizedEmail)) {
+              customer.email = normalizedEmail;
+              updated = true;
+            }
+
+            // Update phone if provided and different (and not a placeholder)
+            if (
+              normalizedPhone &&
+              customer.phone &&
+              !customer.phone.startsWith("email-") &&
+              customer.phone !== normalizedPhone
+            ) {
+              customer.phone = normalizedPhone;
+              updated = true;
+            }
+
+            // If customer has placeholder phone but now has real phone, update it
+            if (normalizedPhone && customer.phone && customer.phone.startsWith("email-")) {
+              customer.phone = normalizedPhone;
+              updated = true;
+            }
+
+            // If customer has no phone but now has one, update it
+            if (normalizedPhone && !customer.phone) {
+              customer.phone = normalizedPhone;
+              updated = true;
+            }
+
+            // Increment visit count
             customer.incrementVisit();
-            customer.lastVisitAt = new Date();
             customer.totalSpent = (customer.totalSpent || 0) + orderTotal;
             customer.lastOrderId = order._id;
+            updated = true;
 
-            // Update name/email if provided and different
-            if (
-              customerName &&
-              customerName.trim() &&
-              customer.name !== customerName.trim()
-            ) {
-              customer.name = customerName.trim();
-            }
-            if (
-              customerEmail &&
-              customerEmail.trim() &&
-              customer.email !== customerEmail.trim().toLowerCase()
-            ) {
-              customer.email = customerEmail.trim().toLowerCase();
-            }
-            if (
-              customerMobile &&
-              customerMobile.trim() &&
-              customer.phone !== customerMobile.trim()
-            ) {
-              customer.phone = customerMobile.trim();
+            if (updated) {
+              await customer.save();
             }
 
-            await customer.save();
             console.log(
-              `[ORDER] Updated customer record: ${customer._id} for order ${orderId}`
+              `✅ [ORDER] Updated customer record: ${customer.name} (${customer.phone || customer.email}) - Visit #${customer.visitCount} for order ${orderId}`
             );
-          } else if (customerName || customerMobile || customerEmail) {
+          } else {
             // Create new customer record
-            // Set both cartId and cafeId for consistency (they should be the same for cart admins)
+            // Phone is required in schema, so use a placeholder if only email provided
+            const phoneForNewCustomer = normalizedPhone || `email-${Date.now()}`;
+
+            // Ensure cartId is converted to ObjectId for cafeId
+            const cafeIdValue = cartId._id || cartId;
+            const franchiseIdValue = franchiseId ? (franchiseId._id || franchiseId) : null;
+            
+            // Convert to ObjectId if they're strings (mongoose is already imported at top)
+            const cafeIdObj = mongoose.Types.ObjectId.isValid(cafeIdValue) 
+              ? (typeof cafeIdValue === 'string' ? new mongoose.Types.ObjectId(cafeIdValue) : cafeIdValue)
+              : cafeIdValue;
+            const franchiseIdObj = franchiseIdValue && mongoose.Types.ObjectId.isValid(franchiseIdValue)
+              ? (typeof franchiseIdValue === 'string' ? new mongoose.Types.ObjectId(franchiseIdValue) : franchiseIdValue)
+              : franchiseIdValue;
+            
+            console.log("[ORDER] ObjectId conversion:", {
+              originalCartId: cartId.toString(),
+              cafeIdValue: cafeIdValue.toString(),
+              cafeIdObj: cafeIdObj.toString(),
+              franchiseIdObj: franchiseIdObj?.toString() || "null",
+            });
+
             const newCustomerData = {
               name: customerName ? customerName.trim() : "Guest",
+              email: normalizedEmail || null,
+              phone: phoneForNewCustomer,
+              cafeId: cafeIdObj, // Customer model uses cafeId (not cartId)
+              franchiseId: franchiseIdObj,
               visitCount: 1,
               firstVisitAt: new Date(),
               lastVisitAt: new Date(),
               totalSpent: orderTotal,
               lastOrderId: order._id,
-              cartId: cartId,
-              cafeId: cartId, // Set cafeId to match cartId for consistency
-              franchiseId: franchiseId,
+              ratings: [],
+              averageRating: 0,
             };
 
-            if (customerEmail && customerEmail.trim()) {
-              newCustomerData.email = customerEmail.trim().toLowerCase();
-            }
-            if (customerMobile && customerMobile.trim()) {
-              newCustomerData.phone = customerMobile.trim();
-            }
+            console.log("[ORDER] Creating new customer with data:", {
+              name: newCustomerData.name,
+              phone: newCustomerData.phone,
+              email: newCustomerData.email,
+              cafeId: newCustomerData.cafeId?.toString(),
+              franchiseId: newCustomerData.franchiseId?.toString(),
+              cafeIdType: typeof newCustomerData.cafeId,
+            });
 
-            customer = await Customer.create(newCustomerData);
-            console.log(
-              `[ORDER] Created new customer record: ${customer._id} for order ${orderId}`
-            );
+            try {
+              customer = await Customer.create(newCustomerData);
+              console.log(
+                `✅ [ORDER] Created new customer record: ${customer.name} (${customer.phone || customer.email}) for order ${orderId}`
+              );
+              console.log("[ORDER] Created customer details:", {
+                customerId: customer._id.toString(),
+                cafeId: customer.cafeId?.toString(),
+                franchiseId: customer.franchiseId?.toString(),
+                phone: customer.phone,
+                email: customer.email,
+              });
+              
+              // Verify customer was created correctly
+              const verifyCustomer = await Customer.findById(customer._id).lean();
+              if (verifyCustomer) {
+                console.log("[ORDER] Customer verification - Customer exists in database:", {
+                  id: verifyCustomer._id.toString(),
+                  cafeId: verifyCustomer.cafeId?.toString(),
+                  name: verifyCustomer.name,
+                  phone: verifyCustomer.phone,
+                  email: verifyCustomer.email,
+                });
+                
+                // Test query that customer management panel would use
+                const testQuery = { cafeId: cafeIdObj };
+                const testCustomers = await Customer.find(testQuery).limit(1).lean();
+                console.log("[ORDER] Test query for customer management panel:", {
+                  query: { cafeId: cafeIdObj.toString() },
+                  foundCustomers: testCustomers.length,
+                  sampleCustomer: testCustomers[0] ? {
+                    id: testCustomers[0]._id.toString(),
+                    name: testCustomers[0].name,
+                    cafeId: testCustomers[0].cafeId?.toString(),
+                  } : null,
+                });
+              } else {
+                console.error("[ORDER] Customer verification FAILED - Customer not found after creation!");
+              }
+            } catch (createError) {
+              console.error("[ORDER] Error creating customer:", createError);
+              console.error("[ORDER] Customer creation error details:", {
+                message: createError.message,
+                name: createError.name,
+                code: createError.code,
+                errors: createError.errors,
+              });
+              throw createError; // Re-throw to be caught by outer catch
+            }
           }
         } catch (customerError) {
           // Log error but don't fail the order creation
@@ -574,8 +717,20 @@ const createOrder = async (req, res) => {
             "[ORDER] Failed to create/update customer record:",
             customerError
           );
+          console.error("[ORDER] Customer error stack:", customerError.stack);
+          console.error("[ORDER] Customer error details:", {
+            message: customerError.message,
+            name: customerError.name,
+            code: customerError.code,
+          });
         }
       })();
+    } else {
+      console.log("[ORDER] Skipping customer creation - conditions not met:", {
+        isTakeaway,
+        hasCustomerInfo: !!(customerName || customerMobile || customerEmail),
+        hasCartId: !!cartId,
+      });
     }
 
     // Emit socket event to cafe room
@@ -796,22 +951,56 @@ const addKot = async (req, res) => {
       // Run asynchronously so it doesn't block order update
       (async () => {
         try {
-          const customerQuery = {};
-          if (order.customerMobile) {
-            customerQuery.phone = order.customerMobile.trim();
-          } else if (order.customerEmail) {
-            customerQuery.email = order.customerEmail.trim().toLowerCase();
+          // Helper function to normalize phone number
+          const normalizePhone = (phone) => {
+            if (!phone) return null;
+            // Remove all non-digit characters
+            return phone.replace(/\D/g, "");
+          };
+
+          const normalizedPhone = order.customerMobile ? normalizePhone(order.customerMobile) : null;
+          const normalizedEmail = order.customerEmail ? order.customerEmail.trim().toLowerCase() : null;
+
+          // Phone or email is required to find customer
+          if (!normalizedPhone && !normalizedEmail) {
+            console.log("[ORDER] addKot - Skipping customer update - no phone or email");
+            return;
           }
 
+          // Build search query - match by phone (primary) or email (secondary)
+          let query = {};
+
+          if (normalizedPhone && normalizedEmail) {
+            // Both phone and email provided - search by either
+            query = {
+              $or: [{ phone: normalizedPhone }, { email: normalizedEmail }],
+            };
+          } else if (normalizedPhone) {
+            // Only phone provided
+            query = { phone: normalizedPhone };
+          } else if (normalizedEmail) {
+            // Only email provided
+            query = { email: normalizedEmail };
+          }
+
+          // Filter by cafeId to ensure customer belongs to the right cafe
+          // Customer model uses cafeId (not cartId)
           if (order.cartId) {
-            customerQuery.cartId = order.cartId;
+            const cafeIdValue = order.cartId._id || order.cartId;
+            if (query.$or) {
+              // If we have $or, wrap it in $and with cafeId filter
+              query = {
+                $and: [
+                  { $or: query.$or },
+                  { cafeId: cafeIdValue }
+                ]
+              };
+            } else {
+              query.cafeId = cafeIdValue;
+            }
           }
 
-          let customer = null;
-          if (order.customerMobile || order.customerEmail) {
-            customer = await Customer.findOne(customerQuery);
-          }
-
+          const customer = await Customer.findOne(query);
           const newKotTotal = newKot.totalAmount || 0;
 
           if (customer) {
@@ -821,7 +1010,11 @@ const addKot = async (req, res) => {
             customer.lastVisitAt = new Date();
             await customer.save();
             console.log(
-              `[ORDER] addKot - Updated customer record: ${customer._id} for order ${order._id}`
+              `✅ [ORDER] addKot - Updated customer record: ${customer.name} (${customer.phone || customer.email}) for order ${order._id}`
+            );
+          } else {
+            console.log(
+              `[ORDER] addKot - Customer not found for order ${order._id} (phone: ${normalizedPhone || "N/A"}, email: ${normalizedEmail || "N/A"})`
             );
           }
         } catch (customerError) {
@@ -2038,9 +2231,8 @@ const convertToTakeaway = async (req, res) => {
       });
     }
 
-    // For paid orders with item selection, create a new takeaway order with selected items
+    // For orders with item selection (both paid and unpaid), mark items as takeaway in the same order
     if (
-      order.status === "Paid" &&
       Array.isArray(itemIds) &&
       itemIds.length > 0
     ) {
@@ -2074,7 +2266,7 @@ const convertToTakeaway = async (req, res) => {
       }
 
       // Mark selected items as converted to takeaway in the original order
-      // This is similar to marking items as returned
+      // Keep them in the same order, just mark them as takeaway
       itemIds.forEach(({ kotIndex, itemIndex }) => {
         if (
           kotLines[kotIndex] &&
@@ -2083,21 +2275,20 @@ const convertToTakeaway = async (req, res) => {
         ) {
           const item = kotLines[kotIndex].items[itemIndex];
           if (!item.returned) {
-            // Mark item as converted (we'll use a flag or remove it from calculations)
-            // For now, we'll mark it similar to returned items
+            // Mark item as takeaway but keep it in calculations
             item.convertedToTakeaway = true;
           }
         }
       });
 
-      // Recalculate KOT totals for original order (excluding converted items)
+      // Recalculate KOT totals for original order (include takeaway items, exclude only returned items)
       kotLines.forEach((kot, kotIdx) => {
         const items = Array.isArray(kot.items) ? kot.items : [];
         let subtotalP = 0;
 
         items.forEach((item) => {
-          // Exclude returned and converted items from calculations
-          if (!item.returned && !item.convertedToTakeaway) {
+          // Include takeaway items in calculations, only exclude returned items
+          if (!item.returned) {
             subtotalP += (item.price || 0) * (item.quantity || 1);
           }
         });
@@ -2113,48 +2304,20 @@ const convertToTakeaway = async (req, res) => {
       order.kotLines = kotLines;
       order.markModified("kotLines");
 
-      // Create new takeaway order with selected items
-      const today = new Date();
-      const dateStr = today.toISOString().slice(0, 10).replace(/-/g, "");
-      let counter = await Counter.findOneAndUpdate(
-        { date: dateStr },
-        { $inc: { count: 1 } },
-        { upsert: true, new: true }
-      );
-      const orderId = `${dateStr}${String(counter.count).padStart(4, "0")}`;
+      // Update payment record for original order if it exists (for paid orders)
+      if (order.status === "Paid") {
+        const originalOrderAmount = getOrderBillAmount(order);
+        const originalPayment = await Payment.findOne({ orderId: order._id });
+        if (originalPayment) {
+          originalPayment.amount = originalOrderAmount;
+          await originalPayment.save();
 
-      const newKot = buildKot(selectedItems);
-      const newTakeawayOrder = await Order.create({
-        _id: orderId,
-        tableNumber: "TAKEAWAY",
-        table: null,
-        serviceType: "TAKEAWAY",
-        kotLines: [newKot],
-        status: "Paid", // New order is already paid since items came from paid order
-        paidAt: new Date(),
-        cartId: order.cartId,
-        franchiseId: order.franchiseId,
-      });
-
-      // Create payment record for new takeaway order
-      await ensurePaymentRecord(newTakeawayOrder, {
-        status: "PAID",
-        method: "CASH",
-        description: "Items converted from dine-in order to takeaway",
-      });
-
-      // Update payment record for original order with new amount
-      const originalOrderAmount = getOrderBillAmount(order);
-      const originalPayment = await Payment.findOne({ orderId: order._id });
-      if (originalPayment) {
-        originalPayment.amount = originalOrderAmount;
-        await originalPayment.save();
-
-        const io = req.app.get("io");
-        if (io) {
-          const payload = formatPaymentPayload(originalPayment);
-          if (payload) {
-            io.emit("paymentUpdated", payload);
+          const io = req.app.get("io");
+          if (io) {
+            const payload = formatPaymentPayload(originalPayment);
+            if (payload) {
+              io.emit("paymentUpdated", payload);
+            }
           }
         }
       }
@@ -2165,70 +2328,25 @@ const convertToTakeaway = async (req, res) => {
       // Emit socket events to cafe room
       const io = req.app.get("io");
       const emitToCafe = req.app.get("emitToCafe");
-      if (io) {
-        if (newTakeawayOrder.cartId) {
-          emitToCafe(
-            io,
-            newTakeawayOrder.cartId.toString(),
-            "order:created",
-            newTakeawayOrder
-          );
-          emitToCafe(
-            io,
-            newTakeawayOrder.cartId.toString(),
-            "newOrder",
-            newTakeawayOrder
-          ); // Legacy support
-        }
-        if (order.cartId) {
-          emitToCafe(
-            io,
-            order.cartId.toString(),
-            "order:status:updated",
-            order
-          );
-          emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-        }
+      if (io && order.cartId) {
+        emitToCafe(
+          io,
+          order.cartId.toString(),
+          "order:status:updated",
+          order
+        );
+        emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       }
 
       return res.json({
-        message: `${selectedItems.length} item(s) converted to takeaway successfully. New takeaway order created. Original order updated.`,
-        order: newTakeawayOrder,
-        originalOrder: order,
+        message: `${selectedItems.length} item(s) marked as takeaway successfully. Items remain in the same dine-in order.`,
+        order: order,
       });
     }
 
-    // For non-paid orders, convert entire order to takeaway
-    order.serviceType = "TAKEAWAY";
-    order.tableNumber = "TAKEAWAY";
-    order.table = null;
-    order.sessionToken = undefined;
-
-    // Release the table
-    if (order.table) {
-      const table = await Table.findById(order.table);
-      if (table) {
-        table.status = "AVAILABLE";
-        table.currentOrder = null;
-        table.sessionToken = null;
-        table.lastAssignedAt = null;
-        await table.save();
-      }
-    }
-
-    await order.save();
-
-    // Emit socket event to cafe room
-    const io = req.app.get("io");
-    const emitToCafe = req.app.get("emitToCafe");
-    if (io && order.cartId) {
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-    }
-
-    res.json({
-      message: "Order converted to takeaway successfully",
-      order,
+    // If no itemIds provided, return error (we don't convert entire order anymore)
+    return res.status(400).json({
+      message: "Please specify which items to mark as takeaway. Use itemIds array in request body.",
     });
   } catch (err) {
     console.error("Convert to takeaway error:", err);

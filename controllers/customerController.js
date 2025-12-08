@@ -3,16 +3,13 @@ const Feedback = require("../models/feedbackModel");
 const Order = require("../models/orderModel");
 
 // Helper function to build query based on user role
-// CRITICAL: Cart admins must only see their own data (filtered by cartId)
+// CRITICAL: Cart admins must only see their own data (filtered by cafeId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
-    // CRITICAL: Use cartId for proper data isolation (not cafeId)
-    // Check both cartId and cafeId for backward compatibility
-    query.$or = [
-      { cartId: user._id },
-      { cafeId: user._id }
-    ];
+    // CRITICAL: Customer model uses cafeId (not cartId)
+    // Cart admin's _id should match the cafeId in customer records
+    query.cafeId = user._id;
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   }
@@ -23,26 +20,60 @@ const buildHierarchyQuery = (user) => {
 // Get all customers with statistics
 exports.getAllCustomers = async (req, res) => {
   try {
-    const query = buildHierarchyQuery(req.user);
+    const hierarchyQuery = buildHierarchyQuery(req.user);
     const { search, sortBy = "lastVisitAt", sortOrder = "desc" } = req.query;
     
-    // Add search filter if provided
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: "i" } },
-        { email: { $regex: search, $options: "i" } },
-        { phone: { $regex: search, $options: "i" } },
+    // Build the final query
+    let query = {};
+    
+    // Start with hierarchy query (cafeId or franchiseId filter)
+    if (Object.keys(hierarchyQuery).length > 0) {
+      query = { ...hierarchyQuery };
+    }
+    
+    // Add search filter if provided - combine with hierarchy using $and
+    if (search && search.trim()) {
+      const searchConditions = [
+        { name: { $regex: search.trim(), $options: "i" } },
+        { email: { $regex: search.trim(), $options: "i" } },
+        { phone: { $regex: search.trim().replace(/\D/g, ""), $options: "i" } }, // Normalize phone for search
       ];
+      
+      if (Object.keys(hierarchyQuery).length > 0) {
+        // Combine hierarchy filter with search using $and
+        query = {
+          $and: [
+            hierarchyQuery,
+            { $or: searchConditions }
+          ]
+        };
+      } else {
+        // No hierarchy filter (super admin) - just use search
+        query.$or = searchConditions;
+      }
     }
     
     // Build sort object
     const sort = {};
     sort[sortBy] = sortOrder === "asc" ? 1 : -1;
     
+    console.log("[CUSTOMER] Query for getAllCustomers:", JSON.stringify(query, null, 2));
+    console.log("[CUSTOMER] User role:", req.user?.role, "User ID:", req.user?._id);
+    
     const customers = await Customer.find(query)
       .sort(sort)
       .select("-ratings") // Don't send full ratings array initially
       .lean();
+    
+    console.log("[CUSTOMER] Found customers:", customers.length);
+    if (customers.length > 0) {
+      console.log("[CUSTOMER] Sample customer:", {
+        name: customers[0].name,
+        phone: customers[0].phone,
+        email: customers[0].email,
+        cafeId: customers[0].cafeId,
+      });
+    }
     
     // Add summary statistics
     const customersWithStats = customers.map(customer => ({
@@ -189,14 +220,24 @@ exports.searchCustomers = async (req, res) => {
       return res.json({ customers: [] });
     }
     
-    const query = {
-      ...buildHierarchyQuery(req.user),
-      $or: [
-        { name: { $regex: q, $options: "i" } },
-        { email: { $regex: q, $options: "i" } },
-        { phone: { $regex: q.replace(/\D/g, ""), $options: "i" } },
-      ],
-    };
+    const hierarchyQuery = buildHierarchyQuery(req.user);
+    const searchConditions = [
+      { name: { $regex: q, $options: "i" } },
+      { email: { $regex: q, $options: "i" } },
+      { phone: { $regex: q.replace(/\D/g, ""), $options: "i" } },
+    ];
+    
+    // Combine hierarchy query with search using $and
+    const query = {};
+    if (Object.keys(hierarchyQuery).length > 0) {
+      query.$and = [
+        hierarchyQuery,
+        { $or: searchConditions }
+      ];
+    } else {
+      // No hierarchy filter (super admin) - just use search
+      query.$or = searchConditions;
+    }
     
     const customers = await Customer.find(query)
       .select("name email phone visitCount averageRating")

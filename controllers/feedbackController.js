@@ -228,16 +228,13 @@ exports.createFeedback = async (req, res) => {
     // If orderId is provided, fetch order to get cafeId, franchiseId, and tableId
     if (feedbackData.orderId) {
       try {
-        // Convert orderId to ObjectId if it's a string
-        const orderIdObj = mongoose.Types.ObjectId.isValid(feedbackData.orderId)
-          ? new mongoose.Types.ObjectId(feedbackData.orderId)
-          : feedbackData.orderId;
-
-        const order = await Order.findById(orderIdObj);
+        // Order._id is a String, not ObjectId, so use findById with the string directly
+        const order = await Order.findById(feedbackData.orderId);
         if (order) {
-          // Convert ObjectId to string/ObjectId as needed
-          feedbackData.cafeId = order.cafeId
-            ? order.cafeId._id || order.cafeId
+          // Order model uses cartId (not cafeId), but feedback model uses cafeId
+          // Map cartId to cafeId for feedback
+          feedbackData.cafeId = order.cartId
+            ? order.cartId._id || order.cartId
             : null;
           feedbackData.franchiseId = order.franchiseId
             ? order.franchiseId._id || order.franchiseId
@@ -247,6 +244,7 @@ exports.createFeedback = async (req, res) => {
           if (order.table && !feedbackData.tableId) {
             feedbackData.tableId = order.table._id || order.table;
           }
+          console.log(`✅ Found order ${feedbackData.orderId} - cafeId: ${cafeId}, franchiseId: ${franchiseId}`);
         } else {
           console.warn(`Order not found for orderId: ${feedbackData.orderId}`);
         }
@@ -297,6 +295,17 @@ exports.createFeedback = async (req, res) => {
           franchiseId
         );
 
+        // If cafeId was not set from order/table, try to get it from existing customer
+        if (!cafeId && customer && customer.cafeId) {
+          feedbackData.cafeId = customer.cafeId._id || customer.cafeId;
+          cafeId = feedbackData.cafeId;
+          if (customer.franchiseId) {
+            feedbackData.franchiseId = customer.franchiseId._id || customer.franchiseId;
+            franchiseId = feedbackData.franchiseId;
+          }
+          console.log(`✅ Set cafeId from existing customer: ${cafeId}`);
+        }
+
         // Prepare rating data to add to customer
         const ratingData = {
           rating: feedbackData.overallRating,
@@ -333,6 +342,15 @@ exports.createFeedback = async (req, res) => {
         console.error("Error processing customer:", customerErr);
         // Continue with feedback creation even if customer processing fails
       }
+    }
+
+    // Warn if cafeId is still not set - feedback won't show in admin panel for specific cafes
+    if (!feedbackData.cafeId) {
+      console.warn(
+        `⚠️ Warning: Feedback created without cafeId. OrderId: ${feedbackData.orderId || "N/A"}, ` +
+        `TableId: ${feedbackData.tableId || "N/A"}. ` +
+        `This feedback will only be visible to super admin.`
+      );
     }
 
     // Validate required fields before creating feedback
