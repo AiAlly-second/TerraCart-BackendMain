@@ -419,9 +419,124 @@ exports.checkOut = async (req, res) => {
     return res.json({
       message: "Checked out successfully",
       attendance,
+      totalWorkingMinutes: Math.max(0, workingHours),
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
+  }
+};
+
+// Check-out by attendance ID (for mobile app)
+exports.checkOutById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { location, notes } = req.body;
+    const user = req.user;
+
+    // Find attendance record
+    const attendance = await EmployeeAttendance.findById(id);
+    if (!attendance) {
+      return res.status(404).json({ success: false, message: "Attendance record not found" });
+    }
+
+    // Check access - mobile users can only manage their own attendance
+    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({ userId: user._id });
+      if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
+        return res.status(403).json({ success: false, message: "Access denied" });
+      }
+    } else {
+      // Admin access check
+      const query = await buildHierarchyQuery(user);
+      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
+        return res.status(403).json({ success: false, message: "Access denied" });
+      }
+    }
+
+    if (!attendance.checkIn.time) {
+      return res.status(400).json({ success: false, message: "Employee has not checked in" });
+    }
+
+    if (attendance.checkOut.time) {
+      return res.status(400).json({ success: false, message: "Employee already checked out" });
+    }
+
+    // Check if on break - must end break before checkout
+    if (attendance.isOnBreak || (attendance.breakStart && !attendance.checkOut?.time)) {
+      return res.status(400).json({ success: false, message: "Cannot checkout while on break. Please end break first." });
+    }
+
+    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
+
+    // Calculate working hours
+    const checkInTime = new Date(attendance.checkIn.time);
+    const totalDurationMinutes = Math.floor((checkOutTime - checkInTime) / (1000 * 60));
+    const breakMinutes = attendance.breakDuration || 0;
+    const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
+
+    // Get schedule to calculate overtime
+    const schedule = await EmployeeSchedule.findOne({ employeeId: attendance.employeeId });
+    let overtime = 0;
+
+    if (schedule && schedule.weeklySchedule) {
+      const now = new Date();
+      const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
+      const istNow = new Date(now.getTime() + istOffset);
+      const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+      const todayDay = dayNames[istNow.getUTCDay()];
+      const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
+
+      if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
+        const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
+        const scheduledEndTimeIST = new Date(istNow);
+        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
+        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        
+        if (checkOutTime > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
+        }
+      }
+    }
+
+    attendance.checkOut = {
+      time: checkOutTime,
+      location: location || "",
+      notes: notes || "",
+    };
+    attendance.totalWorkingMinutes = totalWorkingMinutes;
+    attendance.workingHours = Number((totalWorkingMinutes / 60).toFixed(2)); // Convert to hours with 2 decimal places
+    attendance.overtime = Math.max(0, overtime);
+    
+    // Update status - if less than 4 hours, mark as half_day, otherwise completed
+    if (totalWorkingMinutes < 240) {
+      // Less than 4 hours
+      attendance.status = "half_day";
+    } else {
+      attendance.status = "completed";
+    }
+
+    await attendance.save();
+    await attendance.populate("employeeId", "name mobile employeeRole");
+
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendance.cafeId) {
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_out", attendance);
+      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    }
+
+    return res.json({
+      success: true,
+      message: "Checked out successfully",
+      data: attendance,
+      totalWorkingMinutes: totalWorkingMinutes,
+      workingHours: attendance.workingHours,
+      overtime: attendance.overtime,
+    });
+  } catch (err) {
+    console.error('[ATTENDANCE] Checkout by ID error:', err);
+    return res.status(500).json({ success: false, message: err.message });
   }
 };
 
@@ -434,36 +549,44 @@ exports.startBreak = async (req, res) => {
     // Find attendance record
     const attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
-      return res.status(404).json({ message: "Attendance record not found" });
+      return res.status(404).json({ success: false, message: "Attendance record not found" });
     }
 
     // Check access - mobile users can only manage their own attendance
     if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-      const userEmployee = await Employee.findOne({ userId: user._id });
+      // Mobile users: lookup Employee by email (since User.email matches Employee.email)
+      const userEmployee = await Employee.findOne({ 
+        $or: [
+          { userId: user._id },
+          { email: user.email?.toLowerCase() }
+        ]
+      });
       if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
-        return res.status(403).json({ message: "Access denied" });
+        return res.status(403).json({ success: false, message: "Access denied" });
       }
     } else {
       // Admin access check
       const query = await buildHierarchyQuery(user);
       if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
-        return res.status(403).json({ message: "Access denied" });
+        return res.status(403).json({ success: false, message: "Access denied" });
       }
     }
 
     if (!attendance.checkIn.time) {
-      return res.status(400).json({ message: "Employee has not checked in" });
+      return res.status(400).json({ success: false, message: "Employee has not checked in" });
     }
 
     if (attendance.checkOut.time) {
-      return res.status(400).json({ message: "Employee has already checked out" });
+      return res.status(400).json({ success: false, message: "Employee has already checked out" });
     }
 
-    if (attendance.breakStart) {
-      return res.status(400).json({ message: "Break already started" });
+    // Check if already on break (using isOnBreak field or breakStart)
+    if (attendance.isOnBreak || attendance.breakStart) {
+      return res.status(400).json({ success: false, message: "Break already started" });
     }
 
     attendance.breakStart = new Date();
+    attendance.isOnBreak = true;
     await attendance.save();
     await attendance.populate("employeeId", "name mobile employeeRole");
 
@@ -476,8 +599,10 @@ exports.startBreak = async (req, res) => {
     }
 
     return res.json({
+      success: true,
       message: "Break started",
-      attendance,
+      data: attendance,
+      attendance, // Keep for backward compatibility
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -498,26 +623,34 @@ exports.endBreak = async (req, res) => {
 
     // Check access - mobile users can only manage their own attendance
     if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-      const userEmployee = await Employee.findOne({ userId: user._id });
+      // Mobile users: lookup Employee by email (since User.email matches Employee.email)
+      const userEmployee = await Employee.findOne({ 
+        $or: [
+          { userId: user._id },
+          { email: user.email?.toLowerCase() }
+        ]
+      });
       if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
-        return res.status(403).json({ message: "Access denied" });
+        return res.status(403).json({ success: false, message: "Access denied" });
       }
     } else {
       // Admin access check
       const query = await buildHierarchyQuery(user);
       if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
-        return res.status(403).json({ message: "Access denied" });
+        return res.status(403).json({ success: false, message: "Access denied" });
       }
     }
 
-    if (!attendance.breakStart) {
-      return res.status(400).json({ message: "Break has not been started" });
+    // Check if on break (using isOnBreak field or breakStart)
+    if (!attendance.isOnBreak && !attendance.breakStart) {
+      return res.status(400).json({ success: false, message: "Break has not been started" });
     }
 
     const breakEnd = new Date();
     const breakDuration = Math.floor((breakEnd - attendance.breakStart) / (1000 * 60)); // in minutes
     attendance.breakDuration = (attendance.breakDuration || 0) + breakDuration;
     attendance.breakStart = null; // Clear break start time
+    attendance.isOnBreak = false; // Clear break status
 
     await attendance.save();
     await attendance.populate("employeeId", "name mobile employeeRole");
@@ -531,8 +664,10 @@ exports.endBreak = async (req, res) => {
     }
 
     return res.json({
+      success: true,
       message: "Break ended",
-      attendance,
+      data: attendance,
+      attendance, // Keep for backward compatibility
       breakDuration,
     });
   } catch (err) {

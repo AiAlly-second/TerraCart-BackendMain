@@ -66,13 +66,25 @@ exports.getDashboardStats = async (req, res) => {
     });
 
     // Today's revenue - from orders that are Paid, Finalized, or Exit (includes both DINE_IN and TAKEAWAY)
+    // Calculate revenue from kotLines totalAmount (sum of all kotLines in each order)
     const todayOrders = await Order.find({
       cartId: cafeId,
       createdAt: { $gte: today, $lt: tomorrow },
       status: { $in: ["Paid", "Finalized", "Exit"] },
     }).lean();
 
-    const todayRevenue = todayOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+    const todayRevenue = todayOrders.reduce((sum, order) => {
+      // For revenue calculation, sum all kotLines totalAmount
+      // Each KOT represents items that were ordered and paid for
+      if (!order.kotLines || order.kotLines.length === 0) {
+        return sum;
+      }
+      const orderTotal = order.kotLines.reduce(
+        (lineSum, kotLine) => lineSum + (Number(kotLine.totalAmount) || 0),
+        0
+      );
+      return sum + orderTotal;
+    }, 0);
 
     // Pending tasks (if you have a tasks model, otherwise return 0)
     const pendingTasks = 0; // TODO: Implement when tasks model is available
