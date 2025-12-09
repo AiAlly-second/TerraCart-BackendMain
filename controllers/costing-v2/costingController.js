@@ -309,7 +309,6 @@ exports.createIngredient = async (req, res) => {
  */
 exports.updateIngredient = async (req, res) => {
   try {
-<<<<<<< HEAD
     // First find the ingredient to check access
     const existingIngredient = await Ingredient.findById(req.params.id);
     if (!existingIngredient) {
@@ -326,15 +325,13 @@ exports.updateIngredient = async (req, res) => {
       }
     }
 
-    // Update the ingredient
-=======
     // Decode HTML entities in category field if present
     let updateData = { ...req.body };
     if (updateData.category) {
       updateData.category = decodeHtmlEntities(updateData.category);
     }
-    
->>>>>>> 1f53e39 (costing and email update issue fix for employee management)
+
+    // Update the ingredient
     const ingredient = await Ingredient.findByIdAndUpdate(
       req.params.id,
       updateData,
@@ -382,22 +379,42 @@ exports.updateIngredient = async (req, res) => {
  */
 exports.deleteIngredient = async (req, res) => {
   try {
-<<<<<<< HEAD
     // First find the ingredient to check access and validate
-=======
->>>>>>> 1f53e39 (costing and email update issue fix for employee management)
     const ingredient = await Ingredient.findById(req.params.id);
     if (!ingredient) {
       return res.status(404).json({ success: false, message: "Ingredient not found" });
     }
-<<<<<<< HEAD
 
-    // Check access control - cart admins can only delete their own ingredients
+    // Check access control
     if (req.user.role === "admin") {
+      // If ingredient has outletId, it must match the cart admin's ID
       if (ingredient.outletId && ingredient.outletId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ 
           success: false, 
-          message: "Access denied. You can only delete ingredients belonging to your cart." 
+          message: "Access denied: You can only delete ingredients belonging to your cart" 
+        });
+      }
+      // If ingredient is shared (outletId is null), cart admin cannot delete it
+      if (!ingredient.outletId) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You cannot delete shared ingredients" 
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can delete ingredients from their franchise carts
+      if (ingredient.outletId) {
+        const outlet = await User.findById(ingredient.outletId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ 
+            success: false, 
+            message: "Access denied: You can only delete ingredients from your franchise carts" 
+          });
+        }
+      } else if (ingredient.franchiseId && ingredient.franchiseId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You can only delete ingredients from your franchise" 
         });
       }
     }
@@ -435,45 +452,6 @@ exports.deleteIngredient = async (req, res) => {
     }
 
     res.json({ success: true, message: "Ingredient deleted successfully" });
-=======
-    
-    // Check access: cart admin can only delete their own ingredients
-    if (req.user.role === "admin") {
-      // If ingredient has outletId, it must match the cart admin's ID
-      if (ingredient.outletId && ingredient.outletId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ 
-          success: false, 
-          message: "Access denied: You can only delete ingredients belonging to your cart" 
-        });
-      }
-      // If ingredient is shared (outletId is null), cart admin cannot delete it
-      if (!ingredient.outletId) {
-        return res.status(403).json({ 
-          success: false, 
-          message: "Access denied: You cannot delete shared ingredients" 
-        });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin can delete ingredients from their franchise carts
-      if (ingredient.outletId) {
-        const outlet = await User.findById(ingredient.outletId);
-        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ 
-            success: false, 
-            message: "Access denied: You can only delete ingredients from your franchise carts" 
-          });
-        }
-      } else if (ingredient.franchiseId && ingredient.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ 
-          success: false, 
-          message: "Access denied: You can only delete ingredients from your franchise" 
-        });
-      }
-    }
-    
-    await Ingredient.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: "Ingredient deleted" });
->>>>>>> 1f53e39 (costing and email update issue fix for employee management)
   } catch (error) {
     console.error('[COSTING] Delete ingredient error:', error);
     res.status(500).json({ success: false, message: error.message || "Failed to delete ingredient" });
