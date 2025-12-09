@@ -130,10 +130,10 @@ const rateLimiters = {
   }),
 
   // Strict limit for login attempts
-  // In dev: 100 attempts per 7.5 min, in prod: 10 per 15 min
+  // In dev: 100 attempts per 7.5 min, in prod: configurable via RATE_LIMIT_LOGIN env var (default: 10)
   login: createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 10, // Only 10 login attempts per 15 min (100 in dev)
+    max: parseInt(process.env.RATE_LIMIT_LOGIN) || 10, // Configurable via env var, default 10
     message: 'Too many login attempts. Please try again after 15 minutes.',
     skipSuccessfulRequests: true // Don't count successful logins
   }),

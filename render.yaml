@@ -38,7 +38,7 @@ services:
       - key: RATE_LIMIT_API
         value: "500"
       - key: RATE_LIMIT_LOGIN
-        value: "10"
+        value: "20"
       - key: RATE_LIMIT_UPLOAD
         value: "50"
       - key: ENABLE_REQUEST_LOGGING
