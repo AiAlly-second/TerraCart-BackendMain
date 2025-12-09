@@ -28,7 +28,7 @@ services:
           name: sarva-cafe-backend
           property: host
       - key: ALLOWED_ORIGINS
-        sync: false # Update after frontend deployment
+        value: "https://terra-cart-frontend-admin.vercel.app" # Update with your actual frontend URL
       - key: ALLOW_PUBLIC_UPLOADS
         value: "false"
       - key: MAX_FILE_SIZE
