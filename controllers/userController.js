@@ -950,12 +950,32 @@ exports.getUserById = async (req, res) => {
     // - Cafe admin: can view themselves OR their franchise admin (for invoice purposes)
     // - Mobile app users (waiter, cook, captain, manager): can view their associated cart/cafe
     if (req.user.role === "franchise_admin") {
-      // Franchise admin can only view cafe admins (role: "admin") under their franchise
-      if (user.role !== "admin") {
-        return res.status(403).json({ message: "Access denied. You can only view cafe admins under your franchise." });
-      }
-      if (!user.franchiseId || user.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
+      // Franchise admin can view:
+      // 1. Cafe admins (role: "admin") under their franchise
+      // 2. Employee users (waiter, cook, captain, manager) that belong to their franchise
+      if (user.role === "admin") {
+        // For cafe admins, check franchise ownership
+        if (!user.franchiseId || user.franchiseId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
+        }
+      } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+        // For employee users, check if they belong to this franchise
+        // Check via employeeId -> Employee -> franchiseId
+        if (user.employeeId) {
+          const Employee = require("../models/employeeModel");
+          const employee = await Employee.findById(user.employeeId).select("franchiseId").lean();
+          if (!employee || !employee.franchiseId || employee.franchiseId.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+          }
+        } else if (user.franchiseId && user.franchiseId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+        } else if (!user.franchiseId) {
+          // If no franchiseId, deny access (employee must belong to a franchise)
+          return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+        }
+      } else {
+        // For other roles, deny access
+        return res.status(403).json({ message: "Access denied. You can only view cafe admins and employees under your franchise." });
       }
     } else if (req.user.role === "admin") {
       // Cafe admin can view themselves OR their franchise admin (for invoice/billing purposes)

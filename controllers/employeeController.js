@@ -39,7 +39,10 @@ const validateDOB = (dateOfBirth) => {
 // CRITICAL: Cart admins must only see their own data (filtered by cafeId/cartId)
 const buildHierarchyQuery = async (user) => {
   const query = {};
-  if (user.role === "admin") {
+  // Normalize role: treat 'cart_admin' as 'admin' for backward compatibility
+  const userRole = user.role === "cart_admin" ? "admin" : user.role;
+  
+  if (userRole === "admin") {
     // CRITICAL: Cart admin - ONLY see employees from their own cart
     // Employee model uses cafeId (which should match cart admin's _id)
     query.cafeId = user._id;
@@ -94,12 +97,56 @@ exports.getAllEmployees = async (req, res) => {
     const employees = await Employee.find(query)
       .populate("cafeId", "name cafeName email")
       .populate("franchiseId", "name email")
+      .populate("userId", "email")
       .sort({ createdAt: -1 })
       .lean();
     
-    console.log(`[EMPLOYEE_QUERY] Found ${employees.length} employees for user ${req.user._id} (${req.user.role})`);
+    // Extract email from User model (via userId) if available
+    const employeesWithEmail = await Promise.all(employees.map(async (emp) => {
+      let userEmail = null;
+      
+      if (emp.userId) {
+        if (emp.userId.email) {
+          userEmail = emp.userId.email;
+        } else if (typeof emp.userId === 'string' || emp.userId._id) {
+          const userId = typeof emp.userId === 'string' ? emp.userId : emp.userId._id;
+          const user = await User.findById(userId).select('email').lean();
+          if (user && user.email) {
+            userEmail = user.email;
+          }
+        }
+      }
+      
+      // FALLBACK: If no userId but employee has email, try to find User by email
+      if (!userEmail && emp.email && emp.email !== 'employee@example.com') {
+        try {
+          const userByEmail = await User.findOne({ email: emp.email.toLowerCase().trim() })
+            .select('_id email')
+            .lean();
+          if (userByEmail) {
+            userEmail = userByEmail.email;
+            // Link userId if missing
+            if (!emp.userId) {
+              Employee.findByIdAndUpdate(emp._id, { userId: userByEmail._id }).catch(err => 
+                console.warn(`[GET_ALL_EMPLOYEES] Failed to link userId:`, err.message)
+              );
+            }
+          }
+        } catch (err) {
+          // Ignore errors
+        }
+      }
+      
+      if (userEmail) {
+        emp.email = userEmail;
+      }
+      
+      return emp;
+    }));
     
-    return res.json({ success: true, data: employees });
+    console.log(`[EMPLOYEE_QUERY] Found ${employeesWithEmail.length} employees for user ${req.user._id} (${req.user.role})`);
+    
+    return res.json({ success: true, data: employeesWithEmail });
   } catch (err) {
     console.error('[EMPLOYEE_QUERY] Error:', err);
     return res.status(500).json({ success: false, message: err.message });
@@ -121,11 +168,72 @@ exports.getEmployee = async (req, res) => {
     const employee = await Employee.findOne(query)
       .populate("cafeId", "name cafeName email")
       .populate("franchiseId", "name email")
+      .populate("userId", "email") // Populate userId to get email from User model
       .lean();
     
     if (!employee) {
       return res.status(404).json({ success: false, message: "Employee not found" });
     }
+    
+    // If email is in User model (via userId), prefer it over employee.email
+    // User email is the source of truth for login accounts
+    let userEmail = null;
+    
+    if (employee.userId) {
+      if (employee.userId.email) {
+        // userId is populated and has email
+        userEmail = employee.userId.email;
+        console.log(`[GET_EMPLOYEE] Email from populated userId: ${userEmail}`);
+      } else {
+        // userId is just an ID, fetch the User
+        const userId = typeof employee.userId === 'string' ? employee.userId : (employee.userId._id || employee.userId.id);
+        if (userId) {
+          try {
+            const user = await User.findById(userId).select('email').lean();
+            if (user && user.email) {
+              userEmail = user.email;
+              console.log(`[GET_EMPLOYEE] Email fetched from User model for userId ${userId}: ${userEmail}`);
+            } else {
+              console.warn(`[GET_EMPLOYEE] User found for userId ${userId} but no email field`);
+            }
+          } catch (userErr) {
+            console.error(`[GET_EMPLOYEE] Error fetching User for userId ${userId}:`, userErr.message);
+          }
+        }
+      }
+    }
+    
+    // FALLBACK: If no userId but employee has email, try to find User by email
+    // This handles cases where userId link might be missing
+    if (!userEmail && employee.email && employee.email !== 'employee@example.com') {
+      try {
+        const userByEmail = await User.findOne({ email: employee.email.toLowerCase().trim() })
+          .select('_id email')
+          .lean();
+        if (userByEmail) {
+          userEmail = userByEmail.email;
+          // Also link userId if missing
+          if (!employee.userId) {
+            console.log(`[GET_EMPLOYEE] Found User by email, linking userId ${userByEmail._id} to employee`);
+            await Employee.findByIdAndUpdate(employee._id, { userId: userByEmail._id });
+            employee.userId = userByEmail._id;
+          }
+          console.log(`[GET_EMPLOYEE] Email found via email lookup: ${userEmail}`);
+        }
+      } catch (emailLookupErr) {
+        console.warn(`[GET_EMPLOYEE] Error looking up User by email:`, emailLookupErr.message);
+      }
+    }
+    
+    // Always use User email if available (it's the source of truth)
+    if (userEmail) {
+      employee.email = userEmail;
+    }
+    
+    // Log final email value
+    console.log(`[GET_EMPLOYEE] Final email for employee ${employee._id}: ${employee.email || 'NOT FOUND'}`);
+    console.log(`[GET_EMPLOYEE] Employee userId: ${employee.userId ? (typeof employee.userId === 'object' ? employee.userId._id : employee.userId) : 'NONE'}`);
+    
     return res.json({ success: true, data: employee });
   } catch (err) {
     console.error('[EMPLOYEE_QUERY] Get employee error:', err);
@@ -225,6 +333,7 @@ exports.createEmployee = async (req, res) => {
           
           console.log(`[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
           console.log(`[EMPLOYEE] User ID: ${user._id}, Email: ${user.email}, CafeId: ${user.cafeId}`);
+          console.log(`[EMPLOYEE] Employee userId linked: ${employee.userId}`);
         }
       } catch (userError) {
         console.error('[EMPLOYEE] Error creating User account:', userError.message);
@@ -236,6 +345,13 @@ exports.createEmployee = async (req, res) => {
     // Populate relationships before returning
     await employee.populate("cafeId", "name cafeName email");
     await employee.populate("franchiseId", "name email");
+    await employee.populate("userId", "email"); // Populate userId to include email
+    
+    // Extract email from User model if userId exists
+    if (employee.userId && employee.userId.email) {
+      employee.email = employee.userId.email;
+      console.log(`[EMPLOYEE] Email from User model after creation: ${employee.email}`);
+    }
     
     return res.status(201).json(employee);
   } catch (err) {
@@ -319,8 +435,14 @@ exports.updateEmployee = async (req, res) => {
           if (!mobileRoles.includes(user.role)) {
             user.role = employee.employeeRole;
           }
+          // Ensure userId is linked in employee
+          if (!employee.userId || employee.userId.toString() !== user._id.toString()) {
+            employee.userId = user._id;
+            await employee.save();
+            console.log(`[UPDATE_EMPLOYEE] Linked userId ${user._id} to employee ${employee._id}`);
+          }
           await user.save();
-          console.log(`[EMPLOYEE] Updated User account for employee: ${employee.name}`);
+          console.log(`[UPDATE_EMPLOYEE] Updated User account for employee: ${employee.name}, Email: ${user.email}`);
         } else {
           // Create new User account for mobile login
           const userData = {
@@ -328,6 +450,8 @@ exports.updateEmployee = async (req, res) => {
             email: employee.email,
             password: password,
             role: employee.employeeRole,
+            cafeId: employee.cafeId,
+            employeeId: employee._id,
           };
           
           // Set franchiseId if employee has one
@@ -336,7 +460,13 @@ exports.updateEmployee = async (req, res) => {
           }
           
           user = await User.create(userData);
-          console.log(`[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
+          
+          // Link userId in employee
+          employee.userId = user._id;
+          await employee.save();
+          
+          console.log(`[UPDATE_EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
+          console.log(`[UPDATE_EMPLOYEE] User ID: ${user._id}, Email: ${user.email}`);
         }
       } catch (userError) {
         console.error('[EMPLOYEE] Error creating/updating User account:', userError.message);
@@ -346,6 +476,14 @@ exports.updateEmployee = async (req, res) => {
     
     await employee.populate("cafeId", "name cafeName email");
     await employee.populate("franchiseId", "name email");
+    await employee.populate("userId", "email"); // Populate userId to include email
+    
+    // Extract email from User model if userId exists (User is source of truth)
+    if (employee.userId && employee.userId.email) {
+      employee.email = employee.userId.email;
+      console.log(`[UPDATE_EMPLOYEE] Email from User model: ${employee.email}`);
+    }
+    
     return res.json(employee);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -371,7 +509,11 @@ exports.deleteEmployee = async (req, res) => {
 // Get hierarchical structure (franchises and cafes) - Filtered by role
 exports.getHierarchy = async (req, res) => {
   try {
-    const userRole = req.user.role;
+    // Normalize role: treat 'cart_admin' as 'admin' for backward compatibility
+    let userRole = req.user.role;
+    if (userRole === "cart_admin") {
+      userRole = "admin";
+    }
     const userId = req.user._id;
 
     let franchises = [];
@@ -393,7 +535,47 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({})
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
-        .sort({ createdAt: -1 });
+        .populate("userId", "email")
+        .sort({ createdAt: -1 })
+        .lean();
+      
+      // Extract email from User model (via userId) if available
+      employees = await Promise.all(employees.map(async (emp) => {
+        let userEmail = null;
+        
+        if (emp.userId) {
+          if (emp.userId.email) {
+            userEmail = emp.userId.email;
+          } else if (typeof emp.userId === 'string' || emp.userId._id) {
+            const userId = typeof emp.userId === 'string' ? emp.userId : emp.userId._id;
+            const user = await User.findById(userId).select('email').lean();
+            if (user && user.email) {
+              userEmail = user.email;
+            }
+          }
+        }
+        
+        // FALLBACK: If no userId but employee has email, try to find User by email
+        if (!userEmail && emp.email && emp.email !== 'employee@example.com') {
+          try {
+            const userByEmail = await User.findOne({ email: emp.email.toLowerCase().trim() })
+              .select('_id email')
+              .lean();
+            if (userByEmail) {
+              userEmail = userByEmail.email;
+              if (!emp.userId) {
+                Employee.findByIdAndUpdate(emp._id, { userId: userByEmail._id }).catch(() => {});
+              }
+            }
+          } catch (err) {}
+        }
+        
+        if (userEmail) {
+          emp.email = userEmail;
+        }
+        
+        return emp;
+      }));
 
       // Organize employees by franchise and cafe
       hierarchy = franchises.map(franchise => {
@@ -446,7 +628,47 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({ franchiseId: userId })
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
-        .sort({ createdAt: -1 });
+        .populate("userId", "email")
+        .sort({ createdAt: -1 })
+        .lean();
+      
+      // Extract email from User model (via userId) if available
+      employees = await Promise.all(employees.map(async (emp) => {
+        let userEmail = null;
+        
+        if (emp.userId) {
+          if (emp.userId.email) {
+            userEmail = emp.userId.email;
+          } else if (typeof emp.userId === 'string' || emp.userId._id) {
+            const userId = typeof emp.userId === 'string' ? emp.userId : emp.userId._id;
+            const user = await User.findById(userId).select('email').lean();
+            if (user && user.email) {
+              userEmail = user.email;
+            }
+          }
+        }
+        
+        // FALLBACK: If no userId but employee has email, try to find User by email
+        if (!userEmail && emp.email && emp.email !== 'employee@example.com') {
+          try {
+            const userByEmail = await User.findOne({ email: emp.email.toLowerCase().trim() })
+              .select('_id email')
+              .lean();
+            if (userByEmail) {
+              userEmail = userByEmail.email;
+              if (!emp.userId) {
+                Employee.findByIdAndUpdate(emp._id, { userId: userByEmail._id }).catch(() => {});
+              }
+            }
+          } catch (err) {}
+        }
+        
+        if (userEmail) {
+          emp.email = userEmail;
+        }
+        
+        return emp;
+      }));
 
       const cafesWithEmployees = cafes.map(cafe => {
         const cafeEmployees = employees.filter(
@@ -485,7 +707,47 @@ exports.getHierarchy = async (req, res) => {
       employees = await Employee.find({ cafeId: userId })
         .populate("cafeId", "name cafeName email")
         .populate("franchiseId", "name email")
-        .sort({ createdAt: -1 });
+        .populate("userId", "email")
+        .sort({ createdAt: -1 })
+        .lean();
+      
+      // Extract email from User model (via userId) if available
+      employees = await Promise.all(employees.map(async (emp) => {
+        let userEmail = null;
+        
+        if (emp.userId) {
+          if (emp.userId.email) {
+            userEmail = emp.userId.email;
+          } else if (typeof emp.userId === 'string' || emp.userId._id) {
+            const userId = typeof emp.userId === 'string' ? emp.userId : emp.userId._id;
+            const user = await User.findById(userId).select('email').lean();
+            if (user && user.email) {
+              userEmail = user.email;
+            }
+          }
+        }
+        
+        // FALLBACK: If no userId but employee has email, try to find User by email
+        if (!userEmail && emp.email && emp.email !== 'employee@example.com') {
+          try {
+            const userByEmail = await User.findOne({ email: emp.email.toLowerCase().trim() })
+              .select('_id email')
+              .lean();
+            if (userByEmail) {
+              userEmail = userByEmail.email;
+              if (!emp.userId) {
+                Employee.findByIdAndUpdate(emp._id, { userId: userByEmail._id }).catch(() => {});
+              }
+            }
+          } catch (err) {}
+        }
+        
+        if (userEmail) {
+          emp.email = userEmail;
+        }
+        
+        return emp;
+      }));
 
       // Cart admin view: Show only their cart with its employees
       // Do NOT include franchise information or franchise-level employees

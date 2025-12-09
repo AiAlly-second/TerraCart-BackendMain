@@ -313,7 +313,11 @@ exports.listTables = async (req, res) => {
     
     // Find tables and ensure no duplicates by table number within the same cafe
     // Only return tables that match the query exactly
-    const tables = await Table.find(query).sort({ number: 1 }).lean();
+    // Populate mergedWith to ensure it's included in the response
+    const tables = await Table.find(query)
+      .populate("mergedWith", "number")
+      .sort({ number: 1 })
+      .lean();
     
     // Additional safety: Filter out any tables that don't match the cartId exactly
     // This prevents returning tables from other carts due to query issues
@@ -351,6 +355,17 @@ exports.listTables = async (req, res) => {
     
     console.log('[TABLE] listTables - After deduplication:', uniqueTables.length);
     
+    // Populate mergedTables and mergedWith for capacity calculation
+    const tablesWithMerged = await Table.find({ _id: { $in: uniqueTables.map(t => t._id) } })
+      .populate("mergedTables", "number capacity originalCapacity")
+      .populate("mergedWith", "number capacity")
+      .lean();
+    
+    const tableMap = new Map();
+    tablesWithMerged.forEach(t => {
+      tableMap.set(t._id.toString(), t);
+    });
+    
     const enriched = await Promise.all(
       uniqueTables.map(async (table) => {
         // Ensure table status is correct - if no current order, it should be AVAILABLE
@@ -370,8 +385,34 @@ exports.listTables = async (req, res) => {
           }
         }
         
+        // Get table with merged data
+        const tableWithMerged = tableMap.get(table._id.toString()) || table;
+        
+        // Calculate capacity display (same logic as dashboard)
+        let originalCapacity = table.capacity || 0;
+        let totalCapacity = table.capacity || 0;
+        
+        if (tableWithMerged.mergedTables && tableWithMerged.mergedTables.length > 0) {
+          // Primary table with merged tables
+          // table.capacity already includes merged tables' capacities
+          originalCapacity = tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
+          totalCapacity = table.capacity || 0; // Current capacity (includes merged)
+        } else if (tableWithMerged.mergedWith) {
+          // Secondary table merged into another
+          originalCapacity = tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
+          totalCapacity = originalCapacity; // Secondary tables don't have merged capacity themselves
+        } else {
+          // Regular table (not merged)
+          originalCapacity = table.capacity || 0;
+          totalCapacity = table.capacity || 0;
+        }
+        
         return {
           ...table,
+          capacity: originalCapacity, // Original/base capacity for display
+          totalCapacity, // Total capacity including merged tables (for primary tables)
+          mergedWith: tableWithMerged.mergedWith ? (typeof tableWithMerged.mergedWith === 'object' ? tableWithMerged.mergedWith._id : tableWithMerged.mergedWith) : null, // Include mergedWith field
+          mergedTables: tableWithMerged.mergedTables || [], // Include mergedTables field
           waitlistLength: await countActiveWaitlist(table._id),
         };
       })
@@ -1338,6 +1379,10 @@ exports.mergeTables = async (req, res) => {
     
     // Merge tables: mark secondary tables as merged with primary
     for (const secondaryTable of secondaryTables) {
+      // Store original capacity before merging (if not already stored)
+      if (!secondaryTable.originalCapacity) {
+        secondaryTable.originalCapacity = secondaryTable.capacity || 2;
+      }
       secondaryTable.status = "MERGED";
       secondaryTable.mergedWith = primaryTable._id;
       await secondaryTable.save();
@@ -1355,9 +1400,13 @@ exports.mergeTables = async (req, res) => {
       return id;
     });
     primaryTable.mergedTables.push(...secondaryObjectIds);
-    // Update capacity to reflect merged tables
-    const totalCapacity = secondaryTables.reduce((sum, t) => sum + (t.capacity || 0), primaryTable.capacity || 0);
-    primaryTable.capacity = totalCapacity;
+    // Store original capacity if not already stored (for unmerge)
+    if (!primaryTable.originalCapacity) {
+      primaryTable.originalCapacity = primaryTable.capacity || 2;
+    }
+    // Update capacity to reflect merged tables (add secondary tables' capacities)
+    const secondaryCapacity = secondaryTables.reduce((sum, t) => sum + (t.capacity || 0), 0);
+    primaryTable.capacity = (primaryTable.originalCapacity || primaryTable.capacity || 0) + secondaryCapacity;
     await primaryTable.save();
     
     return res.json({
@@ -1479,15 +1528,20 @@ exports.unmergeTables = async (req, res) => {
               return idStr !== table._id.toString();
             }
           );
-          // Restore capacity by subtracting this table's capacity
+          // Restore capacity by subtracting this table's original capacity
           const currentCapacity = primaryTable.capacity || 0;
-          const tableCapacity = table.capacity || 0;
-          primaryTable.capacity = Math.max(2, currentCapacity - tableCapacity);
+          const tableOriginalCapacity = table.originalCapacity || table.capacity || 0;
+          primaryTable.capacity = Math.max(primaryTable.originalCapacity || 2, currentCapacity - tableOriginalCapacity);
           await primaryTable.save();
         }
       }
       table.status = "AVAILABLE";
       table.mergedWith = null;
+      // Restore original capacity if it was stored
+      if (table.originalCapacity) {
+        table.capacity = table.originalCapacity;
+        table.originalCapacity = undefined; // Clear after restore
+      }
       await table.save();
       return res.json({ message: "Table unmerged successfully", table });
     }
@@ -1501,18 +1555,30 @@ exports.unmergeTables = async (req, res) => {
         _id: { $in: table.mergedTables } 
       });
       
-      // Calculate total capacity of merged tables
-      const mergedCapacity = mergedTables.reduce((sum, t) => sum + (t.capacity || 0), 0);
+      // Get original capacity of merged tables (before they were merged)
+      // We need to get their original capacities, not current capacities
+      const mergedCapacity = mergedTables.reduce((sum, t) => {
+        // Use originalCapacity if available, otherwise use current capacity
+        return sum + (t.originalCapacity || t.capacity || 0);
+      }, 0);
       
-      // Unmerge all secondary tables
-      await Table.updateMany(
-        { _id: { $in: table.mergedTables } },
-        { $set: { status: "AVAILABLE", mergedWith: null } }
-      );
+      // Unmerge all secondary tables and restore their original capacities
+      const secondaryTablesToUnmerge = await Table.find({ _id: { $in: table.mergedTables } });
+      for (const secondaryTable of secondaryTablesToUnmerge) {
+        secondaryTable.status = "AVAILABLE";
+        secondaryTable.mergedWith = null;
+        // Restore original capacity if it was stored
+        if (secondaryTable.originalCapacity) {
+          secondaryTable.capacity = secondaryTable.originalCapacity;
+          secondaryTable.originalCapacity = undefined; // Clear after restore
+        }
+        await secondaryTable.save();
+      }
       
-      // Restore original capacity by subtracting merged capacity
-      const currentCapacity = table.capacity || 0;
-      table.capacity = Math.max(2, currentCapacity - mergedCapacity);
+      // Restore original capacity of primary table
+      const originalCapacity = table.originalCapacity || 2;
+      table.capacity = originalCapacity;
+      table.originalCapacity = undefined; // Clear originalCapacity after restore
       table.mergedTables = [];
       await table.save();
       
@@ -1544,6 +1610,7 @@ exports.getTableOccupancyDashboard = async (req, res) => {
       const isOccupied = ["OCCUPIED", "RESERVED"].includes(table.status);
       const isMerged = table.status === "MERGED" || table.mergedWith;
       
+<<<<<<< HEAD
       // Calculate total capacity for merged tables
       // For primary tables: capacity already includes all merged tables (set during merge)
       // For secondary merged tables: need to find the primary table and use its total capacity
@@ -1568,6 +1635,28 @@ exports.getTableOccupancyDashboard = async (req, res) => {
         totalCapacity = table.capacity || 0;
       } else {
         // Regular table (not merged)
+=======
+      // Calculate capacity display:
+      // - For primary tables with merged tables: capacity field already includes merged tables
+      //   So originalCapacity = originalCapacity (if stored), totalCapacity = capacity (current)
+      // - For secondary tables (merged into another): use originalCapacity if stored
+      // - For regular tables: use capacity
+      let originalCapacity = table.capacity || 0;
+      let totalCapacity = table.capacity || 0;
+      
+      if (table.mergedTables && table.mergedTables.length > 0) {
+        // Primary table with merged tables
+        // table.capacity already includes merged tables' capacities
+        originalCapacity = table.originalCapacity || table.capacity || 0; // Original before merge
+        totalCapacity = table.capacity || 0; // Current capacity (includes merged)
+      } else if (table.mergedWith) {
+        // Secondary table merged into another
+        originalCapacity = table.originalCapacity || table.capacity || 0; // Original before merge
+        totalCapacity = originalCapacity; // Secondary tables don't have merged capacity themselves
+      } else {
+        // Regular table (not merged)
+        originalCapacity = table.capacity || 0;
+>>>>>>> 1f53e39 (costing and email update issue fix for employee management)
         totalCapacity = table.capacity || 0;
       }
       
@@ -1576,11 +1665,16 @@ exports.getTableOccupancyDashboard = async (req, res) => {
         _id: table._id.toString(), // Also include _id for compatibility
         number: table.number,
         name: table.name,
+<<<<<<< HEAD
         // For merged tables, show total capacity (table m + table n) in both capacity and totalCapacity
         // For primary tables: capacity already includes merged tables
         // For secondary merged tables: use the total from primary table
         capacity: totalCapacity, // Show total merged capacity for all merged tables
         totalCapacity, // Same value for consistency
+=======
+        capacity: originalCapacity, // Original/base capacity for display
+        totalCapacity, // Total capacity including merged tables (for primary tables)
+>>>>>>> 1f53e39 (costing and email update issue fix for employee management)
         status: table.status,
         isOccupied,
         isMerged,

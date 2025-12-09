@@ -154,23 +154,77 @@ ingredientSchema.pre("save", function (next) {
   next();
 });
 
+/**
+ * Get standard conversion factor between two units
+ * Returns the factor to convert from 'fromUom' to 'toUom'
+ * This is used as a fallback when conversionFactors map doesn't have the factor
+ */
+function getStandardConversionFactor(fromUom, toUom) {
+  if (fromUom === toUom) return 1;
+  
+  // Standard weight conversions (kg <-> g)
+  // To convert from g to kg: multiply by 0.001 (1 g = 0.001 kg)
+  // To convert from kg to g: multiply by 1000 (1 kg = 1000 g)
+  if (fromUom === 'kg' && toUom === 'g') return 1000;
+  if (fromUom === 'g' && toUom === 'kg') return 0.001;
+  
+  // Standard volume conversions (l <-> ml)
+  // To convert from ml to l: multiply by 0.001 (1 ml = 0.001 l)
+  // To convert from l to ml: multiply by 1000 (1 l = 1000 ml)
+  if (fromUom === 'l' && toUom === 'ml') return 1000;
+  if (fromUom === 'ml' && toUom === 'l') return 0.001;
+  
+  // Count-based units - treat as 1:1 for same category
+  // (pack, box, bottle are typically 1:1 with pcs, but can be customized)
+  const countUnits = ['pcs', 'pack', 'box', 'bottle'];
+  if (countUnits.includes(fromUom) && countUnits.includes(toUom)) {
+    return 1; // Default 1:1, should be customized per ingredient if needed
+  }
+  
+  // Dozen to pieces: 1 dozen = 12 pieces
+  if (fromUom === 'dozen' && toUom === 'pcs') return 12;
+  if (fromUom === 'pcs' && toUom === 'dozen') return 1/12;
+  
+  return null; // No standard conversion available
+}
+
 // Method to convert quantity from one unit to base unit
 ingredientSchema.methods.convertToBaseUnit = function (qty, fromUom) {
   if (fromUom === this.baseUnit) return qty;
-  const factor = this.conversionFactors.get(fromUom);
+  
+  // First try to get factor from conversionFactors map
+  let factor = this.conversionFactors.get(fromUom);
+  
+  // If not found, try standard conversion factors
   if (!factor) {
-    throw new Error(`Conversion factor not found for ${fromUom} to ${this.baseUnit}`);
+    factor = getStandardConversionFactor(fromUom, this.baseUnit);
   }
+  
+  // If still not found, throw error
+  if (!factor) {
+    throw new Error(`Conversion factor not found for ${fromUom} to ${this.baseUnit}. Please set conversion factors for this ingredient.`);
+  }
+  
   return qty * factor;
 };
 
 // Method to convert quantity from base unit to target unit
 ingredientSchema.methods.convertFromBaseUnit = function (qty, toUom) {
   if (toUom === this.baseUnit) return qty;
-  const factor = this.conversionFactors.get(toUom);
+  
+  // First try to get factor from conversionFactors map
+  let factor = this.conversionFactors.get(toUom);
+  
+  // If not found, try standard conversion factors
   if (!factor) {
-    throw new Error(`Conversion factor not found for ${this.baseUnit} to ${toUom}`);
+    factor = getStandardConversionFactor(this.baseUnit, toUom);
   }
+  
+  // If still not found, throw error
+  if (!factor) {
+    throw new Error(`Conversion factor not found for ${this.baseUnit} to ${toUom}. Please set conversion factors for this ingredient.`);
+  }
+  
   return qty / factor;
 };
 

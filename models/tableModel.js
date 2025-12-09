@@ -22,6 +22,11 @@ const tableSchema = new mongoose.Schema(
       default: 2,
       min: 1,
     },
+    originalCapacity: {
+      type: Number,
+      default: null,
+      min: 1,
+    },
     status: {
       type: String,
       enum: TABLE_STATUSES,

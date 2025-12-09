@@ -86,7 +86,7 @@ router.put(
 );
 router.delete(
   "/suppliers/:id",
-  authorize(["super_admin", "franchise_admin"]),
+  authorize(["super_admin", "franchise_admin", "admin"]),
   deleteSupplier
 );
 

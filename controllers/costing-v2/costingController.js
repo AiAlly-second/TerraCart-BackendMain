@@ -21,6 +21,22 @@ const {
   setOutletContext,
 } = require("../../utils/costing-v2/accessControl");
 
+/**
+ * Decode HTML entities in a string
+ * Handles common HTML entities like &amp;, &lt;, &gt;, &quot;, &#39;
+ */
+const decodeHtmlEntities = (str) => {
+  if (typeof str !== 'string') return str;
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, '/');
+};
+
 // ==================== SUPPLIERS ====================
 
 /**
@@ -262,8 +278,14 @@ exports.getIngredients = async (req, res) => {
  */
 exports.createIngredient = async (req, res) => {
   try {
+    // Decode HTML entities in category field if present
+    let bodyData = { ...req.body };
+    if (bodyData.category) {
+      bodyData.category = decodeHtmlEntities(bodyData.category);
+    }
+    
     // Ingredients can be shared (outletId optional) or kiosk-specific
-    const data = await setOutletContext(req.user, { ...req.body }, false);
+    const data = await setOutletContext(req.user, bodyData, false);
     const ingredient = new Ingredient(data);
     await ingredient.save();
     await ingredient.populate("outletId", "name cafeName");
@@ -287,6 +309,7 @@ exports.createIngredient = async (req, res) => {
  */
 exports.updateIngredient = async (req, res) => {
   try {
+<<<<<<< HEAD
     // First find the ingredient to check access
     const existingIngredient = await Ingredient.findById(req.params.id);
     if (!existingIngredient) {
@@ -304,9 +327,17 @@ exports.updateIngredient = async (req, res) => {
     }
 
     // Update the ingredient
+=======
+    // Decode HTML entities in category field if present
+    let updateData = { ...req.body };
+    if (updateData.category) {
+      updateData.category = decodeHtmlEntities(updateData.category);
+    }
+    
+>>>>>>> 1f53e39 (costing and email update issue fix for employee management)
     const ingredient = await Ingredient.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     );
     
@@ -351,11 +382,15 @@ exports.updateIngredient = async (req, res) => {
  */
 exports.deleteIngredient = async (req, res) => {
   try {
+<<<<<<< HEAD
     // First find the ingredient to check access and validate
+=======
+>>>>>>> 1f53e39 (costing and email update issue fix for employee management)
     const ingredient = await Ingredient.findById(req.params.id);
     if (!ingredient) {
       return res.status(404).json({ success: false, message: "Ingredient not found" });
     }
+<<<<<<< HEAD
 
     // Check access control - cart admins can only delete their own ingredients
     if (req.user.role === "admin") {
@@ -400,6 +435,45 @@ exports.deleteIngredient = async (req, res) => {
     }
 
     res.json({ success: true, message: "Ingredient deleted successfully" });
+=======
+    
+    // Check access: cart admin can only delete their own ingredients
+    if (req.user.role === "admin") {
+      // If ingredient has outletId, it must match the cart admin's ID
+      if (ingredient.outletId && ingredient.outletId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You can only delete ingredients belonging to your cart" 
+        });
+      }
+      // If ingredient is shared (outletId is null), cart admin cannot delete it
+      if (!ingredient.outletId) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You cannot delete shared ingredients" 
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can delete ingredients from their franchise carts
+      if (ingredient.outletId) {
+        const outlet = await User.findById(ingredient.outletId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ 
+            success: false, 
+            message: "Access denied: You can only delete ingredients from your franchise carts" 
+          });
+        }
+      } else if (ingredient.franchiseId && ingredient.franchiseId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Access denied: You can only delete ingredients from your franchise" 
+        });
+      }
+    }
+    
+    await Ingredient.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Ingredient deleted" });
+>>>>>>> 1f53e39 (costing and email update issue fix for employee management)
   } catch (error) {
     console.error('[COSTING] Delete ingredient error:', error);
     res.status(500).json({ success: false, message: error.message || "Failed to delete ingredient" });
