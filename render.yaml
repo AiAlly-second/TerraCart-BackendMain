@@ -10,7 +10,7 @@ services:
     region: oregon # Change to your preferred region
     plan: free # Change to 'starter' or 'standard' for paid plans
     buildCommand: npm install
-    startCommand: npm start
+    startCommand: node server.js
     # rootDir not needed - backend files are at repository root
     envVars:
       # PORT is automatically set by Render - no need to specify
