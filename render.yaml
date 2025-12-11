@@ -28,7 +28,7 @@ services:
           name: sarva-cafe-backend
           property: host
       - key: ALLOWED_ORIGINS
-        value: "https://terra-cart-admin-frontend.vercel.app,https://terra-cart-frontend-admin.vercel.app,https://terra-cart-frontend-eta.vercel.app" # Admin and Customer frontend URLs
+        value: "https://terra-cart-admin-frontend.vercel.app,https://terra-cart-frontend-admin.vercel.app,https://terra-cart-frontend-eta.vercel.app,http://localhost:3000,http://localhost:5173,http://localhost:5174,http://localhost:5175" # Admin and Customer frontend URLs + localhost for local testing
       - key: ALLOW_PUBLIC_UPLOADS
         value: "false"
       - key: MAX_FILE_SIZE
