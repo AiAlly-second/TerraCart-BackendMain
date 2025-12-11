@@ -30,12 +30,12 @@ router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "mana
 // Get task by ID
 router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTaskById);
 
-// Create task
-router.post("/", authorize(["admin", "franchise_admin", "super_admin", "manager", "captain"]), createTask);
+// Create task - allow all roles
+router.post("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), createTask);
 
-// Update task
-router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), updateTask);
-router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), updateTask);
+// Update task - allow all roles
+router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), updateTask);
+router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), updateTask);
 
 // Complete task
 router.post("/:id/complete", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), completeTask);

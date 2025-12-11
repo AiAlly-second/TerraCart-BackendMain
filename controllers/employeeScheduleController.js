@@ -76,10 +76,17 @@ exports.getMySchedule = async (req, res) => {
     
     // For mobile users, get their employee record
     let employee;
-    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-      employee = await Employee.findOne({ userId: user._id });
-    } else if (user.role === "employee") {
-      employee = await Employee.findOne({ userId: user._id });
+    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+      if (user.employeeId) {
+        employee = await Employee.findById(user.employeeId);
+      } else {
+        employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        });
+      }
     }
     
     if (!employee) {
@@ -110,10 +117,26 @@ exports.getMySchedule = async (req, res) => {
 exports.upsertSchedule = async (req, res) => {
   try {
     const { employeeId } = req.body;
+    const user = req.user;
     
-    // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
-    const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
+    // Verify employee belongs to user's hierarchy OR is the current user's employee record
+    const hierarchyQuery = await buildHierarchyQuery(user);
+    let employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
+    
+    // If not found in hierarchy, check if it's the current user's own employee record
+    if (!employee && ["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+      const userEmployee = await Employee.findOne({
+        _id: employeeId,
+        $or: [
+          { userId: user._id },
+          { email: user.email?.toLowerCase() }
+        ]
+      });
+      if (userEmployee) {
+        employee = userEmployee;
+      }
+    }
+    
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
     }
@@ -127,6 +150,13 @@ exports.upsertSchedule = async (req, res) => {
       req.body,
       { new: true, upsert: true }
     ).populate("employeeId", "name employeeRole mobile");
+    
+    // Emit socket event for real-time updates
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && schedule.cafeId) {
+      emitToCafe(io, schedule.cafeId.toString(), "schedule:updated", schedule);
+    }
     
     return res.json(schedule);
   } catch (err) {

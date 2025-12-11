@@ -183,7 +183,7 @@ exports.createTask = async (req, res) => {
           return res.status(403).json({ message: "Invalid cafe selection" });
         }
       }
-    } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    } else if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
       // Mobile users can create tasks for their cart
       if (user.cafeId) {
         taskData.cafeId = user.cafeId;
@@ -192,10 +192,45 @@ exports.createTask = async (req, res) => {
         if (employee && employee.cafeId) {
           taskData.cafeId = employee.cafeId;
         }
+      } else {
+        // Find employee by userId or email
+        const employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        }).lean();
+        if (employee && employee.cafeId) {
+          taskData.cafeId = employee.cafeId;
+          if (employee.franchiseId) {
+            taskData.franchiseId = employee.franchiseId;
+          }
+        }
       }
       if (user.franchiseId) {
         taskData.franchiseId = user.franchiseId;
       }
+      
+      // If no assignedTo is provided and user has employeeId, assign to self
+      if (!taskData.assignedTo && user.employeeId) {
+        taskData.assignedTo = user.employeeId;
+      } else if (!taskData.assignedTo) {
+        // Try to find employee record
+        const employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        }).lean();
+        if (employee) {
+          taskData.assignedTo = employee._id;
+        }
+      }
+    }
+    
+    // Handle frequency: store original due date if frequency is set
+    if (taskData.frequency && Array.isArray(taskData.frequency) && taskData.frequency.length > 0 && taskData.dueDate) {
+      taskData.originalDueDate = taskData.dueDate;
     }
 
     // If assignedTo is provided, also set assignedToUser
@@ -228,12 +263,55 @@ exports.updateTask = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
-    const query = { _id: id, ...hierarchyQuery };
+    const user = req.user;
+    
+    // Build hierarchy query, but also allow users to update their own tasks
+    const hierarchyQuery = await buildHierarchyQuery(user);
+    
+    // Allow users to update tasks assigned to them even if outside hierarchy
+    let query = { _id: id };
+    
+    // Check if task belongs to hierarchy OR is assigned to current user
+    const hierarchyTask = await Task.findOne({ _id: id, ...hierarchyQuery }).lean();
+    
+    if (!hierarchyTask) {
+      // Check if task is assigned to current user
+      let employeeId = user.employeeId;
+      if (!employeeId && ["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+        const employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        }).lean();
+        if (employee) {
+          employeeId = employee._id;
+        }
+      }
+      
+      if (employeeId) {
+        const ownTask = await Task.findOne({ _id: id, assignedTo: employeeId }).lean();
+        if (!ownTask) {
+          return res.status(404).json({ message: "Task not found or access denied" });
+        }
+      } else {
+        return res.status(404).json({ message: "Task not found or access denied" });
+      }
+    }
 
-    const task = await Task.findOne(query);
+    const task = await Task.findById(id);
     if (!task) {
       return res.status(404).json({ message: "Task not found" });
+    }
+    
+    // Handle frequency: store original due date if frequency is set
+    if (updates.frequency && Array.isArray(updates.frequency) && updates.frequency.length > 0) {
+      if (updates.dueDate && !task.originalDueDate) {
+        updates.originalDueDate = updates.dueDate;
+      } else if (!updates.dueDate && task.originalDueDate) {
+        // Keep original due date when updating frequency
+        updates.originalDueDate = task.originalDueDate;
+      }
     }
 
     // Update fields

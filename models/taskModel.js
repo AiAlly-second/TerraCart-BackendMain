@@ -38,6 +38,16 @@ const taskSchema = new mongoose.Schema(
       enum: ["cleaning", "maintenance", "inventory", "service", "other"],
       default: "other",
     },
+    // Frequency for recurring tasks (days of week)
+    frequency: {
+      type: [{
+        type: String,
+        enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+      }],
+      default: [],
+    },
+    // Original due date (for recurring tasks)
+    originalDueDate: { type: Date },
   },
   { timestamps: true }
 );
