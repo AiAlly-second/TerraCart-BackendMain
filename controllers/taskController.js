@@ -39,8 +39,40 @@ const buildHierarchyQuery = async (user) => {
 exports.getAllTasks = async (req, res) => {
   try {
     const { status, priority, category, assignedTo } = req.query;
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
-    const query = { ...hierarchyQuery };
+    const user = req.user;
+    const query = {};
+
+    // For mobile users (waiter, cook, captain, manager), only show tasks assigned to them
+    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+      let employeeId = null;
+      
+      if (user.employeeId) {
+        employeeId = user.employeeId;
+      } else {
+        // Find employee record
+        const employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        }).lean();
+        if (employee) {
+          employeeId = employee._id;
+        }
+      }
+
+      if (employeeId) {
+        // Only show tasks assigned to this employee
+        query.assignedTo = employeeId;
+      } else {
+        // If no employee found, return empty array
+        return res.json([]);
+      }
+    } else {
+      // For admin/franchise_admin, use hierarchy query to see all tasks in their scope
+      const hierarchyQuery = await buildHierarchyQuery(user);
+      Object.assign(query, hierarchyQuery);
+    }
 
     if (status) {
       query.status = status;
@@ -51,7 +83,8 @@ exports.getAllTasks = async (req, res) => {
     if (category) {
       query.category = category;
     }
-    if (assignedTo) {
+    // Allow filtering by assignedTo in query params (for admin users)
+    if (assignedTo && !["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
       query.assignedTo = assignedTo;
     }
 
