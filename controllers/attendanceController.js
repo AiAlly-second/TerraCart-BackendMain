@@ -95,10 +95,18 @@ exports.getAllAttendance = async (req, res) => {
 // Get today's attendance for all employees
 exports.getTodayAttendance = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // Use IST timezone to match check-in logic (IST is UTC+5:30)
+    const now = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
+    const istNow = new Date(now.getTime() + istOffset);
+    
+    // Get today's date in IST, then convert back to UTC for MongoDB query
+    const today = new Date(istNow);
+    today.setUTCHours(0, 0, 0, 0);
+    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
+    
     const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
 
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = {
