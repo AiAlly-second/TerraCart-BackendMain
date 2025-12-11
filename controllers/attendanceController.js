@@ -120,7 +120,7 @@ exports.getTodayAttendance = async (req, res) => {
       .lean();
 
     // Calculate real-time working hours for employees who are checked in but not checked out
-    const now = new Date();
+    // Note: 'now' is already declared at the beginning of the function
     const attendanceWithWorkingHours = attendance.map((record) => {
       // If already checked out, use stored values
       if (record.checkOut?.time) {
