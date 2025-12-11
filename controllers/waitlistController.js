@@ -318,7 +318,8 @@ exports.seatWaitlistEntry = async (req, res) => {
         sessionToken = crypto.randomBytes(10).toString("hex");
         table.sessionToken = sessionToken;
         
-        // Update table status
+        // Update table status - mark as RESERVED when waitlist entry is seated
+        // Table will be marked as OCCUPIED when order is created
         if (table.status === "AVAILABLE") {
           table.status = "RESERVED";
         }

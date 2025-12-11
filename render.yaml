@@ -28,7 +28,7 @@ services:
           name: sarva-cafe-backend
           property: host
       - key: ALLOWED_ORIGINS
-        value: "https://terra-cart-admin-frontend.vercel.app,https://terra-cart-frontend-eta.vercel.app" # Admin and Customer frontend URLs
+        value: "https://terra-cart-admin-frontend.vercel.app,https://terra-cart-frontend-admin.vercel.app,https://terra-cart-frontend-eta.vercel.app" # Admin and Customer frontend URLs
       - key: ALLOW_PUBLIC_UPLOADS
         value: "false"
       - key: MAX_FILE_SIZE
@@ -38,7 +38,7 @@ services:
       - key: RATE_LIMIT_API
         value: "500"
       - key: RATE_LIMIT_LOGIN
-        value: "50" # Increased to 50 attempts per 15 minutes
+        value: "10000" # Effectively disabled - very high limit
       - key: RATE_LIMIT_UPLOAD
         value: "50"
       - key: ENABLE_REQUEST_LOGGING

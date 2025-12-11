@@ -168,14 +168,20 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
     const table = await Table.findById(tableId);
     if (!table) return;
 
+    // Only release table for dine-in orders
+    if (order.serviceType !== "DINE_IN") return;
+
     const oldStatus = table.status;
+    
+    // Mark table as AVAILABLE when order is paid/cancelled/returned/finalized
+    // This ensures table shows as available in cart admin and to other customers
     table.status = "AVAILABLE";
     table.currentOrder = null;
     table.set("sessionToken", undefined);
     table.lastAssignedAt = null;
     await table.save();
 
-    // Emit socket event for table status update
+    // Emit socket event for table status update to notify cart admin and customers
     if (io && table.cartId && emitToCafe) {
       emitToCafe(io, table.cartId.toString(), "table:status:updated", {
         id: table._id,
@@ -192,7 +198,7 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
     }
 
     console.log(
-      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE`
+      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE (Order ${order._id} status: ${order.status})`
     );
   } catch (err) {
     console.error("Failed to release table", err);
@@ -455,10 +461,26 @@ const createOrder = async (req, res) => {
 
     // Only update table status for dine-in orders
     if (!isTakeaway && tableDoc) {
+      // Mark table as OCCUPIED when order is created
+      // This ensures table shows as occupied in cart admin and to other customers
       tableDoc.status = "OCCUPIED";
       tableDoc.currentOrder = order._id;
       tableDoc.lastAssignedAt = new Date();
       await tableDoc.save();
+      
+      // Emit socket event to notify cart admin and other customers
+      const io = req.app?.get("io");
+      const emitToCafe = req.app?.get("emitToCafe");
+      if (io && tableDoc.cartId && emitToCafe) {
+        emitToCafe(io, tableDoc.cartId.toString(), "table:status:updated", {
+          id: tableDoc._id,
+          number: tableDoc.number,
+          status: tableDoc.status,
+          currentOrder: order._id,
+        });
+      }
+      
+      console.log(`[TABLE] Table ${tableDoc.number} marked as OCCUPIED for order ${order._id}`);
     }
 
     // Create or update customer record for takeaway orders (non-blocking)

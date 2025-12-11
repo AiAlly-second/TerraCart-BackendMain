@@ -129,12 +129,12 @@ const rateLimiters = {
     message: 'Too many API requests'
   }),
 
-  // Strict limit for login attempts
-  // In dev: 100 attempts per 7.5 min, in prod: configurable via RATE_LIMIT_LOGIN env var (default: 10)
+  // Login attempts - effectively disabled (very high limit)
+  // In dev: Disabled by default, in prod: configurable via RATE_LIMIT_LOGIN env var (default: 10000 = effectively disabled)
   login: createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: parseInt(process.env.RATE_LIMIT_LOGIN) || 10, // Configurable via env var, default 10
-    message: 'Too many login attempts. Please try again after 15 minutes.',
+    max: parseInt(process.env.RATE_LIMIT_LOGIN) || 10000, // Configurable via env var, default 10000 (effectively disabled)
+    message: 'Too many login attempts. Please try again later.',
     skipSuccessfulRequests: true // Don't count successful logins
   }),
 

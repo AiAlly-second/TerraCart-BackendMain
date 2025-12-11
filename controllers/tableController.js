@@ -549,19 +549,37 @@ exports.lookupTableBySlug = async (req, res) => {
     // 3. SEATED waitlist entry gets access (they were already seated)
     // 4. Otherwise, follow normal flow
 
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+
+    const emitTableStatus = async () => {
+      if (io && emitToCafe && table.cartId) {
+        emitToCafe(io, table.cartId.toString(), "table:status:updated", {
+          id: table._id,
+          number: table.number,
+          status: table.status,
+          currentOrder: table.currentOrder || null,
+          sessionToken: table.sessionToken || null,
+        });
+      }
+    };
+
     // Check if user has a SEATED waitlist entry
     if (waitlistEntry?.status === "SEATED" && waitlistEntry.sessionToken) {
       // User was already seated - give them access
-      // CRITICAL: Keep table as AVAILABLE during lookup - only mark as OCCUPIED when user enters menu
+      // Mark as RESERVED so admin sees the table is taken (OCCUPIED happens when menu/order)
       if (!table.sessionToken || table.sessionToken !== waitlistEntry.sessionToken) {
         // Restore their session token
         table.sessionToken = waitlistEntry.sessionToken;
-        // Keep status as AVAILABLE - don't change to RESERVED
+        table.status = "RESERVED";
         mutated = true;
       }
       
       table.lastAssignedAt = new Date();
-      if (mutated) await table.save();
+      if (mutated) {
+        await table.save();
+        await emitTableStatus();
+      }
       
       const position = await getWaitlistPosition(waitlistEntry);
       return res.json({
@@ -587,25 +605,28 @@ exports.lookupTableBySlug = async (req, res) => {
       // Priority 1: Check if user has a NOTIFIED waitlist entry
       if (waitlistEntry && waitlistEntry.status === "NOTIFIED") {
         // This user is NOTIFIED - allow them access
-        // CRITICAL: Keep table as AVAILABLE during lookup - only mark as OCCUPIED when user enters menu
+        // Mark as RESERVED once a sessionToken is issued so admin sees not available
         if (!table.sessionToken) {
           // Clean up any old orders before starting new session
           const oldSessionToken = table.sessionToken; // Save old token if exists
           await cleanupOldSessionOrders(table._id, oldSessionToken);
           table.sessionToken = generateToken();
-          // Keep status as AVAILABLE - don't change to RESERVED
+          table.status = "RESERVED";
           mutated = true;
           sessionTokenJustIssued = true;
         } else if (table.sessionToken !== waitlistEntry.sessionToken) {
           // Table has a different sessionToken - clean up old session orders
           await cleanupOldSessionOrders(table._id, table.sessionToken);
           table.sessionToken = waitlistEntry.sessionToken || generateToken();
-          // Keep status as AVAILABLE - don't change to RESERVED
+          table.status = "RESERVED";
           mutated = true;
         }
         
         table.lastAssignedAt = new Date();
-        if (mutated) await table.save();
+        if (mutated) {
+          await table.save();
+          await emitTableStatus();
+        }
         
         const position = await getWaitlistPosition(waitlistEntry);
         return res.json({
@@ -705,25 +726,28 @@ exports.lookupTableBySlug = async (req, res) => {
           // Someone was just notified - check if it's this user
           if (waitlistEntry && waitlistEntry.token === nextNotified.token) {
             // This user was just notified - allow them to proceed
-            // CRITICAL: Keep table as AVAILABLE during lookup - only mark as OCCUPIED when user enters menu
+            // Mark as RESERVED once a sessionToken is issued so admin sees not available
             if (!table.sessionToken) {
               // Clean up any old orders before starting new session
               const oldSessionToken = table.sessionToken; // Save old token if exists
               await cleanupOldSessionOrders(table._id, oldSessionToken);
               table.sessionToken = generateToken();
-              // Keep status as AVAILABLE - don't change to RESERVED
+              table.status = "RESERVED";
               mutated = true;
               sessionTokenJustIssued = true;
             } else if (table.sessionToken !== nextNotified.sessionToken) {
               // Table has a different sessionToken - clean up old session orders
               await cleanupOldSessionOrders(table._id, table.sessionToken);
               table.sessionToken = nextNotified.sessionToken || generateToken();
-              // Keep status as AVAILABLE - don't change to RESERVED
+              table.status = "RESERVED";
               mutated = true;
             }
             
             table.lastAssignedAt = new Date();
-            if (mutated) await table.save();
+            if (mutated) {
+              await table.save();
+              await emitTableStatus();
+            }
             
             const notifiedPosition = await getWaitlistPosition(nextNotified);
             return res.json({
@@ -1114,21 +1138,28 @@ exports.occupyTable = async (req, res) => {
       return res.status(403).json({ message: "Invalid session token" });
     }
 
-    // CRITICAL: Only mark as OCCUPIED if currently AVAILABLE
+    // CRITICAL: Only mark as OCCUPIED if currently AVAILABLE/RESERVED
     // This ensures table stays AVAILABLE until user enters menu page
-    if (table.status === "AVAILABLE") {
+    if (table.status === "AVAILABLE" || table.status === "RESERVED") {
       table.status = "OCCUPIED";
+      table.lastAssignedAt = new Date();
       if (sessionToken && !table.sessionToken) {
         table.sessionToken = sessionToken;
       }
       await table.save();
-    } else if (table.status === "RESERVED") {
-      // If table is RESERVED, also mark as OCCUPIED (for backward compatibility)
-      table.status = "OCCUPIED";
-      if (sessionToken && !table.sessionToken) {
-        table.sessionToken = sessionToken;
+
+      // Emit to cart admin / cafe so status updates in real-time
+      const io = req.app.get("io");
+      const emitToCafe = req.app.get("emitToCafe");
+      if (io && table.cartId && emitToCafe) {
+        emitToCafe(io, table.cartId.toString(), "table:status:updated", {
+          id: table._id,
+          number: table.number,
+          status: table.status,
+          currentOrder: table.currentOrder || null,
+          sessionToken: table.sessionToken || null,
+        });
       }
-      await table.save();
     }
     // If table is already OCCUPIED, do nothing
 
