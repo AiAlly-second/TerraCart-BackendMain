@@ -111,7 +111,47 @@ exports.getTodayAttendance = async (req, res) => {
       .sort({ "checkIn.time": -1 })
       .lean();
 
-    return res.json(attendance);
+    // Calculate real-time working hours for employees who are checked in but not checked out
+    const now = new Date();
+    const attendanceWithWorkingHours = attendance.map((record) => {
+      // If already checked out, use stored values
+      if (record.checkOut?.time) {
+        return record;
+      }
+
+      // If checked in but not checked out, calculate real-time working hours
+      if (record.checkIn?.time) {
+        const checkInTime = new Date(record.checkIn.time);
+        const breakMinutes = record.breakDuration || 0;
+        
+        // Calculate working minutes (excluding breaks)
+        // If on break, pause the timer at break start
+        let workingMinutes = 0;
+        if (record.isOnBreak && record.breakStart) {
+          // PAUSED: Working timer is frozen at the moment break started
+          const breakStartTime = new Date(record.breakStart);
+          const workingTimeUntilBreak = Math.floor((breakStartTime - checkInTime) / (1000 * 60));
+          // Subtract only completed breaks (breakDuration doesn't include current break)
+          workingMinutes = Math.max(0, workingTimeUntilBreak - breakMinutes);
+        } else {
+          // ACTIVE: Working timer is running
+          const totalDurationMinutes = Math.floor((now - checkInTime) / (1000 * 60));
+          // Subtract completed break time
+          workingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
+        }
+
+        // Add calculated fields for real-time display
+        return {
+          ...record,
+          totalWorkingMinutes: workingMinutes,
+          workingHours: Number((workingMinutes / 60).toFixed(2)),
+        };
+      }
+
+      return record;
+    });
+
+    return res.json(attendanceWithWorkingHours);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
