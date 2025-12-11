@@ -12,12 +12,10 @@ const ingredientPurchaseSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User", // Kiosk/Cafe reference
       required: true,
-      index: true,
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      index: true,
     },
     ingredientId: {
       type: mongoose.Schema.Types.ObjectId,

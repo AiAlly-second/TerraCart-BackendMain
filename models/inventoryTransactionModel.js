@@ -6,17 +6,14 @@ const inventoryTransactionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ingredient",
       required: true,
-      index: true,
     },
     outletId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User", // Kiosk/Cafe reference
-      index: true,
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      index: true,
     },
     changeQty: {
       type: Number,

@@ -16,6 +16,7 @@ const expenseCategorySchema = new mongoose.Schema(
       required: true,
       unique: true,
       uppercase: true, // e.g., "RENT", "UTILITIES"
+      // Note: unique: true automatically creates an index, so we don't need schema.index({ code: 1 })
     },
     description: {
       type: String,
@@ -71,7 +72,7 @@ const expenseCategorySchema = new mongoose.Schema(
 );
 
 // Indexes
-expenseCategorySchema.index({ code: 1 });
+// Note: code index is automatically created by unique: true
 expenseCategorySchema.index({ parentCategory: 1 });
 expenseCategorySchema.index({ outletId: 1 });
 expenseCategorySchema.index({ isActive: 1 });
