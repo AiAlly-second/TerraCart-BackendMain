@@ -55,6 +55,7 @@ exports.getAllRequests = async (req, res) => {
 
     const requests = await CustomerRequest.find(query)
       .populate("tableId", "number name status")
+      .populate("orderId", "customerName customerMobile customerEmail tableNumber")
       .populate("assignedTo", "name mobile employeeRole")
       .populate("assignedToUser", "name email role")
       .populate("acknowledgedBy", "name mobile employeeRole")
@@ -79,6 +80,7 @@ exports.getPendingRequests = async (req, res) => {
 
     const requests = await CustomerRequest.find(query)
       .populate("tableId", "number name status")
+      .populate("orderId", "customerName customerMobile customerEmail tableNumber")
       .populate("assignedTo", "name mobile employeeRole")
       .sort({ createdAt: 1 }) // Oldest first
       .lean();
@@ -98,7 +100,7 @@ exports.getRequestById = async (req, res) => {
 
     const request = await CustomerRequest.findOne(query)
       .populate("tableId", "number name status")
-      .populate("orderId")
+      .populate("orderId", "customerName customerMobile customerEmail tableNumber")
       .populate("assignedTo", "name mobile employeeRole")
       .populate("assignedToUser", "name email role")
       .populate("acknowledgedBy", "name mobile employeeRole")
@@ -161,6 +163,7 @@ exports.createRequest = async (req, res) => {
 
     const request = await CustomerRequest.create(requestData);
     await request.populate("tableId", "number name status");
+    await request.populate("orderId", "customerName customerMobile customerEmail tableNumber");
     await request.populate("assignedTo", "name mobile employeeRole");
 
     // Emit socket event
@@ -221,6 +224,7 @@ exports.acknowledgeRequest = async (req, res) => {
 
     await request.save();
     await request.populate("tableId", "number name status");
+    await request.populate("orderId", "customerName customerMobile customerEmail tableNumber");
     await request.populate("assignedTo", "name mobile employeeRole");
     await request.populate("acknowledgedBy", "name mobile employeeRole");
 
@@ -279,6 +283,7 @@ exports.resolveRequest = async (req, res) => {
 
     await request.save();
     await request.populate("tableId", "number name status");
+    await request.populate("orderId", "customerName customerMobile customerEmail tableNumber");
     await request.populate("assignedTo", "name mobile employeeRole");
     await request.populate("resolvedBy", "name mobile employeeRole");
 
@@ -318,6 +323,7 @@ exports.updateRequest = async (req, res) => {
 
     await request.save();
     await request.populate("tableId", "number name status");
+    await request.populate("orderId", "customerName customerMobile customerEmail tableNumber");
     await request.populate("assignedTo", "name mobile employeeRole");
 
     // Emit socket event
