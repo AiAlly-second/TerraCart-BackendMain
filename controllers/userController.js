@@ -84,6 +84,28 @@ exports.uploadCafeAdminDocs = (req, res, next) => {
   next();
 };
 
+// Combined middleware for all documents (franchise + cafe admin)
+const multerAllDocs = upload.fields([
+  { name: "udyamCertificate", maxCount: 1 },
+  { name: "aadharCard", maxCount: 1 },
+  { name: "panCard", maxCount: 1 },
+  { name: "gstCertificate", maxCount: 1 },
+  { name: "shopActLicense", maxCount: 1 },
+  { name: "fssaiLicense", maxCount: 1 },
+  { name: "electricityBill", maxCount: 1 },
+  { name: "rentAgreement", maxCount: 1 },
+]);
+
+// Wrapper middleware that makes multer optional for JSON requests
+exports.uploadAllDocs = (req, res, next) => {
+  // Only use multer if content-type is multipart/form-data
+  if (req.is('multipart/form-data')) {
+    return multerAllDocs(req, res, next);
+  }
+  // For JSON requests, just pass through (files are optional)
+  next();
+};
+
 const generateToken = (id) => {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret === 'sarva-cafe-secret-key-2025') {
@@ -407,8 +429,8 @@ exports.createUser = async (req, res) => {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    // Validate role
-    const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer"];
+    // Validate role - must match user model enum
+    const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"];
     if (!validRoles.includes(role)) {
       return res.status(400).json({ message: `Invalid role. Must be one of: ${validRoles.join(", ")}` });
     }
@@ -1065,7 +1087,7 @@ exports.updateUser = async (req, res) => {
     }
     if (role !== undefined) {
       // Validate role (only super admin can change roles)
-      const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer"];
+      const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"];
       if (!validRoles.includes(role)) {
         return res.status(400).json({ message: `Invalid role. Must be one of: ${validRoles.join(", ")}` });
       }
@@ -1079,7 +1101,7 @@ exports.updateUser = async (req, res) => {
     if (phone !== undefined) user.phone = phone;
     if (address !== undefined) user.address = address;
     
-    // Handle file uploads for cafe admin documents
+    // Handle file uploads for documents (both franchise admin and cafe admin)
     let filePaths = {};
     if (req.files) {
       // Delete old files if new ones are being uploaded
@@ -1087,7 +1109,21 @@ exports.updateUser = async (req, res) => {
       const path = require("path");
       const franchiseDocsDir = path.join(__dirname, "..", "uploads", "franchise-docs");
       
-      // Process uploaded files
+      // Process franchise admin documents (if user is franchise_admin)
+      if (user.role === "franchise_admin") {
+        if (req.files.udyamCertificate && req.files.udyamCertificate[0]) {
+          // Delete old file if exists
+          if (user.udyamCertificate) {
+            const oldFilePath = path.join(__dirname, "..", user.udyamCertificate);
+            if (fs.existsSync(oldFilePath)) {
+              try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old udyamCertificate:", err); }
+            }
+          }
+          filePaths.udyamCertificate = `/uploads/franchise-docs/${req.files.udyamCertificate[0].filename}`;
+        }
+      }
+      
+      // Process uploaded files (common for both franchise and cafe admin)
       if (req.files.aadharCard && req.files.aadharCard[0]) {
         // Delete old file if exists
         if (user.aadharCard) {
@@ -1162,11 +1198,11 @@ exports.updateUser = async (req, res) => {
           return; // Skip this field
         }
         // Skip document fields if they're coming from req.body (should come from req.files)
-        if (['aadharCard', 'panCard', 'gstCertificate', 'shopActLicense', 'fssaiLicense', 'electricityBill', 'rentAgreement'].includes(key)) {
+        if (['udyamCertificate', 'aadharCard', 'panCard', 'gstCertificate', 'shopActLicense', 'fssaiLicense', 'electricityBill', 'rentAgreement'].includes(key)) {
           return; // Skip these - they're handled via file uploads
         }
         // Skip expiry date fields - they're handled separately (only for documents that can expire)
-        if (['gstCertificateExpiry', 'shopActLicenseExpiry', 'fssaiLicenseExpiry'].includes(key)) {
+        if (['udyamCertificateExpiry', 'aadharCardExpiry', 'panCardExpiry', 'gstCertificateExpiry', 'shopActLicenseExpiry', 'fssaiLicenseExpiry'].includes(key)) {
           return; // Skip these - they're handled separately
         }
         user[key] = otherFields[key];
@@ -1174,6 +1210,7 @@ exports.updateUser = async (req, res) => {
     });
 
     // Update document file paths if new files were uploaded
+    if (filePaths.udyamCertificate) user.udyamCertificate = filePaths.udyamCertificate;
     if (filePaths.aadharCard) user.aadharCard = filePaths.aadharCard;
     if (filePaths.panCard) user.panCard = filePaths.panCard;
     if (filePaths.gstCertificate) user.gstCertificate = filePaths.gstCertificate;
@@ -1182,14 +1219,27 @@ exports.updateUser = async (req, res) => {
     if (filePaths.electricityBill) user.electricityBill = filePaths.electricityBill;
     if (filePaths.rentAgreement) user.rentAgreement = filePaths.rentAgreement;
 
-    // Update document expiry dates if provided (only for documents that can expire)
+    // Update document expiry dates if provided
     const {
+      udyamCertificateExpiry,
+      aadharCardExpiry,
+      panCardExpiry,
       gstCertificateExpiry,
       shopActLicenseExpiry,
       fssaiLicenseExpiry,
     } = req.body;
 
-    // Skip document expiry fields if they're coming from req.body (should be handled separately)
+    // Update franchise admin document expiry dates if provided
+    if (udyamCertificateExpiry !== undefined) {
+      user.udyamCertificateExpiry = udyamCertificateExpiry ? new Date(udyamCertificateExpiry) : null;
+    }
+    if (aadharCardExpiry !== undefined) {
+      user.aadharCardExpiry = aadharCardExpiry ? new Date(aadharCardExpiry) : null;
+    }
+    if (panCardExpiry !== undefined) {
+      user.panCardExpiry = panCardExpiry ? new Date(panCardExpiry) : null;
+    }
+    // Update cafe admin document expiry dates if provided
     if (gstCertificateExpiry !== undefined) {
       user.gstCertificateExpiry = gstCertificateExpiry ? new Date(gstCertificateExpiry) : null;
     }

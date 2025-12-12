@@ -53,7 +53,12 @@ const userSchema = new mongoose.Schema(
     fssaiLicense: { type: String }, // File path for FSSAI License
     electricityBill: { type: String }, // File path for Electricity Bill (address proof)
     rentAgreement: { type: String }, // File path for Rent Agreement (address proof)
-    // Document expiry dates (optional) - only for documents that can expire
+    // Document expiry dates (optional) - for documents that can expire
+    // Franchise admin document expiry dates
+    udyamCertificateExpiry: { type: Date },
+    aadharCardExpiry: { type: Date },
+    panCardExpiry: { type: Date },
+    // Cafe admin document expiry dates
     gstCertificateExpiry: { type: Date },
     shopActLicenseExpiry: { type: Date },
     fssaiLicenseExpiry: { type: Date },

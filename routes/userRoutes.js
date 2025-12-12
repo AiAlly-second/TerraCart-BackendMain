@@ -17,6 +17,7 @@ const {
   deleteUser,
   uploadFranchiseDocs,
   uploadCafeAdminDocs,
+  uploadAllDocs,
   generateMyFranchiseCode,
 } = require("../controllers/userController");
 const { protect, authorize } = require("../middleware/authMiddleware");
@@ -105,7 +106,7 @@ router.post(
 router.put(
   "/:id", 
   validateObjectId('id'),
-  uploadCafeAdminDocs, 
+  uploadAllDocs, // Use combined middleware to handle both franchise and cafe admin documents
   updateUser
 );
 
