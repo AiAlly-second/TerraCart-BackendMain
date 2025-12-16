@@ -21,40 +21,49 @@ const buildHierarchyQuery = async (user) => {
     query.cartId = user._id;
   } else if (user && user.role === "franchise_admin" && user._id) {
     query.franchiseId = user._id;
-  } else if (user && ["waiter", "cook", "captain", "manager"].includes(user.role)) {
+  } else if (
+    user &&
+    ["waiter", "cook", "captain", "manager"].includes(user.role)
+  ) {
     // Mobile users - these are direct User records with cafeId set during login
     // First check if User has cafeId directly
     if (user.cafeId) {
       query.cartId = user.cafeId;
-      console.log('[TABLE] buildHierarchyQuery - Mobile user has direct cafeId:', {
-        userId: user._id,
-        role: user.role,
-        cafeId: user.cafeId,
-        cartId: query.cartId
-      });
+      console.log(
+        "[TABLE] buildHierarchyQuery - Mobile user has direct cafeId:",
+        {
+          userId: user._id,
+          role: user.role,
+          cafeId: user.cafeId,
+          cartId: query.cartId,
+        }
+      );
     } else {
       // Fallback: try to find Employee record by userId or email
-      const employee = await Employee.findOne({ 
-        $or: [
-          { userId: user._id },
-          { email: user.email?.toLowerCase() }
-        ]
+      const employee = await Employee.findOne({
+        $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
       }).lean();
       if (employee && employee.cafeId) {
         query.cartId = employee.cafeId;
-        console.log('[TABLE] buildHierarchyQuery - Mobile user employee found:', {
-          userId: user._id,
-          email: user.email,
-          employeeId: employee._id,
-          cafeId: employee.cafeId,
-          cartId: query.cartId
-        });
+        console.log(
+          "[TABLE] buildHierarchyQuery - Mobile user employee found:",
+          {
+            userId: user._id,
+            email: user.email,
+            employeeId: employee._id,
+            cafeId: employee.cafeId,
+            cartId: query.cartId,
+          }
+        );
       } else {
-        console.log('[TABLE] buildHierarchyQuery - No cafeId found for mobile user:', {
-          userId: user._id,
-          role: user.role,
-          email: user.email
-        });
+        console.log(
+          "[TABLE] buildHierarchyQuery - No cafeId found for mobile user:",
+          {
+            userId: user._id,
+            role: user.role,
+            email: user.email,
+          }
+        );
       }
     }
   } else if (user && user.role === "employee") {
@@ -62,11 +71,8 @@ const buildHierarchyQuery = async (user) => {
     if (user.cafeId) {
       query.cartId = user.cafeId;
     } else {
-      const employee = await Employee.findOne({ 
-        $or: [
-          { userId: user._id },
-          { email: user.email?.toLowerCase() }
-        ]
+      const employee = await Employee.findOne({
+        $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
       }).lean();
       if (employee && employee.cafeId) {
         query.cartId = employee.cafeId;
@@ -78,7 +84,7 @@ const buildHierarchyQuery = async (user) => {
 
 const getWaitlistPosition = async (entry) => {
   if (!entry) return 0;
-  
+
   // For WAITING entries, count all WAITING and NOTIFIED entries created before them
   // For deterministic ordering when timestamps are identical, also consider entries with same createdAt but smaller _id
   if (entry.status === "WAITING") {
@@ -87,15 +93,15 @@ const getWaitlistPosition = async (entry) => {
       status: { $in: ["WAITING", "NOTIFIED"] },
       $or: [
         { createdAt: { $lt: entry.createdAt } },
-        { 
-          createdAt: entry.createdAt, 
-          _id: { $lt: entry._id } 
-        }
+        {
+          createdAt: entry.createdAt,
+          _id: { $lt: entry._id },
+        },
       ],
     });
     return ahead + 1;
   }
-  
+
   // For NOTIFIED entries, count all WAITING and NOTIFIED entries created before them
   if (entry.status === "NOTIFIED") {
     const ahead = await Waitlist.countDocuments({
@@ -103,15 +109,15 @@ const getWaitlistPosition = async (entry) => {
       status: { $in: ["WAITING", "NOTIFIED"] },
       $or: [
         { createdAt: { $lt: entry.createdAt } },
-        { 
-          createdAt: entry.createdAt, 
-          _id: { $lt: entry._id } 
-        }
+        {
+          createdAt: entry.createdAt,
+          _id: { $lt: entry._id },
+        },
       ],
     });
     return ahead + 1;
   }
-  
+
   // For SEATED or CANCELLED, return 0
   return 0;
 };
@@ -145,20 +151,26 @@ const generateToken = () => crypto.randomBytes(10).toString("hex");
 async function cleanupOldSessionOrders(tableId, oldSessionToken = null) {
   try {
     const { Payment } = require("../models/paymentModel");
-    
+
     // Build query to find ALL non-paid orders for this table
     // When a new session starts, we want to clean up all previous orders (except paid ones)
     const orderQuery = {
       table: tableId,
-      status: { $nin: ["Paid", "Cancelled"] }
+      status: { $nin: ["Paid", "Cancelled"] },
     };
-    
+
     // Find all non-paid orders for this table
     const oldOrders = await Order.find(orderQuery);
-    
+
     if (oldOrders.length > 0) {
-      console.log(`[TABLE] Cleaning up ${oldOrders.length} old orders for table ${tableId} (old sessionToken: ${oldSessionToken || 'none'})`);
-      
+      console.log(
+        `[TABLE] Cleaning up ${
+          oldOrders.length
+        } old orders for table ${tableId} (old sessionToken: ${
+          oldSessionToken || "none"
+        })`
+      );
+
       // Delete associated non-paid payments
       for (const order of oldOrders) {
         try {
@@ -167,22 +179,32 @@ async function cleanupOldSessionOrders(tableId, oldSessionToken = null) {
             // Only delete non-paid payments
             if (payment.status !== "PAID") {
               await Payment.findByIdAndDelete(payment._id);
-              console.log(`[TABLE] Deleted non-paid payment ${payment._id} for order ${order._id}`);
+              console.log(
+                `[TABLE] Deleted non-paid payment ${payment._id} for order ${order._id}`
+              );
             }
           }
         } catch (err) {
-          console.error(`[TABLE] Error deleting payments for order ${order._id}:`, err);
+          console.error(
+            `[TABLE] Error deleting payments for order ${order._id}:`,
+            err
+          );
         }
       }
-      
+
       // Delete all non-paid orders for this table
       const deleteResult = await Order.deleteMany(orderQuery);
-      console.log(`[TABLE] Deleted ${deleteResult.deletedCount} old orders for table ${tableId}`);
+      console.log(
+        `[TABLE] Deleted ${deleteResult.deletedCount} old orders for table ${tableId}`
+      );
     } else {
       console.log(`[TABLE] No old orders to clean up for table ${tableId}`);
     }
   } catch (err) {
-    console.error(`[TABLE] Error cleaning up old session orders for table ${tableId}:`, err);
+    console.error(
+      `[TABLE] Error cleaning up old session orders for table ${tableId}:`,
+      err
+    );
   }
 }
 
@@ -198,7 +220,10 @@ async function ensureSessionTokenIndex() {
       return;
     }
 
-    await Table.updateMany({ sessionToken: null }, { $unset: { sessionToken: "" } });
+    await Table.updateMany(
+      { sessionToken: null },
+      { $unset: { sessionToken: "" } }
+    );
 
     const indexes = await collection.indexes();
     const sessionIndex = indexes.find((idx) => idx.name === "sessionToken_1");
@@ -250,8 +275,8 @@ async function syncTableFields() {
       { qrSlug: { $exists: false } },
       { qrSlug: null },
       { qrToken: { $exists: false } },
-      { qrToken: null }
-    ]
+      { qrToken: null },
+    ],
   }).select("number tableNumber qrSlug qrToken");
 
   if (!docs.length) return;
@@ -279,28 +304,28 @@ async function syncTableFields() {
 exports.listTables = async (req, res) => {
   try {
     await syncTableFields();
-    
+
     // Build query based on user role (handles mobile roles too)
     const query = await buildHierarchyQuery(req.user);
-    
+
     // Debug logging
-    console.log('[TABLE] listTables - User:', {
+    console.log("[TABLE] listTables - User:", {
       id: req.user?._id,
       role: req.user?.role,
-      email: req.user?.email
+      email: req.user?.email,
     });
-    console.log('[TABLE] listTables - Query:', JSON.stringify(query, null, 2));
-    
+    console.log("[TABLE] listTables - Query:", JSON.stringify(query, null, 2));
+
     // If query is empty (no cartId/franchiseId), return empty array
     // This prevents returning all tables when user has no associated cart
     if (Object.keys(query).length === 0) {
-      console.log('[TABLE] listTables - Empty query, returning empty array');
+      console.log("[TABLE] listTables - Empty query, returning empty array");
       return res.json({
         success: true,
         data: [],
       });
     }
-    
+
     // CRITICAL: Ensure we only return tables that have a cartId matching the query
     // Convert cartId to string for comparison if needed
     if (query.cartId) {
@@ -310,7 +335,7 @@ exports.listTables = async (req, res) => {
         query.cartId = new mongoose.Types.ObjectId(query.cartId);
       }
     }
-    
+
     // Find tables and ensure no duplicates by table number within the same cafe
     // Only return tables that match the query exactly
     // Populate mergedWith to ensure it's included in the response
@@ -318,33 +343,39 @@ exports.listTables = async (req, res) => {
       .populate("mergedWith", "number")
       .sort({ number: 1 })
       .lean();
-    
+
     // Additional safety: Filter out any tables that don't match the cartId exactly
     // This prevents returning tables from other carts due to query issues
-    const filteredTables = tables.filter(table => {
+    const filteredTables = tables.filter((table) => {
       if (query.cartId) {
         const tableCartId = table.cartId?.toString();
         const queryCartId = query.cartId.toString();
         if (tableCartId !== queryCartId) {
-          console.log(`[TABLE] Filtering out table ${table.number} - cartId mismatch: ${tableCartId} !== ${queryCartId}`);
+          console.log(
+            `[TABLE] Filtering out table ${table.number} - cartId mismatch: ${tableCartId} !== ${queryCartId}`
+          );
           return false;
         }
       }
       return true;
     });
-    
-    console.log('[TABLE] listTables - Found tables:', filteredTables.length);
-    filteredTables.forEach(t => {
-      console.log(`[TABLE] - Table ${t.number}: cartId=${t.cartId}, cafeId=${t.cafeId}, franchiseId=${t.franchiseId}`);
+
+    console.log("[TABLE] listTables - Found tables:", filteredTables.length);
+    filteredTables.forEach((t) => {
+      console.log(
+        `[TABLE] - Table ${t.number}: cartId=${t.cartId}, cafeId=${t.cafeId}, franchiseId=${t.franchiseId}`
+      );
     });
-    
+
     // Deduplicate: If multiple tables have the same number, keep only the first one
     // Group by table number and cartId, then take the first occurrence
     const seen = new Map();
     const uniqueTables = [];
-    
+
     for (const table of filteredTables) {
-      const key = `${table.cartId || table.cafeId || 'unknown'}-${table.number}`;
+      const key = `${table.cartId || table.cafeId || "unknown"}-${
+        table.number
+      }`;
       if (!seen.has(key)) {
         seen.set(key, true);
         uniqueTables.push(table);
@@ -352,72 +383,89 @@ exports.listTables = async (req, res) => {
         console.log(`[TABLE] listTables - Skipping duplicate: ${key}`);
       }
     }
-    
-    console.log('[TABLE] listTables - After deduplication:', uniqueTables.length);
-    
+
+    console.log(
+      "[TABLE] listTables - After deduplication:",
+      uniqueTables.length
+    );
+
     // Populate mergedTables and mergedWith for capacity calculation
-    const tablesWithMerged = await Table.find({ _id: { $in: uniqueTables.map(t => t._id) } })
+    const tablesWithMerged = await Table.find({
+      _id: { $in: uniqueTables.map((t) => t._id) },
+    })
       .populate("mergedTables", "number capacity originalCapacity")
       .populate("mergedWith", "number capacity")
       .lean();
-    
+
     const tableMap = new Map();
-    tablesWithMerged.forEach(t => {
+    tablesWithMerged.forEach((t) => {
       tableMap.set(t._id.toString(), t);
     });
-    
+
     const enriched = await Promise.all(
       uniqueTables.map(async (table) => {
         // Ensure table status is correct - if no current order, it should be AVAILABLE
         if (!table.currentOrder && table.status === "OCCUPIED") {
           // Auto-fix: Update table status if it's incorrectly marked as OCCUPIED
           try {
-            await Table.findByIdAndUpdate(table._id, { 
+            await Table.findByIdAndUpdate(table._id, {
               status: "AVAILABLE",
               currentOrder: null,
               sessionToken: undefined,
-              lastAssignedAt: null
+              lastAssignedAt: null,
             });
             table.status = "AVAILABLE";
             table.currentOrder = null;
           } catch (err) {
-            console.error(`[TABLE] Failed to auto-fix table ${table._id}:`, err);
+            console.error(
+              `[TABLE] Failed to auto-fix table ${table._id}:`,
+              err
+            );
           }
         }
-        
+
         // Get table with merged data
         const tableWithMerged = tableMap.get(table._id.toString()) || table;
-        
+
         // Calculate capacity display (same logic as dashboard)
         let originalCapacity = table.capacity || 0;
         let totalCapacity = table.capacity || 0;
-        
-        if (tableWithMerged.mergedTables && tableWithMerged.mergedTables.length > 0) {
+
+        if (
+          tableWithMerged.mergedTables &&
+          tableWithMerged.mergedTables.length > 0
+        ) {
           // Primary table with merged tables
           // table.capacity already includes merged tables' capacities
-          originalCapacity = tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
+          originalCapacity =
+            tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
           totalCapacity = table.capacity || 0; // Current capacity (includes merged)
         } else if (tableWithMerged.mergedWith) {
           // Secondary table merged into another
-          originalCapacity = tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
+          originalCapacity =
+            tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
           totalCapacity = originalCapacity; // Secondary tables don't have merged capacity themselves
         } else {
           // Regular table (not merged)
           originalCapacity = table.capacity || 0;
           totalCapacity = table.capacity || 0;
         }
-        
+
         return {
           ...table,
           capacity: originalCapacity, // Original/base capacity for display
           totalCapacity, // Total capacity including merged tables (for primary tables)
-          mergedWith: tableWithMerged.mergedWith ? (typeof tableWithMerged.mergedWith === 'object' ? tableWithMerged.mergedWith._id : tableWithMerged.mergedWith) : null, // Include mergedWith field
+          mergedWith: tableWithMerged.mergedWith
+            ? typeof tableWithMerged.mergedWith === "object"
+              ? tableWithMerged.mergedWith._id
+              : tableWithMerged.mergedWith
+            : null, // Include mergedWith field
           mergedTables: tableWithMerged.mergedTables || [], // Include mergedTables field
           waitlistLength: await countActiveWaitlist(table._id),
         };
       })
     );
-    
+
     return res.json({
       success: true,
       data: enriched,
@@ -435,10 +483,7 @@ exports.getAvailableTables = async (_req, res) => {
       .lean();
     const enriched = await Promise.all(
       tables.map(async (table) =>
-        buildPublicTableResponse(
-          table,
-          await countActiveWaitlist(table._id)
-        )
+        buildPublicTableResponse(table, await countActiveWaitlist(table._id))
       )
     );
     return res.json(enriched);
@@ -452,13 +497,13 @@ exports.lookupTableBySlug = async (req, res) => {
     await syncTableFields();
     const { slug } = req.params;
     let { waitToken, sessionToken: clientSessionToken } = req.query;
-    
+
     // Sanitize waitToken - remove any trailing :number pattern (e.g., "token:1" -> "token")
     // This can happen if the token gets corrupted in localStorage or URL
     if (waitToken) {
-      waitToken = waitToken.replace(/:\d+$/, '');
+      waitToken = waitToken.replace(/:\d+$/, "");
     }
-    
+
     const table = await Table.findOne({ qrSlug: slug });
     if (!table) {
       return res.status(404).json({ message: "Table not found" });
@@ -469,49 +514,62 @@ exports.lookupTableBySlug = async (req, res) => {
       // This is a secondary table that has been merged
       let primaryTable = null;
       let primaryTableNumber = null;
-      
+
       if (table.mergedWith) {
         primaryTable = await Table.findById(table.mergedWith);
         if (primaryTable) {
           primaryTableNumber = primaryTable.number;
         }
       }
-      
+
       return res.status(400).json({
-        message: `This table (Table ${table.number}) has been merged with Table ${primaryTableNumber || 'another table'}. Please scan the primary table's QR code to place your order.`,
+        message: `This table (Table ${
+          table.number
+        }) has been merged with Table ${
+          primaryTableNumber || "another table"
+        }. Please scan the primary table's QR code to place your order.`,
         isMerged: true,
         mergedTable: {
           number: table.number,
           mergedWith: primaryTableNumber,
         },
-        primaryTable: primaryTable ? {
-          number: primaryTable.number,
-          qrSlug: primaryTable.qrSlug,
-        } : null,
+        primaryTable: primaryTable
+          ? {
+              number: primaryTable.number,
+              qrSlug: primaryTable.qrSlug,
+            }
+          : null,
       });
     }
 
     const waitlistLength = await countActiveWaitlist(table._id);
     const { notifyNextWaitlist } = require("./waitlistController");
-    
+
     // CRITICAL: Get user's waitlist entry if provided
     // This is the PRIMARY way to identify the same customer
     let waitlistEntry = null;
     if (waitToken) {
       waitlistEntry = await Waitlist.findOne({ token: waitToken });
-      if (waitlistEntry && !["WAITING", "NOTIFIED", "SEATED"].includes(waitlistEntry.status)) {
+      if (
+        waitlistEntry &&
+        !["WAITING", "NOTIFIED", "SEATED"].includes(waitlistEntry.status)
+      ) {
         // Entry exists but is CANCELLED - don't use it
         waitlistEntry = null;
       }
       if (waitlistEntry) {
-        console.log(`[Table ${table.number}] Found existing waitlist entry via waitToken: ${waitToken}, status: ${waitlistEntry.status}`);
+        console.log(
+          `[Table ${table.number}] Found existing waitlist entry via waitToken: ${waitToken}, status: ${waitlistEntry.status}`
+        );
       } else if (waitToken) {
-        console.log(`[Table ${table.number}] WaitToken provided but entry not found or invalid: ${waitToken}`);
+        console.log(
+          `[Table ${table.number}] WaitToken provided but entry not found or invalid: ${waitToken}`
+        );
         // Don't create new entry if waitToken was provided but not found
         // This prevents duplicate entries
       }
     }
-    
+
     // CRITICAL: Also check if user already has an active waitlist entry for this table
     // This prevents duplicate entries when user scans QR multiple times without waitToken
     if (!waitlistEntry && clientSessionToken) {
@@ -523,7 +581,41 @@ exports.lookupTableBySlug = async (req, res) => {
       });
       if (existingBySession) {
         waitlistEntry = existingBySession;
-        console.log(`[Table ${table.number}] Found existing waitlist entry via sessionToken: ${clientSessionToken}, token: ${existingBySession.token}`);
+        console.log(
+          `[Table ${table.number}] Found existing waitlist entry via sessionToken: ${clientSessionToken}, token: ${existingBySession.token}`
+        );
+      }
+    }
+
+    // CRITICAL: Check if user has an active unpaid order with matching sessionToken
+    // This allows customers with active orders to access their table even if sessionToken doesn't match exactly
+    let hasActiveUnpaidOrder = false;
+    if (table.currentOrder && clientSessionToken) {
+      const Order = require("../models/orderModel");
+      try {
+        const activeOrder = await Order.findById(table.currentOrder).lean();
+        if (activeOrder) {
+          // Check if order belongs to this customer's session
+          const orderBelongsToCustomer =
+            activeOrder.sessionToken === clientSessionToken ||
+            activeOrder.sessionToken === table.sessionToken;
+          // Check if order is unpaid
+          const isUnpaid =
+            activeOrder.status &&
+            !["Paid", "Cancelled", "Returned"].includes(activeOrder.status);
+
+          if (orderBelongsToCustomer && isUnpaid) {
+            hasActiveUnpaidOrder = true;
+            console.log(
+              `[Table ${table.number}] Customer has active unpaid order (${activeOrder._id}) - will grant access`
+            );
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[Table ${table.number}] Error checking active order:`,
+          err
+        );
       }
     }
 
@@ -535,10 +627,20 @@ exports.lookupTableBySlug = async (req, res) => {
     if (waitlistEntry?.status === "SEATED" && waitlistEntry.sessionToken) {
       candidateSessionTokens.add(waitlistEntry.sessionToken);
     }
+    // If user has active unpaid order, also add table's sessionToken to candidates
+    // This ensures they are recognized as session owner
+    if (hasActiveUnpaidOrder && table.sessionToken) {
+      candidateSessionTokens.add(table.sessionToken);
+    }
 
     // Check if user is session owner
-    const isSessionOwner = table.sessionToken && candidateSessionTokens.has(table.sessionToken);
-    
+    // User is session owner if:
+    // 1. Table has sessionToken AND it matches one of the candidate tokens, OR
+    // 2. User has active unpaid order (even if table.sessionToken doesn't match)
+    const isSessionOwner =
+      (table.sessionToken && candidateSessionTokens.has(table.sessionToken)) ||
+      hasActiveUnpaidOrder;
+
     let mutated = false;
     let sessionTokenJustIssued = false;
 
@@ -568,19 +670,22 @@ exports.lookupTableBySlug = async (req, res) => {
     if (waitlistEntry?.status === "SEATED" && waitlistEntry.sessionToken) {
       // User was already seated - give them access
       // Mark as RESERVED so admin sees the table is taken (OCCUPIED happens when menu/order)
-      if (!table.sessionToken || table.sessionToken !== waitlistEntry.sessionToken) {
+      if (
+        !table.sessionToken ||
+        table.sessionToken !== waitlistEntry.sessionToken
+      ) {
         // Restore their session token
         table.sessionToken = waitlistEntry.sessionToken;
         table.status = "RESERVED";
         mutated = true;
       }
-      
+
       table.lastAssignedAt = new Date();
       if (mutated) {
         await table.save();
         await emitTableStatus();
       }
-      
+
       const position = await getWaitlistPosition(waitlistEntry);
       return res.json({
         table: buildPublicTableResponse(table, waitlistLength, {
@@ -621,13 +726,13 @@ exports.lookupTableBySlug = async (req, res) => {
           table.status = "RESERVED";
           mutated = true;
         }
-        
+
         table.lastAssignedAt = new Date();
         if (mutated) {
           await table.save();
           await emitTableStatus();
         }
-        
+
         const position = await getWaitlistPosition(waitlistEntry);
         return res.json({
           table: buildPublicTableResponse(table, waitlistLength, {
@@ -663,7 +768,7 @@ exports.lookupTableBySlug = async (req, res) => {
             table: buildPublicTableResponse(table, waitlistLength),
           });
         }
-        
+
         if (!waitlistEntry) {
           // CRITICAL: Check if user already has an active waitlist entry for this table
           // This prevents duplicate entries when user scans QR multiple times
@@ -672,13 +777,15 @@ exports.lookupTableBySlug = async (req, res) => {
             status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
             $or: [
               { sessionToken: clientSessionToken },
-              { token: waitToken }
+              { token: waitToken },
             ].filter(Boolean), // Remove null/undefined conditions
           });
-          
+
           if (existingEntry) {
             waitlistEntry = existingEntry;
-            console.log(`[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`);
+            console.log(
+              `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
+            );
           } else {
             // No existing entry - create new waitlist entry
             const token = crypto.randomBytes(6).toString("hex");
@@ -688,10 +795,12 @@ exports.lookupTableBySlug = async (req, res) => {
               token,
               sessionToken: clientSessionToken || undefined, // Link to session if available
             });
-            console.log(`[Table ${table.number}] Created new waitlist entry: ${token}`);
+            console.log(
+              `[Table ${table.number}] Created new waitlist entry: ${token}`
+            );
           }
         }
-        
+
         const position = await getWaitlistPosition(waitlistEntry);
         return res.status(423).json({
           table: buildPublicTableResponse(table, waitlistLength, {
@@ -721,7 +830,7 @@ exports.lookupTableBySlug = async (req, res) => {
         // There are people waiting - notify the next one
         const io = req.app?.get("io");
         const nextNotified = await notifyNextWaitlist(table._id, io);
-        
+
         if (nextNotified) {
           // Someone was just notified - check if it's this user
           if (waitlistEntry && waitlistEntry.token === nextNotified.token) {
@@ -742,13 +851,13 @@ exports.lookupTableBySlug = async (req, res) => {
               table.status = "RESERVED";
               mutated = true;
             }
-            
+
             table.lastAssignedAt = new Date();
             if (mutated) {
               await table.save();
               await emitTableStatus();
             }
-            
+
             const notifiedPosition = await getWaitlistPosition(nextNotified);
             return res.json({
               table: buildPublicTableResponse(table, waitlistLength, {
@@ -772,11 +881,12 @@ exports.lookupTableBySlug = async (req, res) => {
             if (!waitlistEntry && waitToken) {
               // waitToken was provided but entry not found - return error
               return res.status(400).json({
-                message: "Invalid waitlist token. Please join the waitlist again.",
+                message:
+                  "Invalid waitlist token. Please join the waitlist again.",
                 table: buildPublicTableResponse(table, waitlistLength),
               });
             }
-            
+
             if (!waitlistEntry) {
               // CRITICAL: Check if user already has an active waitlist entry for this table
               const existingEntry = await Waitlist.findOne({
@@ -784,13 +894,15 @@ exports.lookupTableBySlug = async (req, res) => {
                 status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
                 $or: [
                   { sessionToken: clientSessionToken },
-                  { token: waitToken }
+                  { token: waitToken },
                 ].filter(Boolean),
               });
-              
+
               if (existingEntry) {
                 waitlistEntry = existingEntry;
-                console.log(`[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`);
+                console.log(
+                  `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
+                );
               } else {
                 // No existing entry - create new waitlist entry
                 const token = crypto.randomBytes(6).toString("hex");
@@ -800,10 +912,12 @@ exports.lookupTableBySlug = async (req, res) => {
                   token,
                   sessionToken: clientSessionToken || undefined,
                 });
-                console.log(`[Table ${table.number}] Created new waitlist entry: ${token}`);
+                console.log(
+                  `[Table ${table.number}] Created new waitlist entry: ${token}`
+                );
               }
             }
-            
+
             const position = await getWaitlistPosition(waitlistEntry);
             return res.status(423).json({
               table: buildPublicTableResponse(table, waitlistLength, {
@@ -827,30 +941,36 @@ exports.lookupTableBySlug = async (req, res) => {
 
       // Priority 4: No one waiting - allow direct access
       // CRITICAL: Keep table as AVAILABLE during lookup - only mark as OCCUPIED when user enters menu
-      
+
       // CRITICAL: When table is AVAILABLE, always generate a NEW sessionToken
       // This ensures that if someone scans with an old sessionToken, they get a fresh session
       // Previous session is closed and old orders are cleaned up
-      
+
       const oldSessionToken = table.sessionToken || clientSessionToken; // Save old token if exists
-      
+
       // Always clean up old orders before starting new session (even if no old sessionToken)
       // This ensures no old order data is shown to the new customer
       await cleanupOldSessionOrders(table._id, oldSessionToken);
-      
+
       // Generate a NEW sessionToken - this invalidates any old sessionTokens
       table.sessionToken = generateToken();
       mutated = true;
       sessionTokenJustIssued = true;
-      
-      console.log(`[TABLE] Table ${table.number} AVAILABLE - generated NEW sessionToken (old: ${oldSessionToken || 'none'})`);
-      
+
+      console.log(
+        `[TABLE] Table ${
+          table.number
+        } AVAILABLE - generated NEW sessionToken (old: ${
+          oldSessionToken || "none"
+        })`
+      );
+
       // Keep status as AVAILABLE - don't change to RESERVED
-      
+
       table.lastAssignedAt = new Date();
       // Keep table status as AVAILABLE - only mark as OCCUPIED when occupyTable is called
       if (mutated) await table.save();
-      
+
       return res.json({
         table: buildPublicTableResponse(table, waitlistLength, {
           includeSessionToken: true,
@@ -866,7 +986,7 @@ exports.lookupTableBySlug = async (req, res) => {
         // Session owner - allow access
         table.lastAssignedAt = new Date();
         await table.save();
-        
+
         return res.json({
           table: buildPublicTableResponse(table, waitlistLength, {
             includeSessionToken: true,
@@ -880,11 +1000,12 @@ exports.lookupTableBySlug = async (req, res) => {
         if (waitToken && !waitlistEntry) {
           // waitToken was provided but entry not found - return error instead of creating duplicate
           return res.status(400).json({
-            message: "Invalid waitlist token. Your previous waitlist entry may have expired. Please scan again to join waitlist.",
+            message:
+              "Invalid waitlist token. Your previous waitlist entry may have expired. Please scan again to join waitlist.",
             table: buildPublicTableResponse(table, waitlistLength),
           });
         }
-        
+
         if (!waitlistEntry) {
           // CRITICAL: Check if user already has an active waitlist entry for this table
           // This prevents duplicate entries when user scans QR multiple times
@@ -893,13 +1014,15 @@ exports.lookupTableBySlug = async (req, res) => {
             status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
             $or: [
               { sessionToken: clientSessionToken },
-              { token: waitToken }
+              { token: waitToken },
             ].filter(Boolean),
           });
-          
+
           if (existingEntry) {
             waitlistEntry = existingEntry;
-            console.log(`[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`);
+            console.log(
+              `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
+            );
           } else {
             // No existing entry - create new waitlist entry
             const token = crypto.randomBytes(6).toString("hex");
@@ -909,7 +1032,9 @@ exports.lookupTableBySlug = async (req, res) => {
               token,
               sessionToken: clientSessionToken || undefined,
             });
-            console.log(`[Table ${table.number}] Created new waitlist entry: ${token}`);
+            console.log(
+              `[Table ${table.number}] Created new waitlist entry: ${token}`
+            );
           }
         }
 
@@ -935,11 +1060,37 @@ exports.lookupTableBySlug = async (req, res) => {
 
     // Handle RESERVED or CLEANING table
     if (["RESERVED", "CLEANING"].includes(table.status)) {
-      if (isSessionOwner) {
-        // Session owner - allow access
+      if (isSessionOwner || hasActiveUnpaidOrder) {
+        // Session owner or has active unpaid order - allow access
         table.lastAssignedAt = new Date();
         await table.save();
-        
+
+        // If user has active order, return it
+        if (hasActiveUnpaidOrder && table.currentOrder) {
+          const Order = require("../models/orderModel");
+          try {
+            const activeOrder = await Order.findById(table.currentOrder).lean();
+            if (activeOrder) {
+              console.log(
+                `[Table ${table.number}] Returning active order ${activeOrder._id} to customer`
+              );
+              return res.json({
+                table: buildPublicTableResponse(table, waitlistLength, {
+                  includeSessionToken: true,
+                  sessionOwner: true,
+                }),
+                sessionToken: table.sessionToken,
+                order: activeOrder,
+              });
+            }
+          } catch (err) {
+            console.warn(
+              `[Table ${table.number}] Error fetching active order:`,
+              err
+            );
+          }
+        }
+
         return res.json({
           table: buildPublicTableResponse(table, waitlistLength, {
             includeSessionToken: true,
@@ -953,11 +1104,12 @@ exports.lookupTableBySlug = async (req, res) => {
         if (waitToken && !waitlistEntry) {
           // waitToken was provided but entry not found - return error instead of creating duplicate
           return res.status(400).json({
-            message: "Invalid waitlist token. Your previous waitlist entry may have expired. Please scan again to join waitlist.",
+            message:
+              "Invalid waitlist token. Your previous waitlist entry may have expired. Please scan again to join waitlist.",
             table: buildPublicTableResponse(table, waitlistLength),
           });
         }
-        
+
         if (!waitlistEntry) {
           // CRITICAL: Check if user already has an active waitlist entry for this table
           // This prevents duplicate entries when user scans QR multiple times
@@ -966,13 +1118,15 @@ exports.lookupTableBySlug = async (req, res) => {
             status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
             $or: [
               { sessionToken: clientSessionToken },
-              { token: waitToken }
+              { token: waitToken },
             ].filter(Boolean),
           });
-          
+
           if (existingEntry) {
             waitlistEntry = existingEntry;
-            console.log(`[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`);
+            console.log(
+              `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
+            );
           } else {
             // No existing entry - create new waitlist entry
             const token = crypto.randomBytes(6).toString("hex");
@@ -982,7 +1136,9 @@ exports.lookupTableBySlug = async (req, res) => {
               token,
               sessionToken: clientSessionToken || undefined,
             });
-            console.log(`[Table ${table.number}] Created new waitlist entry: ${token}`);
+            console.log(
+              `[Table ${table.number}] Created new waitlist entry: ${token}`
+            );
           }
         }
 
@@ -1009,10 +1165,10 @@ exports.lookupTableBySlug = async (req, res) => {
     // Fallback - should not reach here
     return res.status(500).json({ message: "Unexpected table status" });
   } catch (err) {
-    console.error('Error in lookupTableBySlug:', err);
-    return res.status(500).json({ 
-      message: err.message, 
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined 
+    console.error("Error in lookupTableBySlug:", err);
+    return res.status(500).json({
+      message: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 };
@@ -1026,7 +1182,9 @@ exports.createTable = async (req, res) => {
 
     const numericNumber = Number(number);
     if (!Number.isFinite(numericNumber) || numericNumber <= 0) {
-      return res.status(400).json({ message: "Table number must be a positive number" });
+      return res
+        .status(400)
+        .json({ message: "Table number must be a positive number" });
     }
 
     // Set cartId and franchiseId if user is cafe admin
@@ -1039,7 +1197,7 @@ exports.createTable = async (req, res) => {
         franchiseId = req.user.franchiseId;
       }
     }
-    
+
     // Check uniqueness per cafe (cafe admins can have same table numbers)
     // For cafe admins: check if this cafe already has this table number
     // For non-cafe admins: check if any table exists with this number where cartId is null/undefined
@@ -1047,17 +1205,16 @@ exports.createTable = async (req, res) => {
     if (cartId) {
       existing = await Table.findOne({ number: numericNumber, cartId: cartId });
       if (existing) {
-        return res.status(409).json({ message: "Table number already exists for this cafe" });
+        return res
+          .status(409)
+          .json({ message: "Table number already exists for this cafe" });
       }
     } else {
       // For non-cafe admins (super_admin, franchise_admin), check if any table exists with this number
       // where cartId is null or undefined (non-cafe admin tables)
       existing = await Table.findOne({
         number: numericNumber,
-        $or: [
-          { cartId: null },
-          { cartId: { $exists: false } }
-        ]
+        $or: [{ cartId: null }, { cartId: { $exists: false } }],
       });
       if (existing) {
         return res.status(409).json({ message: "Table number already exists" });
@@ -1074,7 +1231,9 @@ exports.createTable = async (req, res) => {
       attempts++;
     }
     if (attempts >= 10) {
-      return res.status(500).json({ message: "Failed to generate unique QR code. Please try again." });
+      return res.status(500).json({
+        message: "Failed to generate unique QR code. Please try again.",
+      });
     }
 
     const table = await Table.create({
@@ -1091,30 +1250,36 @@ exports.createTable = async (req, res) => {
 
     return res.status(201).json(table);
   } catch (err) {
-    console.error('Error creating table:', err);
-    console.error('Error details:', {
+    console.error("Error creating table:", err);
+    console.error("Error details:", {
       code: err.code,
       codeName: err.codeName,
       keyPattern: err.keyPattern,
       keyValue: err.keyValue,
-      message: err.message
+      message: err.message,
     });
-    
+
     // Handle MongoDB duplicate key errors
     if (err.code === 11000) {
       const field = Object.keys(err.keyPattern || {})[0];
-      if (field === 'number_1_cartId_1' || (err.keyPattern && err.keyPattern.number && err.keyPattern.cartId)) {
-        return res.status(409).json({ 
-          message: 'Table number already exists for this cafe. If you see this error repeatedly, please run: node scripts/fix-table-indexes.js'
+      if (
+        field === "number_1_cartId_1" ||
+        (err.keyPattern && err.keyPattern.number && err.keyPattern.cartId)
+      ) {
+        return res.status(409).json({
+          message:
+            "Table number already exists for this cafe. If you see this error repeatedly, please run: node scripts/fix-table-indexes.js",
         });
       }
-      return res.status(409).json({ 
-        message: `Table ${field === 'number' ? 'number' : field} already exists. If this persists, run: node scripts/fix-table-indexes.js`
+      return res.status(409).json({
+        message: `Table ${
+          field === "number" ? "number" : field
+        } already exists. If this persists, run: node scripts/fix-table-indexes.js`,
       });
     }
-    return res.status(500).json({ 
-      message: err.message || 'Failed to create table',
-      error: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    return res.status(500).json({
+      message: err.message || "Failed to create table",
+      error: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 };
@@ -1123,7 +1288,7 @@ exports.occupyTable = async (req, res) => {
   try {
     const { id } = req.params;
     const { sessionToken } = req.body;
-    
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid table id" });
     }
@@ -1134,7 +1299,11 @@ exports.occupyTable = async (req, res) => {
     }
 
     // Verify session token matches (if provided)
-    if (sessionToken && table.sessionToken && table.sessionToken !== sessionToken) {
+    if (
+      sessionToken &&
+      table.sessionToken &&
+      table.sessionToken !== sessionToken
+    ) {
       return res.status(403).json({ message: "Invalid session token" });
     }
 
@@ -1165,7 +1334,10 @@ exports.occupyTable = async (req, res) => {
 
     return res.json({
       success: true,
-      table: buildPublicTableResponse(table, await countActiveWaitlist(table._id)),
+      table: buildPublicTableResponse(
+        table,
+        await countActiveWaitlist(table._id)
+      ),
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -1192,7 +1364,9 @@ exports.updateTable = async (req, res) => {
     if (updates.number !== undefined) {
       const numericNumber = Number(updates.number);
       if (!Number.isFinite(numericNumber) || numericNumber <= 0) {
-        return res.status(400).json({ message: "Table number must be a positive number" });
+        return res
+          .status(400)
+          .json({ message: "Table number must be a positive number" });
       }
       updates.number = numericNumber;
       updates.tableNumber = String(numericNumber);
@@ -1218,7 +1392,9 @@ exports.updateTable = async (req, res) => {
       }
       const existing = await Table.findOne(query);
       if (existing) {
-        return res.status(409).json({ message: "Table number already exists for this cart" });
+        return res
+          .status(409)
+          .json({ message: "Table number already exists for this cart" });
       }
     }
 
@@ -1239,31 +1415,36 @@ exports.updateTable = async (req, res) => {
     if (updates.status === "AVAILABLE") {
       // Save the old sessionToken before clearing it
       const oldSessionToken = table.sessionToken;
-      
+
       // Clean up all old orders from previous session using the helper function
       // This ensures all non-paid orders are deleted before new session starts
       await cleanupOldSessionOrders(table._id, oldSessionToken);
-      
+
       // Clear table's currentOrder and sessionToken - close previous session completely
       table.currentOrder = null;
       table.set("sessionToken", undefined);
-      
+
       // Additional cleanup: Delete any remaining non-paid orders (double check)
       // This handles edge cases where orders might exist without sessionToken
       if (oldSessionToken) {
-        console.log(`[TABLE] Closing session for table ${table.number} - old sessionToken: ${oldSessionToken}`);
+        console.log(
+          `[TABLE] Closing session for table ${table.number} - old sessionToken: ${oldSessionToken}`
+        );
       }
-      
+
       // If table was OCCUPIED/RESERVED, ensure all related data is cleared
       if (table.status === "OCCUPIED" || table.status === "RESERVED") {
-        console.log(`[TABLE] Table ${table.number} being set to AVAILABLE - previous session closed`);
+        console.log(
+          `[TABLE] Table ${table.number} being set to AVAILABLE - previous session closed`
+        );
       }
     } else if (updates.status === "AVAILABLE" && table.currentOrder) {
       // If table already has a currentOrder, check if it's paid/cancelled
       const order = await Order.findById(table.currentOrder);
       if (order && !["Paid", "Cancelled"].includes(order.status)) {
         return res.status(400).json({
-          message: "Cannot mark table available while active order exists. Please cancel or pay the order first.",
+          message:
+            "Cannot mark table available while active order exists. Please cancel or pay the order first.",
         });
       }
       table.currentOrder = null;
@@ -1273,7 +1454,7 @@ exports.updateTable = async (req, res) => {
 
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    
+
     // Emit socket event for table status update
     if (io && emitToCafe && table.cartId) {
       emitToCafe(io, table.cartId.toString(), "table:status:updated", {
@@ -1283,7 +1464,7 @@ exports.updateTable = async (req, res) => {
         currentOrder: table.currentOrder || null,
       });
     }
-    
+
     // When table becomes AVAILABLE, notify next waitlist person
     // Don't cancel waitlist entries - let the flow handle it naturally
     if (updates.status === "AVAILABLE" && table.status === "AVAILABLE") {
@@ -1320,7 +1501,9 @@ exports.deleteTable = async (req, res) => {
     }
 
     if (table.currentOrder) {
-      return res.status(400).json({ message: "Cannot delete table with active order" });
+      return res
+        .status(400)
+        .json({ message: "Cannot delete table with active order" });
     }
 
     await Waitlist.updateMany(
@@ -1362,52 +1545,75 @@ exports.regenerateQrSlug = async (req, res) => {
 exports.mergeTables = async (req, res) => {
   try {
     const { primaryTableId, secondaryTableIds } = req.body;
-    
-    if (!primaryTableId || !Array.isArray(secondaryTableIds) || secondaryTableIds.length === 0) {
-      return res.status(400).json({ message: "Primary table ID and at least one secondary table ID are required" });
+
+    if (
+      !primaryTableId ||
+      !Array.isArray(secondaryTableIds) ||
+      secondaryTableIds.length === 0
+    ) {
+      return res.status(400).json({
+        message:
+          "Primary table ID and at least one secondary table ID are required",
+      });
     }
-    
+
     // Validate all table IDs
     const allTableIds = [primaryTableId, ...secondaryTableIds];
     for (const tableId of allTableIds) {
       if (!mongoose.Types.ObjectId.isValid(tableId)) {
-        return res.status(400).json({ message: `Invalid table ID: ${tableId}` });
+        return res
+          .status(400)
+          .json({ message: `Invalid table ID: ${tableId}` });
       }
     }
-    
+
     // Get all tables
     const primaryTable = await Table.findById(primaryTableId);
     if (!primaryTable) {
       return res.status(404).json({ message: "Primary table not found" });
     }
-    
+
     // Check hierarchy access
     const query = await buildHierarchyQuery(req.user);
-    if (query.cartId && primaryTable.cartId?.toString() !== query.cartId.toString()) {
+    if (
+      query.cartId &&
+      primaryTable.cartId?.toString() !== query.cartId.toString()
+    ) {
       return res.status(403).json({ message: "Access denied" });
     }
-    if (query.franchiseId && primaryTable.franchiseId?.toString() !== query.franchiseId.toString()) {
+    if (
+      query.franchiseId &&
+      primaryTable.franchiseId?.toString() !== query.franchiseId.toString()
+    ) {
       return res.status(403).json({ message: "Access denied" });
     }
-    
-    const secondaryTables = await Table.find({ _id: { $in: secondaryTableIds } });
+
+    const secondaryTables = await Table.find({
+      _id: { $in: secondaryTableIds },
+    });
     if (secondaryTables.length !== secondaryTableIds.length) {
-      return res.status(404).json({ message: "One or more secondary tables not found" });
+      return res
+        .status(404)
+        .json({ message: "One or more secondary tables not found" });
     }
-    
+
     // Check if any table is already merged or has active orders
     for (const table of [primaryTable, ...secondaryTables]) {
       if (table.mergedWith || table.mergedTables?.length > 0) {
-        return res.status(400).json({ message: `Table ${table.number} is already merged` });
+        return res
+          .status(400)
+          .json({ message: `Table ${table.number} is already merged` });
       }
       if (table.currentOrder) {
         const order = await Order.findById(table.currentOrder);
         if (order && !["Paid", "Cancelled"].includes(order.status)) {
-          return res.status(400).json({ message: `Table ${table.number} has an active order` });
+          return res
+            .status(400)
+            .json({ message: `Table ${table.number} has an active order` });
         }
       }
     }
-    
+
     // Merge tables: mark secondary tables as merged with primary
     for (const secondaryTable of secondaryTables) {
       // Store original capacity before merging (if not already stored)
@@ -1418,13 +1624,16 @@ exports.mergeTables = async (req, res) => {
       secondaryTable.mergedWith = primaryTable._id;
       await secondaryTable.save();
     }
-    
+
     // Update primary table to include merged tables
-    if (!primaryTable.mergedTables || !Array.isArray(primaryTable.mergedTables)) {
+    if (
+      !primaryTable.mergedTables ||
+      !Array.isArray(primaryTable.mergedTables)
+    ) {
       primaryTable.mergedTables = [];
     }
     // Convert secondary table IDs to ObjectIds and add to mergedTables
-    const secondaryObjectIds = secondaryTableIds.map(id => {
+    const secondaryObjectIds = secondaryTableIds.map((id) => {
       if (mongoose.Types.ObjectId.isValid(id)) {
         return new mongoose.Types.ObjectId(id);
       }
@@ -1436,13 +1645,21 @@ exports.mergeTables = async (req, res) => {
       primaryTable.originalCapacity = primaryTable.capacity || 2;
     }
     // Update capacity to reflect merged tables (add secondary tables' capacities)
-    const secondaryCapacity = secondaryTables.reduce((sum, t) => sum + (t.capacity || 0), 0);
-    primaryTable.capacity = (primaryTable.originalCapacity || primaryTable.capacity || 0) + secondaryCapacity;
+    const secondaryCapacity = secondaryTables.reduce(
+      (sum, t) => sum + (t.capacity || 0),
+      0
+    );
+    primaryTable.capacity =
+      (primaryTable.originalCapacity || primaryTable.capacity || 0) +
+      secondaryCapacity;
     await primaryTable.save();
-    
+
     return res.json({
       message: "Tables merged successfully",
-      primaryTable: await Table.findById(primaryTableId).populate("mergedTables", "number capacity"),
+      primaryTable: await Table.findById(primaryTableId).populate(
+        "mergedTables",
+        "number capacity"
+      ),
       mergedTables: secondaryTables,
     });
   } catch (err) {
@@ -1455,80 +1672,85 @@ exports.unmergeTables = async (req, res) => {
   try {
     // Route parameter is 'id', not 'tableId'
     const { id } = req.params;
-    
-    console.log('[UNMERGE] Received id from params:', id, 'Type:', typeof id);
-    console.log('[UNMERGE] All params:', req.params);
-    
+
+    console.log("[UNMERGE] Received id from params:", id, "Type:", typeof id);
+    console.log("[UNMERGE] All params:", req.params);
+
     // Validate table ID
     if (!id) {
       return res.status(400).json({ message: "Table ID is required" });
     }
-    
+
     // Convert to string and validate ObjectId format
     const tableIdStr = String(id).trim();
     if (!mongoose.Types.ObjectId.isValid(tableIdStr)) {
-      console.log('[UNMERGE] Invalid ObjectId format:', tableIdStr);
-      return res.status(400).json({ 
+      console.log("[UNMERGE] Invalid ObjectId format:", tableIdStr);
+      return res.status(400).json({
         message: "Invalid table ID format",
         receivedId: tableIdStr,
-        idType: typeof id
+        idType: typeof id,
       });
     }
-    
+
     const table = await Table.findById(tableIdStr);
     if (!table) {
       return res.status(404).json({ message: "Table not found" });
     }
-    
+
     // Check hierarchy access
     const query = await buildHierarchyQuery(req.user);
     if (query.cartId && table.cartId?.toString() !== query.cartId.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
-    if (query.franchiseId && table.franchiseId?.toString() !== query.franchiseId.toString()) {
+    if (
+      query.franchiseId &&
+      table.franchiseId?.toString() !== query.franchiseId.toString()
+    ) {
       return res.status(403).json({ message: "Access denied" });
     }
-    
+
     // Check if table is merged (either as secondary or primary)
     // Secondary table: has mergedWith field pointing to primary table OR status is MERGED
     // Primary table: has mergedTables array with entries
-    
+
     // Check mergedWith - handle both ObjectId and null cases
     let hasMergedWith = false;
     if (table.mergedWith) {
       try {
         const mergedWithStr = table.mergedWith.toString();
-        hasMergedWith = mergedWithStr && mergedWithStr !== 'null' && mergedWithStr !== '';
+        hasMergedWith =
+          mergedWithStr && mergedWithStr !== "null" && mergedWithStr !== "";
       } catch (e) {
         hasMergedWith = false;
       }
     }
-    
+
     // Also check status - if status is MERGED, it's definitely a merged table
     const isMergedStatus = table.status === "MERGED";
-    
+
     // Primary table: has mergedTables array with entries
-    const hasMergedTables = table.mergedTables && 
-                            Array.isArray(table.mergedTables) && 
-                            table.mergedTables.length > 0;
-    
-    console.log('[UNMERGE] Table check:', {
+    const hasMergedTables =
+      table.mergedTables &&
+      Array.isArray(table.mergedTables) &&
+      table.mergedTables.length > 0;
+
+    console.log("[UNMERGE] Table check:", {
       tableId: table._id.toString(),
       tableNumber: table.number,
-      mergedWith: table.mergedWith ? table.mergedWith.toString() : 'null',
+      mergedWith: table.mergedWith ? table.mergedWith.toString() : "null",
       mergedWithType: typeof table.mergedWith,
       mergedTables: table.mergedTables ? table.mergedTables.length : 0,
       hasMergedWith,
       isMergedStatus,
       hasMergedTables,
-      status: table.status
+      status: table.status,
     });
-    
+
     // Table is merged if it has mergedWith, status is MERGED, or has mergedTables
     const isMerged = hasMergedWith || isMergedStatus || hasMergedTables;
-    
+
     if (!isMerged) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: "Table is not merged",
         debug: {
           mergedWith: table.mergedWith ? table.mergedWith.toString() : null,
@@ -1537,11 +1759,11 @@ exports.unmergeTables = async (req, res) => {
           status: table.status,
           hasMergedWith,
           isMergedStatus,
-          hasMergedTables
-        }
+          hasMergedTables,
+        },
       });
     }
-    
+
     // If this is a merged table (mergedWith exists or status is MERGED), unmerge it
     if (hasMergedWith || isMergedStatus) {
       // Only try to find primary table if mergedWith exists
@@ -1549,20 +1771,25 @@ exports.unmergeTables = async (req, res) => {
       if (hasMergedWith && table.mergedWith) {
         primaryTable = await Table.findById(table.mergedWith);
       }
-      
+
       if (primaryTable) {
         // Remove from primary table's mergedTables array
-        if (primaryTable.mergedTables && Array.isArray(primaryTable.mergedTables)) {
-          primaryTable.mergedTables = primaryTable.mergedTables.filter(
-            id => {
-              const idStr = id.toString ? id.toString() : String(id);
-              return idStr !== table._id.toString();
-            }
-          );
+        if (
+          primaryTable.mergedTables &&
+          Array.isArray(primaryTable.mergedTables)
+        ) {
+          primaryTable.mergedTables = primaryTable.mergedTables.filter((id) => {
+            const idStr = id.toString ? id.toString() : String(id);
+            return idStr !== table._id.toString();
+          });
           // Restore capacity by subtracting this table's original capacity
           const currentCapacity = primaryTable.capacity || 0;
-          const tableOriginalCapacity = table.originalCapacity || table.capacity || 0;
-          primaryTable.capacity = Math.max(primaryTable.originalCapacity || 2, currentCapacity - tableOriginalCapacity);
+          const tableOriginalCapacity =
+            table.originalCapacity || table.capacity || 0;
+          primaryTable.capacity = Math.max(
+            primaryTable.originalCapacity || 2,
+            currentCapacity - tableOriginalCapacity
+          );
           await primaryTable.save();
         }
       }
@@ -1576,25 +1803,29 @@ exports.unmergeTables = async (req, res) => {
       await table.save();
       return res.json({ message: "Table unmerged successfully", table });
     }
-    
+
     // If this is a primary table with merged tables, unmerge all
     if (hasMergedTables) {
-      const mergedTableIds = table.mergedTables.map(id => id.toString ? id.toString() : String(id));
-      
+      const mergedTableIds = table.mergedTables.map((id) =>
+        id.toString ? id.toString() : String(id)
+      );
+
       // Get merged tables to calculate capacity to subtract
-      const mergedTables = await Table.find({ 
-        _id: { $in: table.mergedTables } 
+      const mergedTables = await Table.find({
+        _id: { $in: table.mergedTables },
       });
-      
+
       // Get original capacity of merged tables (before they were merged)
       // We need to get their original capacities, not current capacities
       const mergedCapacity = mergedTables.reduce((sum, t) => {
         // Use originalCapacity if available, otherwise use current capacity
         return sum + (t.originalCapacity || t.capacity || 0);
       }, 0);
-      
+
       // Unmerge all secondary tables and restore their original capacities
-      const secondaryTablesToUnmerge = await Table.find({ _id: { $in: table.mergedTables } });
+      const secondaryTablesToUnmerge = await Table.find({
+        _id: { $in: table.mergedTables },
+      });
       for (const secondaryTable of secondaryTablesToUnmerge) {
         secondaryTable.status = "AVAILABLE";
         secondaryTable.mergedWith = null;
@@ -1605,15 +1836,18 @@ exports.unmergeTables = async (req, res) => {
         }
         await secondaryTable.save();
       }
-      
+
       // Restore original capacity of primary table
       const originalCapacity = table.originalCapacity || 2;
       table.capacity = originalCapacity;
       table.originalCapacity = undefined; // Clear originalCapacity after restore
       table.mergedTables = [];
       await table.save();
-      
-      return res.json({ message: "All merged tables unmerged successfully", table });
+
+      return res.json({
+        message: "All merged tables unmerged successfully",
+        table,
+      });
     }
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -1627,20 +1861,24 @@ exports.getTableOccupancyDashboard = async (req, res) => {
     const query = {};
     if (req.user && req.user.role === "admin" && req.user._id) {
       query.cartId = req.user._id;
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
       query.franchiseId = req.user._id;
     }
-    
+
     const tables = await Table.find(query)
       .populate("currentOrder")
       .populate("mergedTables", "number capacity status")
       .sort({ number: 1 })
       .lean();
-    
+
     const dashboard = tables.map((table) => {
       const isOccupied = ["OCCUPIED", "RESERVED"].includes(table.status);
       const isMerged = table.status === "MERGED" || table.mergedWith;
-      
+
       // Calculate capacity display:
       // - For primary tables with merged tables: capacity field already includes merged tables
       //   So originalCapacity = originalCapacity (if stored), totalCapacity = capacity (current)
@@ -1648,7 +1886,7 @@ exports.getTableOccupancyDashboard = async (req, res) => {
       // - For regular tables: use capacity
       let originalCapacity = table.capacity || 0;
       let totalCapacity = table.capacity || 0;
-      
+
       if (table.mergedTables && table.mergedTables.length > 0) {
         // Primary table with merged tables
         // table.capacity already includes merged tables' capacities
@@ -1663,7 +1901,7 @@ exports.getTableOccupancyDashboard = async (req, res) => {
         originalCapacity = table.capacity || 0;
         totalCapacity = table.capacity || 0;
       }
-      
+
       return {
         id: table._id.toString(), // Ensure ID is a string
         _id: table._id.toString(), // Also include _id for compatibility
@@ -1680,7 +1918,7 @@ exports.getTableOccupancyDashboard = async (req, res) => {
         waitlistLength: 0, // Will be populated below
       };
     });
-    
+
     // Add waitlist length for each table
     const enriched = await Promise.all(
       dashboard.map(async (item) => ({
@@ -1688,7 +1926,7 @@ exports.getTableOccupancyDashboard = async (req, res) => {
         waitlistLength: await countActiveWaitlist(item.id),
       }))
     );
-    
+
     return res.json(enriched);
   } catch (err) {
     return res.status(500).json({ message: err.message });

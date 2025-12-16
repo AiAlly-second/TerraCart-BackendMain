@@ -4,11 +4,19 @@ const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-const { generateFranchiseCode, generateCartCode } = require("../utils/codeGenerator");
+const {
+  generateFranchiseCode,
+  generateCartCode,
+} = require("../utils/codeGenerator");
 const { addSignedUrlsToUser } = require("../utils/signedUrl");
 
 // Configure multer for franchise document uploads
-const franchiseDocsDir = path.join(__dirname, "..", "uploads", "franchise-docs");
+const franchiseDocsDir = path.join(
+  __dirname,
+  "..",
+  "uploads",
+  "franchise-docs"
+);
 if (!fs.existsSync(franchiseDocsDir)) {
   fs.mkdirSync(franchiseDocsDir, { recursive: true });
 }
@@ -56,7 +64,7 @@ const multerFranchiseDocs = upload.fields([
 // Wrapper middleware that makes multer optional for JSON requests
 exports.uploadFranchiseDocs = (req, res, next) => {
   // Only use multer if content-type is multipart/form-data
-  if (req.is('multipart/form-data')) {
+  if (req.is("multipart/form-data")) {
     return multerFranchiseDocs(req, res, next);
   }
   // For JSON requests, just pass through (files are optional)
@@ -77,30 +85,8 @@ const multerCafeAdminDocs = upload.fields([
 // Wrapper middleware that makes multer optional for JSON requests
 exports.uploadCafeAdminDocs = (req, res, next) => {
   // Only use multer if content-type is multipart/form-data
-  if (req.is('multipart/form-data')) {
+  if (req.is("multipart/form-data")) {
     return multerCafeAdminDocs(req, res, next);
-  }
-  // For JSON requests, just pass through (files are optional)
-  next();
-};
-
-// Combined middleware for all documents (franchise + cafe admin)
-const multerAllDocs = upload.fields([
-  { name: "udyamCertificate", maxCount: 1 },
-  { name: "aadharCard", maxCount: 1 },
-  { name: "panCard", maxCount: 1 },
-  { name: "gstCertificate", maxCount: 1 },
-  { name: "shopActLicense", maxCount: 1 },
-  { name: "fssaiLicense", maxCount: 1 },
-  { name: "electricityBill", maxCount: 1 },
-  { name: "rentAgreement", maxCount: 1 },
-]);
-
-// Wrapper middleware that makes multer optional for JSON requests
-exports.uploadAllDocs = (req, res, next) => {
-  // Only use multer if content-type is multipart/form-data
-  if (req.is('multipart/form-data')) {
-    return multerAllDocs(req, res, next);
   }
   // For JSON requests, just pass through (files are optional)
   next();
@@ -108,11 +94,13 @@ exports.uploadAllDocs = (req, res, next) => {
 
 const generateToken = (id) => {
   const secret = process.env.JWT_SECRET;
-  if (!secret || secret === 'sarva-cafe-secret-key-2025') {
-    console.warn('[SECURITY] ⚠️ Using default JWT secret. Set JWT_SECRET in production!');
+  if (!secret || secret === "sarva-cafe-secret-key-2025") {
+    console.warn(
+      "[SECURITY] ⚠️ Using default JWT secret. Set JWT_SECRET in production!"
+    );
   }
-  return jwt.sign({ id }, secret || 'sarva-cafe-secret-key-2025', {
-    expiresIn: '30d',
+  return jwt.sign({ id }, secret || "sarva-cafe-secret-key-2025", {
+    expiresIn: "30d",
   });
 };
 
@@ -124,19 +112,23 @@ exports.loginUser = async (req, res) => {
 
     // Validate email and password are provided
     if (!email || !password) {
-      return res.status(400).json({ message: "Please provide email and password" });
+      return res
+        .status(400)
+        .json({ message: "Please provide email and password" });
     }
 
     // Find user by email (case-insensitive)
     const normalizedEmail = email.toLowerCase().trim();
     let user = await User.findOne({ email: normalizedEmail });
-    
+
     // Check if this is a mobile app login
-    const isMobileLogin = req.headers['x-app-login'] === 'mobile';
-    
+    const isMobileLogin = req.headers["x-app-login"] === "mobile";
+
     // For mobile app login, also check Employee model if User not found
     if (isMobileLogin && !user) {
-      const employee = await Employee.findOne({ email: normalizedEmail }).lean();
+      const employee = await Employee.findOne({
+        email: normalizedEmail,
+      }).lean();
       if (employee) {
         // If employee has a userId, get the User account
         if (employee.userId) {
@@ -144,108 +136,126 @@ exports.loginUser = async (req, res) => {
         }
       }
     }
-    
+
     // Use generic error message to prevent user enumeration
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
     const isMatch = await user.matchPassword(password);
-    
+
     if (!isMatch) {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
     // For mobile app login, handle employee roles
     if (isMobileLogin) {
-      const allowedMobileRoles = ['waiter', 'cook', 'captain', 'manager'];
+      const allowedMobileRoles = ["waiter", "cook", "captain", "manager"];
       let actualRole = user.role;
       let cafeId = null;
       let franchiseId = null;
-      
+
       // For all mobile users, look up Employee record to get cafeId
       // Employee model uses email to link to User (no userId field)
-      const employee = await Employee.findOne({ 
-        email: normalizedEmail
+      const employee = await Employee.findOne({
+        email: normalizedEmail,
       }).lean();
-      
+
       if (employee) {
         // Check if employee is active
         if (employee.isActive === false) {
-          return res.status(403).json({ 
-            message: "Your account has been deactivated. Please contact your administrator." 
+          return res.status(403).json({
+            message:
+              "Your account has been deactivated. Please contact your administrator.",
           });
         }
-        
+
         // Use employee role if user role is "employee", otherwise use user role
-        if (user.role === 'employee' && allowedMobileRoles.includes(employee.employeeRole)) {
+        if (
+          user.role === "employee" &&
+          allowedMobileRoles.includes(employee.employeeRole)
+        ) {
           actualRole = employee.employeeRole;
         }
-        
+
         cafeId = employee.cafeId;
         franchiseId = employee.franchiseId;
-        
+
         // Ensure bidirectional linking: userId in Employee, cafeId/employeeId in User
         const updatePromises = [];
-        
+
         // Link userId in Employee if missing
-        if (!employee.userId || employee.userId.toString() !== user._id.toString()) {
+        if (
+          !employee.userId ||
+          employee.userId.toString() !== user._id.toString()
+        ) {
           employee.userId = user._id;
-          updatePromises.push(Employee.findByIdAndUpdate(employee._id, { userId: user._id }));
+          updatePromises.push(
+            Employee.findByIdAndUpdate(employee._id, { userId: user._id })
+          );
         }
-        
+
         // Update User with cafeId and employeeId if missing
         if (!user.cafeId || user.cafeId.toString() !== cafeId?.toString()) {
-          updatePromises.push(User.findByIdAndUpdate(user._id, { 
-            cafeId: cafeId,
-            employeeId: employee._id,
-            franchiseId: franchiseId || user.franchiseId
-          }));
+          updatePromises.push(
+            User.findByIdAndUpdate(user._id, {
+              cafeId: cafeId,
+              employeeId: employee._id,
+              franchiseId: franchiseId || user.franchiseId,
+            })
+          );
           user.cafeId = cafeId;
           user.employeeId = employee._id;
-        } else if (!user.employeeId || user.employeeId.toString() !== employee._id.toString()) {
-          updatePromises.push(User.findByIdAndUpdate(user._id, { employeeId: employee._id }));
+        } else if (
+          !user.employeeId ||
+          user.employeeId.toString() !== employee._id.toString()
+        ) {
+          updatePromises.push(
+            User.findByIdAndUpdate(user._id, { employeeId: employee._id })
+          );
           user.employeeId = employee._id;
         }
-        
+
         // Execute updates
         if (updatePromises.length > 0) {
           await Promise.all(updatePromises);
-          console.log('[LOGIN] Updated Employee-User linking');
+          console.log("[LOGIN] Updated Employee-User linking");
         }
-        
-        console.log('[LOGIN] Mobile user employee found:', {
+
+        console.log("[LOGIN] Mobile user employee found:", {
           userId: user._id,
           email: normalizedEmail,
           employeeId: employee._id,
           employeeRole: employee.employeeRole,
           actualRole: actualRole,
           cafeId: cafeId,
-          franchiseId: franchiseId
+          franchiseId: franchiseId,
         });
       } else {
-        console.log('[LOGIN] No employee record found for mobile user:', {
+        console.log("[LOGIN] No employee record found for mobile user:", {
           userId: user._id,
           email: normalizedEmail,
-          userRole: user.role
+          userRole: user.role,
         });
       }
-      
+
       // Check if role is one of the allowed mobile roles
       if (allowedMobileRoles.includes(actualRole)) {
         // Ensure we have cafeId from employee record
         if (!cafeId) {
-          return res.status(403).json({ 
-            message: "No cafe associated with this account. Please contact your administrator." 
+          return res.status(403).json({
+            message:
+              "No cafe associated with this account. Please contact your administrator.",
           });
         }
         // Check if user is active
         if (user.isActive === false) {
-          return res.status(403).json({ 
-            message: "Your account has been deactivated. Please contact your administrator." 
+          return res.status(403).json({
+            message:
+              "Your account has been deactivated. Please contact your administrator.",
           });
         }
-        
+
         // Create token and send response for mobile users
         const token = generateToken(user._id);
         return res.json({
@@ -264,15 +274,16 @@ exports.loginUser = async (req, res) => {
           },
         });
       }
-      
+
       // If not an allowed role, deny access
-      return res.status(403).json({ 
-        message: "Access denied. Mobile app login is only available for waiter, cook, captain, and manager roles." 
+      return res.status(403).json({
+        message:
+          "Access denied. Mobile app login is only available for waiter, cook, captain, and manager roles.",
       });
     }
 
     // For web/admin login, only allow admin roles
-    if (user.role !== 'admin') {
+    if (user.role !== "admin") {
       return res.status(403).json({ message: "Access denied. Admin only." });
     }
 
@@ -286,7 +297,7 @@ exports.loginUser = async (req, res) => {
       token: token,
     });
   } catch (error) {
-    console.error('[LOGIN] Error:', error.message);
+    console.error("[LOGIN] Error:", error.message);
     res.status(500).json({ message: "Server error during login" });
   }
 };
@@ -296,49 +307,61 @@ exports.loginUser = async (req, res) => {
 exports.getCartStatistics = async (req, res) => {
   try {
     let query = { role: "admin" };
-    
+
     // Franchise admin: only see carts under their franchise
     if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
     }
     // Super admin: see all carts (no franchiseId filter)
-    
-    const allCarts = await User.find(query).select('-password').lean();
-    
+
+    const allCarts = await User.find(query).select("-password").lean();
+
     // Calculate statistics
     const totalCarts = allCarts.length;
-    const activeCarts = allCarts.filter(cart => cart.isActive !== false && cart.isApproved === true).length;
-    const inactiveCarts = allCarts.filter(cart => cart.isActive === false || cart.isApproved === false).length;
-    const pendingApproval = allCarts.filter(cart => cart.isApproved === false).length;
-    
+    const activeCarts = allCarts.filter(
+      (cart) => cart.isActive !== false && cart.isApproved === true
+    ).length;
+    const inactiveCarts = allCarts.filter(
+      (cart) => cart.isActive === false || cart.isApproved === false
+    ).length;
+    const pendingApproval = allCarts.filter(
+      (cart) => cart.isApproved === false
+    ).length;
+
     // For super admin, also group by franchise
     let franchiseStats = null;
     if (req.user && req.user.role === "super_admin") {
-      const franchises = await User.find({ role: "franchise_admin" }).select('_id name isActive').lean();
-      
-      franchiseStats = franchises.map(franchise => {
-        const franchiseCarts = allCarts.filter(cart => 
-          cart.franchiseId && cart.franchiseId.toString() === franchise._id.toString()
+      const franchises = await User.find({ role: "franchise_admin" })
+        .select("_id name isActive")
+        .lean();
+
+      franchiseStats = franchises.map((franchise) => {
+        const franchiseCarts = allCarts.filter(
+          (cart) =>
+            cart.franchiseId &&
+            cart.franchiseId.toString() === franchise._id.toString()
         );
-        
+
         // Cart is only active if: cart is approved, cart isActive is true, AND franchise is active
-        const activeCartsCount = franchiseCarts.filter(c => 
-          c.isActive !== false && 
-          c.isApproved === true && 
-          franchise.isActive !== false
+        const activeCartsCount = franchiseCarts.filter(
+          (c) =>
+            c.isActive !== false &&
+            c.isApproved === true &&
+            franchise.isActive !== false
         ).length;
-        
+
         return {
           franchiseId: franchise._id,
           franchiseName: franchise.name,
           totalCarts: franchiseCarts.length,
           activeCarts: activeCartsCount,
           inactiveCarts: franchiseCarts.length - activeCartsCount,
-          pendingApproval: franchiseCarts.filter(c => c.isApproved === false).length,
+          pendingApproval: franchiseCarts.filter((c) => c.isApproved === false)
+            .length,
         };
       });
     }
-    
+
     res.json({
       totalCarts,
       activeCarts,
@@ -356,7 +379,7 @@ exports.getCartStatistics = async (req, res) => {
 exports.getUsers = async (req, res) => {
   try {
     const query = {};
-    
+
     // Filter users based on admin role:
     // - Cafe admin: only see themselves (not applicable here, but for consistency)
     // - Franchise admin: only see cafe admins under their franchise
@@ -370,42 +393,45 @@ exports.getUsers = async (req, res) => {
       query._id = req.user._id;
     }
     // For super_admin, no filter (see all users)
-    
-    const users = await User.find(query).select('-password').lean();
-    
+
+    const users = await User.find(query).select("-password").lean();
+
     // Add signed URLs for documents
-    const usersWithSignedUrls = users.map(user => addSignedUrlsToUser(user));
-    
+    const usersWithSignedUrls = users.map((user) => addSignedUrlsToUser(user));
+
     // For super admin, add effective status for cart admins based on their franchise status
     if (req.user && req.user.role === "super_admin") {
       // Get all franchise statuses
-      const franchises = await User.find({ role: "franchise_admin" }).select('_id isActive').lean();
+      const franchises = await User.find({ role: "franchise_admin" })
+        .select("_id isActive")
+        .lean();
       const franchiseStatusMap = {};
-      franchises.forEach(f => {
+      franchises.forEach((f) => {
         franchiseStatusMap[f._id.toString()] = f.isActive !== false;
       });
-      
+
       // Add effectiveStatus and franchiseActive fields to each user
-      const usersWithStatus = usersWithSignedUrls.map(user => {
+      const usersWithStatus = usersWithSignedUrls.map((user) => {
         if (user.role === "admin" && user.franchiseId) {
-          const franchiseActive = franchiseStatusMap[user.franchiseId.toString()];
+          const franchiseActive =
+            franchiseStatusMap[user.franchiseId.toString()];
           // Cart is only effectively active if BOTH cart AND franchise are active
-          const effectivelyActive = (user.isActive !== false) && franchiseActive;
+          const effectivelyActive = user.isActive !== false && franchiseActive;
           return {
             ...user,
             franchiseActive: franchiseActive,
-            effectivelyActive: effectivelyActive
+            effectivelyActive: effectivelyActive,
           };
         }
         return {
           ...user,
-          effectivelyActive: user.isActive !== false
+          effectivelyActive: user.isActive !== false,
         };
       });
-      
+
       return res.json(usersWithStatus);
     }
-    
+
     res.json(usersWithSignedUrls);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -420,19 +446,33 @@ exports.createUser = async (req, res) => {
 
     // Validate required fields
     if (!name || !email || !password || !role) {
-      return res.status(400).json({ message: "Please provide name, email, password, and role" });
+      return res
+        .status(400)
+        .json({ message: "Please provide name, email, password, and role" });
     }
 
     // Check if email already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
+    const existingUser = await User.findOne({
+      email: email.toLowerCase().trim(),
+    });
     if (existingUser) {
       return res.status(400).json({ message: "Email already registered" });
     }
 
-    // Validate role - must match user model enum
-    const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"];
+    // Validate role
+    const validRoles = [
+      "super_admin",
+      "franchise_admin",
+      "admin",
+      "employee",
+      "customer",
+    ];
     if (!validRoles.includes(role)) {
-      return res.status(400).json({ message: `Invalid role. Must be one of: ${validRoles.join(", ")}` });
+      return res
+        .status(400)
+        .json({
+          message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
+        });
     }
 
     // Handle file uploads for franchise admin
@@ -450,75 +490,101 @@ exports.createUser = async (req, res) => {
       }
     }
 
-    const userData = { 
-      name, 
-      email: email.toLowerCase().trim(), 
-      password, 
-      role 
+    const userData = {
+      name,
+      email: email.toLowerCase().trim(),
+      password,
+      role,
     };
 
     // Add franchise admin specific fields
     if (role === "franchise_admin") {
       if (mobile) userData.mobile = mobile;
       if (gstNumber) userData.gstNumber = gstNumber;
-      if (filePaths.udyamCertificate) userData.udyamCertificate = filePaths.udyamCertificate;
+      if (filePaths.udyamCertificate)
+        userData.udyamCertificate = filePaths.udyamCertificate;
       if (filePaths.aadharCard) userData.aadharCard = filePaths.aadharCard;
       if (filePaths.panCard) userData.panCard = filePaths.panCard;
-      
+
       // Generate unique Franchise Code (e.g., MAH001, ABC002) - REQUIRED
       // This is mandatory for all new franchises
       const franchiseCodeData = await generateFranchiseCode(name);
       if (!franchiseCodeData || !franchiseCodeData.franchiseCode) {
-        return res.status(500).json({ message: "Failed to generate franchise code. Please try again." });
+        return res
+          .status(500)
+          .json({
+            message: "Failed to generate franchise code. Please try again.",
+          });
       }
       userData.franchiseShortcut = franchiseCodeData.franchiseShortcut;
       userData.franchiseSequence = franchiseCodeData.franchiseSequence;
       userData.franchiseCode = franchiseCodeData.franchiseCode;
-      console.log(`[FRANCHISE CODE] ✅ Generated: ${franchiseCodeData.franchiseCode} for "${name}"`);
+      console.log(
+        `[FRANCHISE CODE] ✅ Generated: ${franchiseCodeData.franchiseCode} for "${name}"`
+      );
     }
 
     const user = await User.create(userData);
-    
+
     // CRITICAL: When a new franchise is created, automatically clone the global default menu
     // This gives the franchise its own default menu template (independent from global)
     // The franchise admin can then customize this menu, and it will be used for all carts
     if (role === "franchise_admin") {
       try {
         console.log(`[DEFAULT MENU] ========================================`);
-        console.log(`[DEFAULT MENU] 🆕 NEW FRANCHISE CREATED: ${user.name} (ID: ${user._id})`);
-        console.log(`[DEFAULT MENU] Automatically cloning global default menu to franchise...`);
-        
-        const { cloneGlobalDefaultMenuToFranchise } = require("../utils/cloneDefaultMenuToFranchise");
+        console.log(
+          `[DEFAULT MENU] 🆕 NEW FRANCHISE CREATED: ${user.name} (ID: ${user._id})`
+        );
+        console.log(
+          `[DEFAULT MENU] Automatically cloning global default menu to franchise...`
+        );
+
+        const {
+          cloneGlobalDefaultMenuToFranchise,
+        } = require("../utils/cloneDefaultMenuToFranchise");
         const result = await cloneGlobalDefaultMenuToFranchise(user._id);
-        
+
         if (result.success) {
-          console.log(`[DEFAULT MENU] ✅ Successfully cloned global menu to franchise ${user.name}`);
-          console.log(`[DEFAULT MENU] Franchise now has ${result.categoryCount} categories with ${result.itemCount} items`);
-          console.log(`[DEFAULT MENU] Franchise can now customize this menu, and all carts will use it`);
+          console.log(
+            `[DEFAULT MENU] ✅ Successfully cloned global menu to franchise ${user.name}`
+          );
+          console.log(
+            `[DEFAULT MENU] Franchise now has ${result.categoryCount} categories with ${result.itemCount} items`
+          );
+          console.log(
+            `[DEFAULT MENU] Franchise can now customize this menu, and all carts will use it`
+          );
         } else {
           console.warn(`[DEFAULT MENU] ⚠️ ${result.message}`);
           if (result.message.includes("No global default menu")) {
-            console.warn(`[DEFAULT MENU] Super admin must create a global default menu first.`);
-            console.warn(`[DEFAULT MENU] Once created, franchise can customize their menu.`);
+            console.warn(
+              `[DEFAULT MENU] Super admin must create a global default menu first.`
+            );
+            console.warn(
+              `[DEFAULT MENU] Once created, franchise can customize their menu.`
+            );
           }
         }
         console.log(`[DEFAULT MENU] ========================================`);
       } catch (err) {
-        console.error("[DEFAULT MENU] ❌ Failed to clone menu to franchise:", err);
+        console.error(
+          "[DEFAULT MENU] ❌ Failed to clone menu to franchise:",
+          err
+        );
         console.error("[DEFAULT MENU] Error details:", err.message);
         // Don't fail user creation if menu clone fails - franchise can create menu manually later
       }
     }
-    
+
     // Don't send password in response
     const userResponse = user.toObject();
     delete userResponse.password;
-    
+
     res.status(201).json(userResponse);
   } catch (error) {
     // Clean up uploaded files if user creation fails
     if (req.files) {
-      Object.values(req.files).forEach(fileArray => {
+      Object.values(req.files).forEach((fileArray) => {
         if (fileArray && fileArray[0]) {
           const filePath = path.join(franchiseDocsDir, fileArray[0].filename);
           if (fs.existsSync(filePath)) {
@@ -535,17 +601,21 @@ exports.createUser = async (req, res) => {
 // @route   POST /api/users/register-cafe-admin
 exports.registerCafeAdmin = async (req, res) => {
   try {
-    const { name, email, password, cartName, location, phone, address } = req.body;
+    const { name, email, password, cartName, location, phone, address } =
+      req.body;
 
     // Validate required fields
     if (!name || !email || !password || !cartName || !location) {
-      return res.status(400).json({ 
-        message: "Please provide name, email, password, cafe name, and location" 
+      return res.status(400).json({
+        message:
+          "Please provide name, email, password, cafe name, and location",
       });
     }
 
     // Check if email already exists
-    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
+    const existingUser = await User.findOne({
+      email: email.toLowerCase().trim(),
+    });
     if (existingUser) {
       return res.status(400).json({ message: "Email already registered" });
     }
@@ -564,7 +634,9 @@ exports.registerCafeAdmin = async (req, res) => {
       franchiseId = req.body.franchiseId;
     } else if (!req.user) {
       // Public signup requires franchiseId
-      return res.status(400).json({ message: "Franchise ID is required for registration" });
+      return res
+        .status(400)
+        .json({ message: "Franchise ID is required for registration" });
     }
 
     // Handle file uploads for cafe admin documents
@@ -595,11 +667,8 @@ exports.registerCafeAdmin = async (req, res) => {
     }
 
     // Parse expiry dates from request body (only for documents that can expire)
-    const {
-      gstCertificateExpiry,
-      shopActLicenseExpiry,
-      fssaiLicenseExpiry,
-    } = req.body;
+    const { gstCertificateExpiry, shopActLicenseExpiry, fssaiLicenseExpiry } =
+      req.body;
 
     // Create cafe admin user (not approved yet)
     const userData = {
@@ -619,26 +688,37 @@ exports.registerCafeAdmin = async (req, res) => {
     if (franchiseId) {
       const cartCodeData = await generateCartCode(franchiseId);
       if (!cartCodeData || !cartCodeData.cartCode) {
-        return res.status(500).json({ message: "Failed to generate cart code. Please try again." });
+        return res
+          .status(500)
+          .json({ message: "Failed to generate cart code. Please try again." });
       }
       userData.cartSequence = cartCodeData.cartSequence;
       userData.cartCode = cartCodeData.cartCode;
-      console.log(`[CART CODE] ✅ Generated: ${cartCodeData.cartCode} for cart "${cartName}"`);
+      console.log(
+        `[CART CODE] ✅ Generated: ${cartCodeData.cartCode} for cart "${cartName}"`
+      );
     }
 
     // Add document file paths if uploaded
     if (filePaths.aadharCard) userData.aadharCard = filePaths.aadharCard;
     if (filePaths.panCard) userData.panCard = filePaths.panCard;
-    if (filePaths.gstCertificate) userData.gstCertificate = filePaths.gstCertificate;
-    if (filePaths.shopActLicense) userData.shopActLicense = filePaths.shopActLicense;
+    if (filePaths.gstCertificate)
+      userData.gstCertificate = filePaths.gstCertificate;
+    if (filePaths.shopActLicense)
+      userData.shopActLicense = filePaths.shopActLicense;
     if (filePaths.fssaiLicense) userData.fssaiLicense = filePaths.fssaiLicense;
-    if (filePaths.electricityBill) userData.electricityBill = filePaths.electricityBill;
-    if (filePaths.rentAgreement) userData.rentAgreement = filePaths.rentAgreement;
+    if (filePaths.electricityBill)
+      userData.electricityBill = filePaths.electricityBill;
+    if (filePaths.rentAgreement)
+      userData.rentAgreement = filePaths.rentAgreement;
 
     // Add document expiry dates if provided (only for documents that can expire)
-    if (gstCertificateExpiry) userData.gstCertificateExpiry = new Date(gstCertificateExpiry);
-    if (shopActLicenseExpiry) userData.shopActLicenseExpiry = new Date(shopActLicenseExpiry);
-    if (fssaiLicenseExpiry) userData.fssaiLicenseExpiry = new Date(fssaiLicenseExpiry);
+    if (gstCertificateExpiry)
+      userData.gstCertificateExpiry = new Date(gstCertificateExpiry);
+    if (shopActLicenseExpiry)
+      userData.shopActLicenseExpiry = new Date(shopActLicenseExpiry);
+    if (fssaiLicenseExpiry)
+      userData.fssaiLicenseExpiry = new Date(fssaiLicenseExpiry);
 
     const user = await User.create(userData);
 
@@ -646,12 +726,16 @@ exports.registerCafeAdmin = async (req, res) => {
     // This ensures the cart starts fresh with no orders, tables, or dashboard data
     try {
       const { initializeNewCart } = require("../utils/initializeNewCart");
-      const cartFranchiseId = user.franchiseId ? user.franchiseId.toString() : null;
-      
+      const cartFranchiseId = user.franchiseId
+        ? user.franchiseId.toString()
+        : null;
+
       if (cartFranchiseId) {
         await initializeNewCart(user._id, cartFranchiseId);
       } else {
-        console.warn(`[CART INIT] ⚠️ No franchiseId for cart ${user.cartName} - skipping initialization`);
+        console.warn(
+          `[CART INIT] ⚠️ No franchiseId for cart ${user.cartName} - skipping initialization`
+        );
       }
     } catch (err) {
       console.error("[CART INIT] ❌ Failed to initialize new cart:", err);
@@ -665,37 +749,75 @@ exports.registerCafeAdmin = async (req, res) => {
     try {
       const { pushDefaultMenuToCafe } = require("./defaultMenuController");
       // Use the saved user's franchiseId (which should be set from franchiseId variable)
-      const menuFranchiseId = user.franchiseId ? user.franchiseId.toString() : null;
-      
+      const menuFranchiseId = user.franchiseId
+        ? user.franchiseId.toString()
+        : null;
+
       console.log(`[DEFAULT MENU] ========================================`);
-      console.log(`[DEFAULT MENU] 🆕 NEW CART CREATED: ${user.cartName} (ID: ${user._id})`);
+      console.log(
+        `[DEFAULT MENU] 🆕 NEW CART CREATED: ${user.cartName} (ID: ${user._id})`
+      );
       console.log(`[DEFAULT MENU] Franchise ID: ${menuFranchiseId}`);
-      console.log(`[DEFAULT MENU] Logic: Cart belongs to franchise → Cart gets franchise's UNIQUE menu`);
-      console.log(`[DEFAULT MENU] IMPORTANT: Only menu STRUCTURE is copied (configuration), NOT operational data`);
-      
+      console.log(
+        `[DEFAULT MENU] Logic: Cart belongs to franchise → Cart gets franchise's UNIQUE menu`
+      );
+      console.log(
+        `[DEFAULT MENU] IMPORTANT: Only menu STRUCTURE is copied (configuration), NOT operational data`
+      );
+
       if (!menuFranchiseId) {
-        console.error(`[DEFAULT MENU] ❌ ERROR: No franchiseId for cart ${user.cartName}. Cart must belong to a franchise to get menu.`);
-        console.error(`[DEFAULT MENU] Cart data: franchiseId=${user.franchiseId}, role=${user.role}, cartName=${user.cartName}`);
+        console.error(
+          `[DEFAULT MENU] ❌ ERROR: No franchiseId for cart ${user.cartName}. Cart must belong to a franchise to get menu.`
+        );
+        console.error(
+          `[DEFAULT MENU] Cart data: franchiseId=${user.franchiseId}, role=${user.role}, cartName=${user.cartName}`
+        );
       } else {
         // CRITICAL: Get franchise's UNIQUE menu and sync EXACTLY that to the cart
         // This ensures cart gets exactly what franchise admin defined
-        console.log(`[DEFAULT MENU] 🔄 Syncing franchise ${menuFranchiseId}'s UNIQUE menu to NEW cart ${user.cartName}`);
-        console.log(`[DEFAULT MENU] Cart will get EXACTLY what franchise admin defined in their default menu`);
-        console.log(`[DEFAULT MENU] This is a clean sync - all old menu data will be deleted first`);
-        console.log(`[DEFAULT MENU] Operational data (orders, tables, dashboard) remains EMPTY - not copied`);
-        
-        const result = await pushDefaultMenuToCafe(user._id, menuFranchiseId, true); // true = replace mode (clean sync)
-        
+        console.log(
+          `[DEFAULT MENU] 🔄 Syncing franchise ${menuFranchiseId}'s UNIQUE menu to NEW cart ${user.cartName}`
+        );
+        console.log(
+          `[DEFAULT MENU] Cart will get EXACTLY what franchise admin defined in their default menu`
+        );
+        console.log(
+          `[DEFAULT MENU] This is a clean sync - all old menu data will be deleted first`
+        );
+        console.log(
+          `[DEFAULT MENU] Operational data (orders, tables, dashboard) remains EMPTY - not copied`
+        );
+
+        const result = await pushDefaultMenuToCafe(
+          user._id,
+          menuFranchiseId,
+          true
+        ); // true = replace mode (clean sync)
+
         if (result.success) {
-          console.log(`[DEFAULT MENU] ✅ Cart ${user.cartName} now has franchise ${menuFranchiseId}'s EXACT menu`);
-          console.log(`[DEFAULT MENU] Created: ${result.categoriesCreated} categories, ${result.itemsCreated} items`);
-          console.log(`[DEFAULT MENU] Final: ${result.finalCategoryCount} categories, ${result.finalItemCount} items`);
+          console.log(
+            `[DEFAULT MENU] ✅ Cart ${user.cartName} now has franchise ${menuFranchiseId}'s EXACT menu`
+          );
+          console.log(
+            `[DEFAULT MENU] Created: ${result.categoriesCreated} categories, ${result.itemsCreated} items`
+          );
+          console.log(
+            `[DEFAULT MENU] Final: ${result.finalCategoryCount} categories, ${result.finalItemCount} items`
+          );
           console.log(`[DEFAULT MENU] Cart menu matches franchise menu: ✅`);
-          console.log(`[DEFAULT MENU] Cart operational data (orders, tables, etc.) remains EMPTY: ✅`);
+          console.log(
+            `[DEFAULT MENU] Cart operational data (orders, tables, etc.) remains EMPTY: ✅`
+          );
         } else {
-          console.warn(`[DEFAULT MENU] ⚠️ Push to cart ${user.cartName} returned: ${result.message}`);
-          console.warn(`[DEFAULT MENU] Franchise ${menuFranchiseId} may not have a default menu created yet.`);
-          console.warn(`[DEFAULT MENU] Franchise admin should create a default menu first.`);
+          console.warn(
+            `[DEFAULT MENU] ⚠️ Push to cart ${user.cartName} returned: ${result.message}`
+          );
+          console.warn(
+            `[DEFAULT MENU] Franchise ${menuFranchiseId} may not have a default menu created yet.`
+          );
+          console.warn(
+            `[DEFAULT MENU] Franchise admin should create a default menu first.`
+          );
           // If push failed because menu is empty, that's okay - menu will sync when cart admin opens it
         }
       }
@@ -711,13 +833,14 @@ exports.registerCafeAdmin = async (req, res) => {
     delete userResponse.password;
 
     res.status(201).json({
-      message: "Cafe admin registration successful. Waiting for franchise admin approval.",
+      message:
+        "Cafe admin registration successful. Waiting for franchise admin approval.",
       user: userResponse,
     });
   } catch (error) {
     // Clean up uploaded files if user creation fails
     if (req.files) {
-      Object.values(req.files).forEach(fileArray => {
+      Object.values(req.files).forEach((fileArray) => {
         if (fileArray && fileArray[0]) {
           const filePath = path.join(franchiseDocsDir, fileArray[0].filename);
           if (fs.existsSync(filePath)) {
@@ -747,7 +870,9 @@ exports.approveCafeAdmin = async (req, res) => {
     }
 
     if (user.isApproved) {
-      return res.status(400).json({ message: "Cafe admin is already approved" });
+      return res
+        .status(400)
+        .json({ message: "Cafe admin is already approved" });
     }
 
     user.isApproved = true;
@@ -764,22 +889,42 @@ exports.approveCafeAdmin = async (req, res) => {
     try {
       const { pushDefaultMenuToCafe } = require("./defaultMenuController");
       // Ensure we use the franchiseId from the saved user object
-      const menuFranchiseId = user.franchiseId ? user.franchiseId.toString() : null;
-      
+      const menuFranchiseId = user.franchiseId
+        ? user.franchiseId.toString()
+        : null;
+
       if (!menuFranchiseId) {
-        console.error(`[DEFAULT MENU] ERROR: Approved cafe ${user.cartName} has no franchiseId. Cannot sync menu.`);
+        console.error(
+          `[DEFAULT MENU] ERROR: Approved cafe ${user.cartName} has no franchiseId. Cannot sync menu.`
+        );
       } else {
-        console.log(`[DEFAULT MENU] 🔄 Syncing menu to approved cafe ${user.cartName} (ID: ${user._id})`);
-        console.log(`[DEFAULT MENU] Using franchise menu: ${menuFranchiseId}, replaceMode: true (clean sync)`);
-        
+        console.log(
+          `[DEFAULT MENU] 🔄 Syncing menu to approved cafe ${user.cartName} (ID: ${user._id})`
+        );
+        console.log(
+          `[DEFAULT MENU] Using franchise menu: ${menuFranchiseId}, replaceMode: true (clean sync)`
+        );
+
         // CRITICAL: Always use replaceMode: true to prevent duplicates and ensure clean menu
-        const result = await pushDefaultMenuToCafe(user._id, menuFranchiseId, true);
+        const result = await pushDefaultMenuToCafe(
+          user._id,
+          menuFranchiseId,
+          true
+        );
         if (result.success) {
-          console.log(`[DEFAULT MENU] ✅ Successfully synced menu to approved cafe ${user.cartName}`);
-          console.log(`[DEFAULT MENU] Created: ${result.categoriesCreated} categories, ${result.itemsCreated} items`);
-          console.log(`[DEFAULT MENU] Final: ${result.finalCategoryCount} categories, ${result.finalItemCount} items`);
+          console.log(
+            `[DEFAULT MENU] ✅ Successfully synced menu to approved cafe ${user.cartName}`
+          );
+          console.log(
+            `[DEFAULT MENU] Created: ${result.categoriesCreated} categories, ${result.itemsCreated} items`
+          );
+          console.log(
+            `[DEFAULT MENU] Final: ${result.finalCategoryCount} categories, ${result.finalItemCount} items`
+          );
         } else {
-          console.warn(`[DEFAULT MENU] ⚠️ Push to approved cafe ${user.cartName} returned: ${result.message}`);
+          console.warn(
+            `[DEFAULT MENU] ⚠️ Push to approved cafe ${user.cartName} returned: ${result.message}`
+          );
         }
       }
     } catch (err) {
@@ -845,15 +990,25 @@ exports.toggleCafeStatus = async (req, res) => {
     // For super admin: allow toggling any cart
     if (userRole === "franchise_admin") {
       if (user.franchiseId?.toString() !== userId.toString()) {
-        return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. This cafe does not belong to your franchise.",
+          });
       }
-      
+
       // For franchise admin: check if cafe is approved first
       if (!user.isApproved) {
-        return res.status(400).json({ message: "Cannot activate/deactivate an unapproved cafe. Please approve the cafe first." });
+        return res
+          .status(400)
+          .json({
+            message:
+              "Cannot activate/deactivate an unapproved cafe. Please approve the cafe first.",
+          });
       }
     }
-    
+
     // Super admin can toggle any cart, even if not approved
     // If cart is not approved and super admin is toggling, approve it first
     const wasNotApproved = !user.isApproved;
@@ -865,26 +1020,37 @@ exports.toggleCafeStatus = async (req, res) => {
 
     // Toggle isActive status (default to true if not set)
     const oldStatus = user.isActive !== false; // Treat undefined/null as true
-    
+
     // Check if trying to activate: prevent activation if franchise is inactive
     if (!oldStatus && user.franchiseId) {
-      const franchise = await User.findById(user.franchiseId).select('isActive role');
-      if (franchise && franchise.role === "franchise_admin" && franchise.isActive === false) {
-        return res.status(400).json({ 
-          message: "Cannot activate cart. The franchise is currently deactivated. Please activate the franchise first." 
+      const franchise = await User.findById(user.franchiseId).select(
+        "isActive role"
+      );
+      if (
+        franchise &&
+        franchise.role === "franchise_admin" &&
+        franchise.isActive === false
+      ) {
+        return res.status(400).json({
+          message:
+            "Cannot activate cart. The franchise is currently deactivated. Please activate the franchise first.",
         });
       }
     }
-    
+
     user.isActive = !oldStatus;
     await user.save();
 
     const userResponse = user.toObject();
     delete userResponse.password;
 
-    let message = `Cafe ${user.isActive ? 'activated' : 'deactivated'} successfully`;
+    let message = `Cafe ${
+      user.isActive ? "activated" : "deactivated"
+    } successfully`;
     if (userRole === "super_admin" && wasNotApproved) {
-      message = `Cafe approved and ${user.isActive ? 'activated' : 'deactivated'} successfully`;
+      message = `Cafe approved and ${
+        user.isActive ? "activated" : "deactivated"
+      } successfully`;
     }
 
     res.json({
@@ -893,7 +1059,7 @@ exports.toggleCafeStatus = async (req, res) => {
       user: userResponse,
     });
   } catch (error) {
-    console.error('[TOGGLE CAFE] Error:', error);
+    console.error("[TOGGLE CAFE] Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -922,7 +1088,7 @@ exports.getMe = async (req, res) => {
       isActive: user.isActive,
     };
 
-    if (user.role === 'employee') {
+    if (user.role === "employee") {
       const employee = await Employee.findOne({ userId: user._id }).lean();
       if (employee) {
         userResponse.role = employee.employeeRole; // waiter, cook, captain, manager
@@ -936,7 +1102,7 @@ exports.getMe = async (req, res) => {
       user: userResponse,
     });
   } catch (error) {
-    console.error('[GET_ME] Error:', error.message);
+    console.error("[GET_ME] Error:", error.message);
     res.status(500).json({ message: "Server error" });
   }
 };
@@ -952,19 +1118,25 @@ exports.logoutUser = async (req, res) => {
       message: "Logged out successfully",
     });
   } catch (error) {
-    console.error('[LOGOUT] Error:', error.message);
+    console.error("[LOGOUT] Error:", error.message);
     res.status(500).json({ message: "Server error" });
   }
 };
 
 exports.getUserById = async (req, res) => {
   try {
-    const user = await User.findById(req.params.id).select('-password');
+    const user = await User.findById(req.params.id).select("-password");
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    console.log(`[GET_USER_BY_ID] Requested user ID: ${req.params.id}, Role: ${user.role}`);
-    console.log(`[GET_USER_BY_ID] Requesting user role: ${req.user.role}, ID: ${req.user._id}`);
-    console.log(`[GET_USER_BY_ID] Requested user address: ${user.address}, location: ${user.location}`);
+    console.log(
+      `[GET_USER_BY_ID] Requested user ID: ${req.params.id}, Role: ${user.role}`
+    );
+    console.log(
+      `[GET_USER_BY_ID] Requesting user role: ${req.user.role}, ID: ${req.user._id}`
+    );
+    console.log(
+      `[GET_USER_BY_ID] Requested user address: ${user.address}, location: ${user.location}`
+    );
 
     // Authorization checks:
     // - Super admin: can view any user
@@ -977,61 +1149,120 @@ exports.getUserById = async (req, res) => {
       // 2. Employee users (waiter, cook, captain, manager) that belong to their franchise
       if (user.role === "admin") {
         // For cafe admins, check franchise ownership
-        if (!user.franchiseId || user.franchiseId.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
+        if (
+          !user.franchiseId ||
+          user.franchiseId.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({
+              message:
+                "Access denied. This cafe does not belong to your franchise.",
+            });
         }
       } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
         // For employee users, check if they belong to this franchise
         // Check via employeeId -> Employee -> franchiseId
         if (user.employeeId) {
           const Employee = require("../models/employeeModel");
-          const employee = await Employee.findById(user.employeeId).select("franchiseId").lean();
-          if (!employee || !employee.franchiseId || employee.franchiseId.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+          const employee = await Employee.findById(user.employeeId)
+            .select("franchiseId")
+            .lean();
+          if (
+            !employee ||
+            !employee.franchiseId ||
+            employee.franchiseId.toString() !== req.user._id.toString()
+          ) {
+            return res
+              .status(403)
+              .json({
+                message:
+                  "Access denied. This employee does not belong to your franchise.",
+              });
           }
-        } else if (user.franchiseId && user.franchiseId.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+        } else if (
+          user.franchiseId &&
+          user.franchiseId.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({
+              message:
+                "Access denied. This employee does not belong to your franchise.",
+            });
         } else if (!user.franchiseId) {
           // If no franchiseId, deny access (employee must belong to a franchise)
-          return res.status(403).json({ message: "Access denied. This employee does not belong to your franchise." });
+          return res
+            .status(403)
+            .json({
+              message:
+                "Access denied. This employee does not belong to your franchise.",
+            });
         }
       } else {
         // For other roles, deny access
-        return res.status(403).json({ message: "Access denied. You can only view cafe admins and employees under your franchise." });
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. You can only view cafe admins and employees under your franchise.",
+          });
       }
     } else if (req.user.role === "admin") {
       // Cafe admin can view themselves OR their franchise admin (for invoice/billing purposes)
       const isSelf = user._id.toString() === req.user._id.toString();
-      const isFranchiseAdmin = user.role === "franchise_admin" && 
-                               req.user.franchiseId && 
-                               user._id.toString() === req.user.franchiseId.toString();
-      
+      const isFranchiseAdmin =
+        user.role === "franchise_admin" &&
+        req.user.franchiseId &&
+        user._id.toString() === req.user.franchiseId.toString();
+
       if (!isSelf && !isFranchiseAdmin) {
-        return res.status(403).json({ message: "Access denied. You can only view your own profile or your franchise admin's profile." });
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. You can only view your own profile or your franchise admin's profile.",
+          });
       }
-    } else if (["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+    } else if (
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       // Mobile app users can view their associated cart/cafe (the cart they work at)
-      const isAssociatedCart = user.role === "admin" && 
-                               req.user.cafeId && 
-                               user._id.toString() === req.user.cafeId.toString();
-      
+      const isAssociatedCart =
+        user.role === "admin" &&
+        req.user.cafeId &&
+        user._id.toString() === req.user.cafeId.toString();
+
       // Also allow viewing their own profile
       const isSelf = user._id.toString() === req.user._id.toString();
-      
+
       if (!isSelf && !isAssociatedCart) {
-        console.log(`[GET_USER_BY_ID] Access denied for mobile user. isSelf: ${isSelf}, isAssociatedCart: ${isAssociatedCart}`);
-        console.log(`[GET_USER_BY_ID] User cafeId: ${req.user.cafeId}, Requested user ID: ${user._id}`);
-        return res.status(403).json({ message: "Access denied. You can only view your own profile or your associated cart/cafe." });
+        console.log(
+          `[GET_USER_BY_ID] Access denied for mobile user. isSelf: ${isSelf}, isAssociatedCart: ${isAssociatedCart}`
+        );
+        console.log(
+          `[GET_USER_BY_ID] User cafeId: ${req.user.cafeId}, Requested user ID: ${user._id}`
+        );
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. You can only view your own profile or your associated cart/cafe.",
+          });
       }
-      
-      console.log(`[GET_USER_BY_ID] Access granted for mobile user to view cart/cafe`);
+
+      console.log(
+        `[GET_USER_BY_ID] Access granted for mobile user to view cart/cafe`
+      );
     }
     // Super admin can view anyone (no additional check needed)
 
     // Add signed URLs for documents
     const userWithSignedUrls = addSignedUrlsToUser(user);
 
-    console.log(`[GET_USER_BY_ID] Returning user data with address: ${userWithSignedUrls.address}, location: ${userWithSignedUrls.location}`);
+    console.log(
+      `[GET_USER_BY_ID] Returning user data with address: ${userWithSignedUrls.address}, location: ${userWithSignedUrls.location}`
+    );
     res.json(userWithSignedUrls);
   } catch (error) {
     console.error(`[GET_USER_BY_ID] Error: ${error.message}`);
@@ -1055,30 +1286,61 @@ exports.updateUser = async (req, res) => {
     if (req.user.role === "franchise_admin") {
       // Franchise admin can only update cafe admins (role: "admin") under their franchise
       if (user.role !== "admin") {
-        return res.status(403).json({ message: "Access denied. You can only update cafe admins under your franchise." });
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. You can only update cafe admins under your franchise.",
+          });
       }
-      if (!user.franchiseId || user.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Access denied. This cafe does not belong to your franchise." });
+      if (
+        !user.franchiseId ||
+        user.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({
+            message:
+              "Access denied. This cafe does not belong to your franchise.",
+          });
       }
       // Franchise admin cannot change role
       if (req.body.role !== undefined && req.body.role !== user.role) {
-        return res.status(403).json({ message: "Access denied. You cannot change user roles." });
+        return res
+          .status(403)
+          .json({ message: "Access denied. You cannot change user roles." });
       }
     } else if (req.user.role === "admin") {
       // Cafe admin can only update themselves
       if (user._id.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Access denied. You can only update your own profile." });
+        return res
+          .status(403)
+          .json({
+            message: "Access denied. You can only update your own profile.",
+          });
       }
       // Cafe admin cannot change role
       if (req.body.role !== undefined && req.body.role !== user.role) {
-        return res.status(403).json({ message: "Access denied. You cannot change your role." });
+        return res
+          .status(403)
+          .json({ message: "Access denied. You cannot change your role." });
       }
     }
     // Super admin can update anyone (no additional check needed)
 
     // Update fields - handle both JSON and FormData
-    const { name, email, password, role, cartName, location, phone, address, ...otherFields } = req.body;
-    
+    const {
+      name,
+      email,
+      password,
+      role,
+      cartName,
+      location,
+      phone,
+      address,
+      ...otherFields
+    } = req.body;
+
     if (name !== undefined) user.name = name;
     if (email !== undefined) user.email = email.toLowerCase().trim();
     if (password !== undefined && password.trim() !== "") {
@@ -1087,49 +1349,54 @@ exports.updateUser = async (req, res) => {
     }
     if (role !== undefined) {
       // Validate role (only super admin can change roles)
-      const validRoles = ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"];
+      const validRoles = [
+        "super_admin",
+        "franchise_admin",
+        "admin",
+        "employee",
+        "customer",
+      ];
       if (!validRoles.includes(role)) {
-        return res.status(400).json({ message: `Invalid role. Must be one of: ${validRoles.join(", ")}` });
+        return res
+          .status(400)
+          .json({
+            message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
+          });
       }
       // Only super admin can change roles (checked above)
       user.role = role;
     }
-    
+
     // Update other standard fields
     if (cartName !== undefined) user.cartName = cartName;
     if (location !== undefined) user.location = location;
     if (phone !== undefined) user.phone = phone;
     if (address !== undefined) user.address = address;
-    
-    // Handle file uploads for documents (both franchise admin and cafe admin)
+
+    // Handle file uploads for cafe admin documents
     let filePaths = {};
     if (req.files) {
       // Delete old files if new ones are being uploaded
       const fs = require("fs");
       const path = require("path");
-      const franchiseDocsDir = path.join(__dirname, "..", "uploads", "franchise-docs");
-      
-      // Process franchise admin documents (if user is franchise_admin)
-      if (user.role === "franchise_admin") {
-        if (req.files.udyamCertificate && req.files.udyamCertificate[0]) {
-          // Delete old file if exists
-          if (user.udyamCertificate) {
-            const oldFilePath = path.join(__dirname, "..", user.udyamCertificate);
-            if (fs.existsSync(oldFilePath)) {
-              try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old udyamCertificate:", err); }
-            }
-          }
-          filePaths.udyamCertificate = `/uploads/franchise-docs/${req.files.udyamCertificate[0].filename}`;
-        }
-      }
-      
-      // Process uploaded files (common for both franchise and cafe admin)
+      const franchiseDocsDir = path.join(
+        __dirname,
+        "..",
+        "uploads",
+        "franchise-docs"
+      );
+
+      // Process uploaded files
       if (req.files.aadharCard && req.files.aadharCard[0]) {
         // Delete old file if exists
         if (user.aadharCard) {
           const oldFilePath = path.join(__dirname, "..", user.aadharCard);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old aadharCard:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old aadharCard:", err);
+            }
           }
         }
         filePaths.aadharCard = `/uploads/franchise-docs/${req.files.aadharCard[0].filename}`;
@@ -1138,7 +1405,11 @@ exports.updateUser = async (req, res) => {
         if (user.panCard) {
           const oldFilePath = path.join(__dirname, "..", user.panCard);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old panCard:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old panCard:", err);
+            }
           }
         }
         filePaths.panCard = `/uploads/franchise-docs/${req.files.panCard[0].filename}`;
@@ -1147,7 +1418,11 @@ exports.updateUser = async (req, res) => {
         if (user.gstCertificate) {
           const oldFilePath = path.join(__dirname, "..", user.gstCertificate);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old gstCertificate:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old gstCertificate:", err);
+            }
           }
         }
         filePaths.gstCertificate = `/uploads/franchise-docs/${req.files.gstCertificate[0].filename}`;
@@ -1156,7 +1431,11 @@ exports.updateUser = async (req, res) => {
         if (user.shopActLicense) {
           const oldFilePath = path.join(__dirname, "..", user.shopActLicense);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old shopActLicense:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old shopActLicense:", err);
+            }
           }
         }
         filePaths.shopActLicense = `/uploads/franchise-docs/${req.files.shopActLicense[0].filename}`;
@@ -1165,7 +1444,11 @@ exports.updateUser = async (req, res) => {
         if (user.fssaiLicense) {
           const oldFilePath = path.join(__dirname, "..", user.fssaiLicense);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old fssaiLicense:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old fssaiLicense:", err);
+            }
           }
         }
         filePaths.fssaiLicense = `/uploads/franchise-docs/${req.files.fssaiLicense[0].filename}`;
@@ -1174,7 +1457,11 @@ exports.updateUser = async (req, res) => {
         if (user.electricityBill) {
           const oldFilePath = path.join(__dirname, "..", user.electricityBill);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old electricityBill:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old electricityBill:", err);
+            }
           }
         }
         filePaths.electricityBill = `/uploads/franchise-docs/${req.files.electricityBill[0].filename}`;
@@ -1183,7 +1470,11 @@ exports.updateUser = async (req, res) => {
         if (user.rentAgreement) {
           const oldFilePath = path.join(__dirname, "..", user.rentAgreement);
           if (fs.existsSync(oldFilePath)) {
-            try { fs.unlinkSync(oldFilePath); } catch (err) { console.error("Error deleting old rentAgreement:", err); }
+            try {
+              fs.unlinkSync(oldFilePath);
+            } catch (err) {
+              console.error("Error deleting old rentAgreement:", err);
+            }
           }
         }
         filePaths.rentAgreement = `/uploads/franchise-docs/${req.files.rentAgreement[0].filename}`;
@@ -1191,18 +1482,34 @@ exports.updateUser = async (req, res) => {
     }
 
     // Update other fields (cartName, location, phone, address, etc.)
-    Object.keys(otherFields).forEach(key => {
+    Object.keys(otherFields).forEach((key) => {
       if (otherFields[key] !== undefined) {
         // Prevent franchise admin from changing franchiseId
         if (key === "franchiseId" && req.user.role === "franchise_admin") {
           return; // Skip this field
         }
         // Skip document fields if they're coming from req.body (should come from req.files)
-        if (['udyamCertificate', 'aadharCard', 'panCard', 'gstCertificate', 'shopActLicense', 'fssaiLicense', 'electricityBill', 'rentAgreement'].includes(key)) {
+        if (
+          [
+            "aadharCard",
+            "panCard",
+            "gstCertificate",
+            "shopActLicense",
+            "fssaiLicense",
+            "electricityBill",
+            "rentAgreement",
+          ].includes(key)
+        ) {
           return; // Skip these - they're handled via file uploads
         }
         // Skip expiry date fields - they're handled separately (only for documents that can expire)
-        if (['udyamCertificateExpiry', 'aadharCardExpiry', 'panCardExpiry', 'gstCertificateExpiry', 'shopActLicenseExpiry', 'fssaiLicenseExpiry'].includes(key)) {
+        if (
+          [
+            "gstCertificateExpiry",
+            "shopActLicenseExpiry",
+            "fssaiLicenseExpiry",
+          ].includes(key)
+        ) {
           return; // Skip these - they're handled separately
         }
         user[key] = otherFields[key];
@@ -1210,44 +1517,36 @@ exports.updateUser = async (req, res) => {
     });
 
     // Update document file paths if new files were uploaded
-    if (filePaths.udyamCertificate) user.udyamCertificate = filePaths.udyamCertificate;
     if (filePaths.aadharCard) user.aadharCard = filePaths.aadharCard;
     if (filePaths.panCard) user.panCard = filePaths.panCard;
-    if (filePaths.gstCertificate) user.gstCertificate = filePaths.gstCertificate;
-    if (filePaths.shopActLicense) user.shopActLicense = filePaths.shopActLicense;
+    if (filePaths.gstCertificate)
+      user.gstCertificate = filePaths.gstCertificate;
+    if (filePaths.shopActLicense)
+      user.shopActLicense = filePaths.shopActLicense;
     if (filePaths.fssaiLicense) user.fssaiLicense = filePaths.fssaiLicense;
-    if (filePaths.electricityBill) user.electricityBill = filePaths.electricityBill;
+    if (filePaths.electricityBill)
+      user.electricityBill = filePaths.electricityBill;
     if (filePaths.rentAgreement) user.rentAgreement = filePaths.rentAgreement;
 
-    // Update document expiry dates if provided
-    const {
-      udyamCertificateExpiry,
-      aadharCardExpiry,
-      panCardExpiry,
-      gstCertificateExpiry,
-      shopActLicenseExpiry,
-      fssaiLicenseExpiry,
-    } = req.body;
+    // Update document expiry dates if provided (only for documents that can expire)
+    const { gstCertificateExpiry, shopActLicenseExpiry, fssaiLicenseExpiry } =
+      req.body;
 
-    // Update franchise admin document expiry dates if provided
-    if (udyamCertificateExpiry !== undefined) {
-      user.udyamCertificateExpiry = udyamCertificateExpiry ? new Date(udyamCertificateExpiry) : null;
-    }
-    if (aadharCardExpiry !== undefined) {
-      user.aadharCardExpiry = aadharCardExpiry ? new Date(aadharCardExpiry) : null;
-    }
-    if (panCardExpiry !== undefined) {
-      user.panCardExpiry = panCardExpiry ? new Date(panCardExpiry) : null;
-    }
-    // Update cafe admin document expiry dates if provided
+    // Skip document expiry fields if they're coming from req.body (should be handled separately)
     if (gstCertificateExpiry !== undefined) {
-      user.gstCertificateExpiry = gstCertificateExpiry ? new Date(gstCertificateExpiry) : null;
+      user.gstCertificateExpiry = gstCertificateExpiry
+        ? new Date(gstCertificateExpiry)
+        : null;
     }
     if (shopActLicenseExpiry !== undefined) {
-      user.shopActLicenseExpiry = shopActLicenseExpiry ? new Date(shopActLicenseExpiry) : null;
+      user.shopActLicenseExpiry = shopActLicenseExpiry
+        ? new Date(shopActLicenseExpiry)
+        : null;
     }
     if (fssaiLicenseExpiry !== undefined) {
-      user.fssaiLicenseExpiry = fssaiLicenseExpiry ? new Date(fssaiLicenseExpiry) : null;
+      user.fssaiLicenseExpiry = fssaiLicenseExpiry
+        ? new Date(fssaiLicenseExpiry)
+        : null;
     }
 
     // Save the user (this will trigger password hashing if password was changed)
@@ -1256,7 +1555,7 @@ exports.updateUser = async (req, res) => {
     // Don't send password in response
     const userResponse = user.toObject();
     delete userResponse.password;
-    
+
     res.json(userResponse);
   } catch (error) {
     res.status(400).json({ message: error.message });
@@ -1268,45 +1567,53 @@ exports.updateUser = async (req, res) => {
 exports.toggleFranchiseStatus = async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
-    
+
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    
+
     if (user.role !== "franchise_admin") {
-      return res.status(400).json({ message: "Only franchise admins can have their status toggled" });
+      return res
+        .status(400)
+        .json({
+          message: "Only franchise admins can have their status toggled",
+        });
     }
-    
+
     user.isActive = user.isActive === false ? true : false;
     await user.save();
-    
+
     // Automatically toggle all carts under this franchise
     const franchiseId = user._id;
     const carts = await User.find({
       role: "admin",
-      franchiseId: franchiseId
+      franchiseId: franchiseId,
     });
-    
+
     if (carts.length > 0) {
       await User.updateMany(
         { role: "admin", franchiseId: franchiseId },
         { $set: { isActive: user.isActive } }
       );
     }
-    
+
     res.json({
       success: true,
-      message: `Franchise ${user.isActive ? 'activated' : 'deactivated'} successfully. ${carts.length} cart(s) under this franchise have been ${user.isActive ? 'activated' : 'deactivated'}.`,
+      message: `Franchise ${
+        user.isActive ? "activated" : "deactivated"
+      } successfully. ${carts.length} cart(s) under this franchise have been ${
+        user.isActive ? "activated" : "deactivated"
+      }.`,
       data: {
         _id: user._id,
         name: user.name,
         email: user.email,
         isActive: user.isActive,
-        cartsUpdated: carts.length
-      }
+        cartsUpdated: carts.length,
+      },
     });
   } catch (error) {
-    console.error('[TOGGLE] Error:', error);
+    console.error("[TOGGLE] Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -1316,43 +1623,49 @@ exports.toggleFranchiseStatus = async (req, res) => {
 exports.generateMyFranchiseCode = async (req, res) => {
   try {
     const userId = req.user._id;
-    
+
     // Get the current user
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    
+
     if (user.role !== "franchise_admin") {
-      return res.status(403).json({ message: "Only franchise admins can generate franchise codes" });
+      return res
+        .status(403)
+        .json({
+          message: "Only franchise admins can generate franchise codes",
+        });
     }
-    
+
     // Check if code already exists
     if (user.franchiseCode) {
       return res.json({
         message: "Franchise code already exists",
         franchiseCode: user.franchiseCode,
-        franchiseShortcut: user.franchiseShortcut
+        franchiseShortcut: user.franchiseShortcut,
       });
     }
-    
+
     // Generate new franchise code
     const { generateFranchiseCode } = require("../utils/codeGenerator");
     const codeData = await generateFranchiseCode(user.name);
-    
+
     // Update user with the new code
     user.franchiseShortcut = codeData.franchiseShortcut;
     user.franchiseSequence = codeData.franchiseSequence;
     user.franchiseCode = codeData.franchiseCode;
     await user.save();
-    
-    console.log(`[FRANCHISE CODE] Generated: ${codeData.franchiseCode} for franchise "${user.name}" (${userId})`);
-    
+
+    console.log(
+      `[FRANCHISE CODE] Generated: ${codeData.franchiseCode} for franchise "${user.name}" (${userId})`
+    );
+
     res.json({
       success: true,
       message: "Franchise code generated successfully",
       franchiseCode: codeData.franchiseCode,
-      franchiseShortcut: codeData.franchiseShortcut
+      franchiseShortcut: codeData.franchiseShortcut,
     });
   } catch (error) {
     console.error("Error generating franchise code:", error);
@@ -1370,11 +1683,11 @@ exports.generateMyFranchiseCode = async (req, res) => {
 exports.deleteUser = async (req, res) => {
   try {
     const userToDelete = await User.findById(req.params.id);
-    
+
     if (!userToDelete) {
       return res.status(404).json({ message: "User not found" });
     }
-    
+
     // For franchise admins, check if requester is super_admin
     // Super admin can permanently delete, others can only deactivate
     if (userToDelete.role === "franchise_admin") {
@@ -1382,22 +1695,23 @@ exports.deleteUser = async (req, res) => {
       if (req.user.role !== "super_admin") {
         userToDelete.isActive = false;
         await userToDelete.save();
-        
+
         return res.json({
           success: true,
-          message: "Franchise deactivated successfully. All data is preserved and can be reactivated later.",
+          message:
+            "Franchise deactivated successfully. All data is preserved and can be reactivated later.",
           data: {
             _id: userToDelete._id,
             name: userToDelete.name,
             email: userToDelete.email,
             isActive: false,
-            note: "Franchise is deactivated. Use toggle-status endpoint to reactivate."
-          }
+            note: "Franchise is deactivated. Use toggle-status endpoint to reactivate.",
+          },
         });
       }
       // Super admin can proceed with actual deletion below
     }
-    
+
     // For franchise admins (super admin only) and cafe admins, proceed with actual deletion
     // Import Order model for order operations
     const Order = require("../models/orderModel");
@@ -1405,14 +1719,14 @@ exports.deleteUser = async (req, res) => {
     // If deleting a franchise admin (super admin only), clean up all franchise data
     if (userToDelete.role === "franchise_admin") {
       // Find all cafes (admin users) under this franchise
-      const cafes = await User.find({ 
-        role: "admin", 
-        franchiseId: userToDelete._id 
+      const cafes = await User.find({
+        role: "admin",
+        franchiseId: userToDelete._id,
       });
-      
+
       // Delete all cafes under this franchise
-      const cartIds = cafes.map(cafe => cafe._id);
-      
+      const cartIds = cafes.map((cafe) => cafe._id);
+
       // Import models for cleanup
       const { Table } = require("../models/tableModel");
       const { Payment } = require("../models/paymentModel");
@@ -1420,139 +1734,189 @@ exports.deleteUser = async (req, res) => {
       const MenuCategory = require("../models/menuCategoryModel");
       const Waitlist = require("../models/waitlistModel");
       const Employee = require("../models/employeeModel");
-      
+
       if (cartIds.length > 0) {
         // CRITICAL: Protect paid orders - they contain revenue data and must NEVER be deleted
         // Only delete non-paid orders (Pending, Confirmed, Preparing, Ready, Served, Cancelled, Returned)
-        const nonPaidStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Cancelled", "Returned"];
-        
+        const nonPaidStatuses = [
+          "Pending",
+          "Confirmed",
+          "Preparing",
+          "Ready",
+          "Served",
+          "Cancelled",
+          "Returned",
+        ];
+
         // Get all orders (both paid and non-paid) for reporting
-        const allOrders = await Order.find({ 
+        const allOrders = await Order.find({
           $or: [
             { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id }
-          ]
-        }).select('_id status').lean();
-        
+            { franchiseId: userToDelete._id },
+          ],
+        })
+          .select("_id status")
+          .lean();
+
         // Separate paid and non-paid orders
-        const paidOrders = allOrders.filter(o => o.status === "Paid");
-        const nonPaidOrders = allOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const nonPaidOrderIds = nonPaidOrders.map(o => o._id);
-        
+        const paidOrders = allOrders.filter((o) => o.status === "Paid");
+        const nonPaidOrders = allOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const nonPaidOrderIds = nonPaidOrders.map((o) => o._id);
+
         // Get all table IDs from these cafes before deleting tables
-        const tablesToDelete = await Table.find({ 
+        const tablesToDelete = await Table.find({
           $or: [
             { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id }
-          ]
-        }).select('_id').lean();
-        const tableIds = tablesToDelete.map(t => t._id);
-        
+            { franchiseId: userToDelete._id },
+          ],
+        })
+          .select("_id")
+          .lean();
+        const tableIds = tablesToDelete.map((t) => t._id);
+
         // Delete payments associated with NON-PAID orders only
         // Paid orders' payments must be preserved for revenue tracking
         if (nonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: nonPaidOrderIds },
-            status: { $ne: "PAID" } // Extra safety - don't delete PAID payments
+            status: { $ne: "PAID" }, // Extra safety - don't delete PAID payments
           });
         }
-        
+
         // Delete waitlist entries for these tables
         if (tableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: tableIds } });
         }
-        
+
         // Delete employees belonging to these cafes or franchise
-        await Employee.deleteMany({ 
+        await Employee.deleteMany({
           $or: [
             { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id }
-          ]
+            { franchiseId: userToDelete._id },
+          ],
         });
-        
+
         // Delete menu items belonging to these cafes
         await MenuItem.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete menu categories belonging to these cafes
         await MenuCategory.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete tables belonging to these cafes
         await Table.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete ONLY non-paid orders - paid orders are preserved for revenue tracking
         if (nonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: nonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: nonPaidOrderIds },
           });
         }
-        
+
         // Delete cafes (this removes all cafe login credentials and data)
         await User.deleteMany({ _id: { $in: cartIds } });
-        
+
         // Also delete tables and NON-PAID orders directly linked to franchise
-        const franchiseAllOrders = await Order.find({ franchiseId: userToDelete._id }).select('_id status').lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(o => o.status === "Paid");
-        const franchiseNonPaidOrders = franchiseAllOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(o => o._id);
-        
+        const franchiseAllOrders = await Order.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id status")
+          .lean();
+        const franchisePaidOrders = franchiseAllOrders.filter(
+          (o) => o.status === "Paid"
+        );
+        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
+          (o) => o._id
+        );
+
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" }
+            status: { $ne: "PAID" },
           });
         }
-        
-        const franchiseTables = await Table.find({ franchiseId: userToDelete._id }).select('_id').lean();
-        const franchiseTableIds = franchiseTables.map(t => t._id);
+
+        const franchiseTables = await Table.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id")
+          .lean();
+        const franchiseTableIds = franchiseTables.map((t) => t._id);
         if (franchiseTableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
         }
-        
+
         await Table.deleteMany({ franchiseId: userToDelete._id });
-        
+
         // Delete ONLY non-paid orders directly linked to franchise
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: franchiseNonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: franchiseNonPaidOrderIds },
           });
         }
       } else {
         // No cafes, but still clean up any tables/orders/employees directly linked to franchise
         // CRITICAL: Protect paid orders - they contain revenue data
-        const nonPaidStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Cancelled", "Returned"];
-        
+        const nonPaidStatuses = [
+          "Pending",
+          "Confirmed",
+          "Preparing",
+          "Ready",
+          "Served",
+          "Cancelled",
+          "Returned",
+        ];
+
         const { Table } = require("../models/tableModel");
         const { Payment } = require("../models/paymentModel");
         const Waitlist = require("../models/waitlistModel");
         const Employee = require("../models/employeeModel");
-        
+
         // Delete franchise-level employees
         await Employee.deleteMany({ franchiseId: userToDelete._id });
-        
-        const franchiseAllOrders = await Order.find({ franchiseId: userToDelete._id }).select('_id status').lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(o => o.status === "Paid");
-        const franchiseNonPaidOrders = franchiseAllOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(o => o._id);
-        
+
+        const franchiseAllOrders = await Order.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id status")
+          .lean();
+        const franchisePaidOrders = franchiseAllOrders.filter(
+          (o) => o.status === "Paid"
+        );
+        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
+          (o) => o._id
+        );
+
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" }
+            status: { $ne: "PAID" },
           });
         }
-        
-        const franchiseTables = await Table.find({ franchiseId: userToDelete._id }).select('_id').lean();
-        const franchiseTableIds = franchiseTables.map(t => t._id);
+
+        const franchiseTables = await Table.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id")
+          .lean();
+        const franchiseTableIds = franchiseTables.map((t) => t._id);
         if (franchiseTableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
         }
-        
+
         await Table.deleteMany({ franchiseId: userToDelete._id });
-        
+
         // Delete ONLY non-paid orders
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: franchiseNonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: franchiseNonPaidOrderIds },
           });
         }
       }
@@ -1561,137 +1925,187 @@ exports.deleteUser = async (req, res) => {
     // If deleting a cafe admin, clean up their data
     if (userToDelete.role === "admin") {
       // Find all cafes (admin users) under this franchise
-      const cafes = await User.find({ 
-        role: "admin", 
-        franchiseId: userToDelete._id 
+      const cafes = await User.find({
+        role: "admin",
+        franchiseId: userToDelete._id,
       });
-      
+
       // Delete all cafes under this franchise
-      const cartIds = cafes.map(cafe => cafe._id);
-      
+      const cartIds = cafes.map((cafe) => cafe._id);
+
       // Import models for cleanup (Order already imported above)
       const { Table } = require("../models/tableModel");
       const { Payment } = require("../models/paymentModel");
       const { MenuItem } = require("../models/menuItemModel");
       const MenuCategory = require("../models/menuCategoryModel");
       const Waitlist = require("../models/waitlistModel");
-      
+
       if (cartIds.length > 0) {
         // CRITICAL: Protect paid orders - they contain revenue data and must NEVER be deleted
         // Only delete non-paid orders (Pending, Confirmed, Preparing, Ready, Served, Cancelled, Returned)
-        const nonPaidStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Cancelled", "Returned"];
-        
+        const nonPaidStatuses = [
+          "Pending",
+          "Confirmed",
+          "Preparing",
+          "Ready",
+          "Served",
+          "Cancelled",
+          "Returned",
+        ];
+
         // Get all orders (both paid and non-paid) for reporting
-        const allOrders = await Order.find({ 
+        const allOrders = await Order.find({
           $or: [
             { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id }
-          ]
-        }).select('_id status').lean();
-        
+            { franchiseId: userToDelete._id },
+          ],
+        })
+          .select("_id status")
+          .lean();
+
         // Separate paid and non-paid orders
-        const paidOrders = allOrders.filter(o => o.status === "Paid");
-        const nonPaidOrders = allOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const nonPaidOrderIds = nonPaidOrders.map(o => o._id);
-        
+        const paidOrders = allOrders.filter((o) => o.status === "Paid");
+        const nonPaidOrders = allOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const nonPaidOrderIds = nonPaidOrders.map((o) => o._id);
+
         // Get all table IDs from these cafes before deleting tables
-        const tablesToDelete = await Table.find({ 
+        const tablesToDelete = await Table.find({
           $or: [
             { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id }
-          ]
-        }).select('_id').lean();
-        const tableIds = tablesToDelete.map(t => t._id);
-        
+            { franchiseId: userToDelete._id },
+          ],
+        })
+          .select("_id")
+          .lean();
+        const tableIds = tablesToDelete.map((t) => t._id);
+
         // Delete payments associated with NON-PAID orders only
         // Paid orders' payments must be preserved for revenue tracking
         if (nonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: nonPaidOrderIds },
-            status: { $ne: "PAID" } // Extra safety - don't delete PAID payments
+            status: { $ne: "PAID" }, // Extra safety - don't delete PAID payments
           });
         }
-        
+
         // Delete waitlist entries for these tables
         if (tableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: tableIds } });
         }
-        
+
         // Delete menu items belonging to these cafes
         await MenuItem.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete menu categories belonging to these cafes
         await MenuCategory.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete tables belonging to these cafes
         await Table.deleteMany({ cartId: { $in: cartIds } });
-        
+
         // Delete ONLY non-paid orders - paid orders are preserved for revenue tracking
         if (nonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: nonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: nonPaidOrderIds },
           });
         }
-        
+
         // Delete cafes (this removes all cafe login credentials and data)
         await User.deleteMany({ _id: { $in: cartIds } });
-        
+
         // Also delete tables and NON-PAID orders directly linked to franchise
-        const franchiseAllOrders = await Order.find({ franchiseId: userToDelete._id }).select('_id status').lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(o => o.status === "Paid");
-        const franchiseNonPaidOrders = franchiseAllOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(o => o._id);
-        
+        const franchiseAllOrders = await Order.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id status")
+          .lean();
+        const franchisePaidOrders = franchiseAllOrders.filter(
+          (o) => o.status === "Paid"
+        );
+        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
+          (o) => o._id
+        );
+
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" }
+            status: { $ne: "PAID" },
           });
         }
-        
-        const franchiseTables = await Table.find({ franchiseId: userToDelete._id }).select('_id').lean();
-        const franchiseTableIds = franchiseTables.map(t => t._id);
+
+        const franchiseTables = await Table.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id")
+          .lean();
+        const franchiseTableIds = franchiseTables.map((t) => t._id);
         if (franchiseTableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
         }
-        
+
         await Table.deleteMany({ franchiseId: userToDelete._id });
-        
+
         // Delete ONLY non-paid orders directly linked to franchise
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: franchiseNonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: franchiseNonPaidOrderIds },
           });
         }
       } else {
         // No cafes, but still clean up any tables/orders directly linked to franchise
         // CRITICAL: Protect paid orders - they contain revenue data
-        const nonPaidStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Cancelled", "Returned"];
-        
-        const franchiseAllOrders = await Order.find({ franchiseId: userToDelete._id }).select('_id status').lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(o => o.status === "Paid");
-        const franchiseNonPaidOrders = franchiseAllOrders.filter(o => nonPaidStatuses.includes(o.status));
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(o => o._id);
-        
+        const nonPaidStatuses = [
+          "Pending",
+          "Confirmed",
+          "Preparing",
+          "Ready",
+          "Served",
+          "Cancelled",
+          "Returned",
+        ];
+
+        const franchiseAllOrders = await Order.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id status")
+          .lean();
+        const franchisePaidOrders = franchiseAllOrders.filter(
+          (o) => o.status === "Paid"
+        );
+        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
+          nonPaidStatuses.includes(o.status)
+        );
+        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
+          (o) => o._id
+        );
+
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({ 
+          await Payment.deleteMany({
             orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" }
+            status: { $ne: "PAID" },
           });
         }
-        
-        const franchiseTables = await Table.find({ franchiseId: userToDelete._id }).select('_id').lean();
-        const franchiseTableIds = franchiseTables.map(t => t._id);
+
+        const franchiseTables = await Table.find({
+          franchiseId: userToDelete._id,
+        })
+          .select("_id")
+          .lean();
+        const franchiseTableIds = franchiseTables.map((t) => t._id);
         if (franchiseTableIds.length > 0) {
           await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
         }
-        
+
         await Table.deleteMany({ franchiseId: userToDelete._id });
-        
+
         // Delete ONLY non-paid orders
         if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({ 
-            _id: { $in: franchiseNonPaidOrderIds }
+          await Order.deleteMany({
+            _id: { $in: franchiseNonPaidOrderIds },
           });
         }
       }
@@ -1700,60 +2114,73 @@ exports.deleteUser = async (req, res) => {
     // If deleting a cafe admin (not franchise admin), protect their paid orders too
     if (userToDelete.role === "admin") {
       const { Payment } = require("../models/paymentModel");
-      
+
       // Get all orders for this cafe admin
-      const allCafeOrders = await Order.find({ cartId: userToDelete._id }).select('_id status').lean();
-      const nonPaidStatuses = ["Pending", "Confirmed", "Preparing", "Ready", "Served", "Cancelled", "Returned"];
-      
+      const allCafeOrders = await Order.find({ cartId: userToDelete._id })
+        .select("_id status")
+        .lean();
+      const nonPaidStatuses = [
+        "Pending",
+        "Confirmed",
+        "Preparing",
+        "Ready",
+        "Served",
+        "Cancelled",
+        "Returned",
+      ];
+
       // Separate paid and non-paid orders
-      const cafePaidOrders = allCafeOrders.filter(o => o.status === "Paid");
-      const cafeNonPaidOrders = allCafeOrders.filter(o => nonPaidStatuses.includes(o.status));
-      const cafeNonPaidOrderIds = cafeNonPaidOrders.map(o => o._id);
-      
+      const cafePaidOrders = allCafeOrders.filter((o) => o.status === "Paid");
+      const cafeNonPaidOrders = allCafeOrders.filter((o) =>
+        nonPaidStatuses.includes(o.status)
+      );
+      const cafeNonPaidOrderIds = cafeNonPaidOrders.map((o) => o._id);
+
       // Delete only non-paid orders and their payments
       if (cafeNonPaidOrderIds.length > 0) {
-        await Payment.deleteMany({ 
+        await Payment.deleteMany({
           orderId: { $in: cafeNonPaidOrderIds },
-          status: { $ne: "PAID" }
+          status: { $ne: "PAID" },
         });
         await Order.deleteMany({ _id: { $in: cafeNonPaidOrderIds } });
       }
-      
+
       // Paid orders are preserved automatically (not deleted)
     }
 
     // Delete the user (franchise admin, cafe admin, or regular user)
     await User.findByIdAndDelete(req.params.id);
-    
+
     // Count preserved paid orders for reporting
     let preservedPaidOrdersCount = 0;
     if (userToDelete.role === "franchise_admin") {
-      const preservedOrders = await Order.find({ 
+      const preservedOrders = await Order.find({
         franchiseId: userToDelete._id,
-        status: "Paid"
+        status: "Paid",
       }).countDocuments();
       preservedPaidOrdersCount = preservedOrders;
     } else if (userToDelete.role === "admin") {
-      const preservedOrders = await Order.find({ 
+      const preservedOrders = await Order.find({
         cartId: userToDelete._id,
-        status: "Paid"
+        status: "Paid",
       }).countDocuments();
       preservedPaidOrdersCount = preservedOrders;
     }
-    
+
     let message = "User removed";
     if (userToDelete.role === "franchise_admin") {
       message = `Franchise permanently deleted. All associated cafes, employees, and data removed. ${preservedPaidOrdersCount} paid orders preserved for revenue tracking.`;
     } else if (userToDelete.role === "admin") {
       message = `Cafe admin removed. ${preservedPaidOrdersCount} paid orders preserved for revenue tracking.`;
     }
-    
-    res.json({ 
+
+    res.json({
       message,
       preservedPaidOrders: preservedPaidOrdersCount,
-      warning: preservedPaidOrdersCount > 0 
-        ? "Paid orders and revenue data have been preserved in the database for financial records. Revenue calculations will continue to work."
-        : null
+      warning:
+        preservedPaidOrdersCount > 0
+          ? "Paid orders and revenue data have been preserved in the database for financial records. Revenue calculations will continue to work."
+          : null,
     });
   } catch (error) {
     res.status(500).json({ message: error.message });

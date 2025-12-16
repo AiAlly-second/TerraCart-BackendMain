@@ -17,26 +17,25 @@ const {
   deleteUser,
   uploadFranchiseDocs,
   uploadCafeAdminDocs,
-  uploadAllDocs,
   generateMyFranchiseCode,
 } = require("../controllers/userController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const { rateLimiters } = require("../middleware/securityMiddleware");
-const { 
-  validateRequired, 
-  validateEmail, 
-  validatePassword, 
-  validateObjectId 
+const {
+  validateRequired,
+  validateEmail,
+  validatePassword,
+  validateObjectId,
 } = require("../middleware/validationMiddleware");
 
 // ============= PUBLIC ROUTES =============
 
 // Login with rate limiting and validation
 router.post(
-  "/login", 
+  "/login",
   rateLimiters.login,
-  validateRequired(['email', 'password']),
-  validateEmail('email'),
+  validateRequired(["email", "password"]),
+  validateEmail("email"),
   loginUser
 );
 
@@ -45,20 +44,20 @@ router.post(
   "/register-cafe-admin-public",
   rateLimiters.login, // Use login limiter for registration too
   uploadCafeAdminDocs,
-  validateRequired(['name', 'email', 'password', 'cartName', 'location']),
-  validateEmail('email'),
-  validatePassword('password', 6),
+  validateRequired(["name", "email", "password", "cartName", "location"]),
+  validateEmail("email"),
+  validatePassword("password", 6),
   registerCafeAdmin
 );
 
 // Protected cafe admin registration (via admin panel)
 router.post(
-  "/register-cafe-admin", 
-  protect, 
+  "/register-cafe-admin",
+  protect,
   uploadCafeAdminDocs,
-  validateRequired(['name', 'email', 'password', 'cartName', 'location']),
-  validateEmail('email'),
-  validatePassword('password', 6),
+  validateRequired(["name", "email", "password", "cartName", "location"]),
+  validateEmail("email"),
+  validatePassword("password", 6),
   registerCafeAdmin
 );
 
@@ -73,8 +72,8 @@ router.post("/logout", logoutUser);
 
 // Generate franchise code for current user (franchise admin only)
 router.post(
-  "/generate-franchise-code", 
-  authorize(["franchise_admin"]), 
+  "/generate-franchise-code",
+  authorize(["franchise_admin"]),
   generateMyFranchiseCode
 );
 
@@ -82,67 +81,54 @@ router.post(
 router.get("/", getUsers);
 
 router.get(
-  "/stats/carts", 
-  authorize(["super_admin", "franchise_admin"]), 
+  "/stats/carts",
+  authorize(["super_admin", "franchise_admin"]),
   getCartStatistics
 );
 
-router.get(
-  "/:id", 
-  validateObjectId('id'),
-  getUserById
-);
+router.get("/:id", validateObjectId("id"), getUserById);
 
 router.post(
-  "/", 
-  authorize(["super_admin"]), 
+  "/",
+  authorize(["super_admin"]),
   uploadFranchiseDocs,
-  validateRequired(['name', 'email', 'password', 'role']),
-  validateEmail('email'),
-  validatePassword('password', 6),
+  validateRequired(["name", "email", "password", "role"]),
+  validateEmail("email"),
+  validatePassword("password", 6),
   createUser
 );
 
-router.put(
-  "/:id", 
-  validateObjectId('id'),
-  uploadAllDocs, // Use combined middleware to handle both franchise and cafe admin documents
-  updateUser
-);
+router.put("/:id", validateObjectId("id"), uploadCafeAdminDocs, updateUser);
 
-router.delete(
-  "/:id", 
-  validateObjectId('id'),
-  deleteUser
-);
+router.delete("/:id", validateObjectId("id"), deleteUser);
 
 // Cafe admin management routes
 router.patch(
-  "/:id/approve", 
-  validateObjectId('id'),
-  authorize(["franchise_admin"]), 
+  "/:id/approve",
+  validateObjectId("id"),
+  authorize(["franchise_admin"]),
   approveCafeAdmin
 );
 
 router.patch(
-  "/:id/reject", 
-  validateObjectId('id'),
-  authorize(["franchise_admin"]), 
+  "/:id/reject",
+  validateObjectId("id"),
+  authorize(["franchise_admin"]),
   rejectCafeAdmin
 );
 
 router.patch(
-  "/:id/toggle-cafe-status", 
-  validateObjectId('id'),
-  authorize(["franchise_admin", "super_admin"]), 
+  "/:id/toggle-cafe-status",
+  validateObjectId("id"),
+  authorize(["franchise_admin", "super_admin"]),
   toggleCafeStatus
 );
 
 // Franchise status toggle (super admin only)
 router.patch(
-  "/:id/toggle-status", 
-  validateObjectId('id'),
-  authorize(["super_admin"]), 
+  "/:id/toggle-status",
+  validateObjectId("id"),
+  authorize(["super_admin"]),
   toggleFranchiseStatus
 );
 

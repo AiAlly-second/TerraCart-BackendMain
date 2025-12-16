@@ -8,10 +8,20 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     role: {
       type: String,
-      enum: ["super_admin", "franchise_admin", "admin", "employee", "customer", "waiter", "cook", "captain", "manager"],
+      enum: [
+        "super_admin",
+        "franchise_admin",
+        "admin",
+        "employee",
+        "customer",
+        "waiter",
+        "cook",
+        "captain",
+        "manager",
+      ],
       default: "customer",
     },
-    
+
     // ===== FRANCHISE ID SYSTEM =====
     // Franchise Code: 3-letter shortcut from franchise name (e.g., "MAH" for "Mahindra")
     franchiseShortcut: { type: String, uppercase: true, maxlength: 3 },
@@ -19,13 +29,13 @@ const userSchema = new mongoose.Schema(
     franchiseCode: { type: String, unique: true, sparse: true, index: true },
     // Sequence number for this franchise (1, 2, 3...)
     franchiseSequence: { type: Number },
-    
+
     // ===== CART ID SYSTEM =====
     // Full Cart ID: franchise shortcut + cart sequence (e.g., "MAH001", "MAH002")
     cartCode: { type: String, unique: true, sparse: true, index: true },
     // Sequence number for cart within franchise (1, 2, 3...)
     cartSequence: { type: Number },
-    
+
     // Cart admin specific fields
     location: { type: String },
     phone: { type: String },
@@ -35,10 +45,24 @@ const userSchema = new mongoose.Schema(
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     approvedAt: { type: Date },
     // Franchise relationship - cart admins belong to a franchise
-    franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    franchiseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
     // Mobile app user fields - link to Employee and Cart/Kiosk
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, sparse: true }, // Cart/Kiosk ID for mobile users
-    employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee", index: true, sparse: true }, // Employee record for mobile users
+    cafeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+      sparse: true,
+    }, // Cart/Kiosk ID for mobile users
+    employeeId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      index: true,
+      sparse: true,
+    }, // Employee record for mobile users
     // Active/Inactive status for franchises (default: true for new franchises)
     isActive: { type: Boolean, default: true, index: true },
     // Franchise admin specific fields
@@ -53,12 +77,7 @@ const userSchema = new mongoose.Schema(
     fssaiLicense: { type: String }, // File path for FSSAI License
     electricityBill: { type: String }, // File path for Electricity Bill (address proof)
     rentAgreement: { type: String }, // File path for Rent Agreement (address proof)
-    // Document expiry dates (optional) - for documents that can expire
-    // Franchise admin document expiry dates
-    udyamCertificateExpiry: { type: Date },
-    aadharCardExpiry: { type: Date },
-    panCardExpiry: { type: Date },
-    // Cafe admin document expiry dates
+    // Document expiry dates (optional) - only for documents that can expire
     gstCertificateExpiry: { type: Date },
     shopActLicenseExpiry: { type: Date },
     fssaiLicenseExpiry: { type: Date },

@@ -11,7 +11,10 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const connectDB = require("./config/db");
 const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
-const { scheduleDailyRevenue, scheduleMonthlyRevenue } = require("./services/revenueScheduler");
+const {
+  scheduleDailyRevenue,
+  scheduleMonthlyRevenue,
+} = require("./services/revenueScheduler");
 
 // Security middleware
 const {
@@ -19,7 +22,7 @@ const {
   securityHeaders,
   sanitizeInput,
   errorHandler,
-  getCorsConfig
+  getCorsConfig,
 } = require("./middleware/securityMiddleware");
 
 // Load env vars
@@ -28,24 +31,31 @@ dotenv.config();
 // Validate critical environment variables
 const validateEnv = () => {
   const warnings = [];
-  
-  if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sarva-cafe-secret-key-2025') {
-    warnings.push('⚠️  JWT_SECRET is using default value. Set a strong secret in production!');
+
+  if (
+    !process.env.JWT_SECRET ||
+    process.env.JWT_SECRET === "sarva-cafe-secret-key-2025"
+  ) {
+    warnings.push(
+      "⚠️  JWT_SECRET is using default value. Set a strong secret in production!"
+    );
   }
-  
+
   if (!process.env.MONGO_URI) {
-    warnings.push('⚠️  MONGO_URI not set. Using local MongoDB.');
+    warnings.push("⚠️  MONGO_URI not set. Using local MongoDB.");
   }
-  
-  if (process.env.NODE_ENV === 'production') {
+
+  if (process.env.NODE_ENV === "production") {
     if (!process.env.ALLOWED_ORIGINS) {
-      warnings.push('⚠️  ALLOWED_ORIGINS not set. CORS may be too permissive.');
+      warnings.push("⚠️  ALLOWED_ORIGINS not set. CORS may be too permissive.");
     }
     if (!process.env.SIGNED_URL_SECRET) {
-      warnings.push('⚠️  SIGNED_URL_SECRET not set. Using JWT_SECRET as fallback.');
+      warnings.push(
+        "⚠️  SIGNED_URL_SECRET not set. Using JWT_SECRET as fallback."
+      );
     }
   }
-  
+
   // Security warnings removed for cleaner console output
 };
 
@@ -63,8 +73,8 @@ const io = socketIo(server, {
 });
 
 // Middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cors(getCorsConfig()));
 app.use(securityHeaders);
 app.use(sanitizeInput);
@@ -107,28 +117,40 @@ app.get("/health", (req, res) => {
 });
 
 // Static file serving for uploads
-app.use("/uploads/menu", express.static(path.join(__dirname, "uploads/menu"), {
-  maxAge: '1d',
-  etag: true,
-  lastModified: true
-}));
+app.use(
+  "/uploads/menu",
+  express.static(path.join(__dirname, "uploads/menu"), {
+    maxAge: "1d",
+    etag: true,
+    lastModified: true,
+  })
+);
 
-if (process.env.NODE_ENV !== 'production' || process.env.ALLOW_PUBLIC_UPLOADS === 'true') {
-  app.use("/uploads", express.static(path.join(__dirname, "uploads"), {
-    maxAge: '1h',
-    etag: true
-  }));
+if (
+  process.env.NODE_ENV !== "production" ||
+  process.env.ALLOW_PUBLIC_UPLOADS === "true"
+) {
+  app.use(
+    "/uploads",
+    express.static(path.join(__dirname, "uploads"), {
+      maxAge: "1h",
+      etag: true,
+    })
+  );
 } else {
-  app.use("/uploads/payment-qr", express.static(path.join(__dirname, "uploads/payment-qr"), {
-    maxAge: '1d',
-    etag: true
-  }));
+  app.use(
+    "/uploads/payment-qr",
+    express.static(path.join(__dirname, "uploads/payment-qr"), {
+      maxAge: "1d",
+      etag: true,
+    })
+  );
 }
 
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
   console.log(`[SOCKET] Client connected: ${socket.id}`);
-  
+
   // Join cafe room
   socket.on("join:cafe", (cafeId) => {
     if (cafeId) {
@@ -137,7 +159,7 @@ io.on("connection", (socket) => {
       console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
-  
+
   // Join franchise room
   socket.on("join:franchise", (franchiseId) => {
     if (franchiseId) {
@@ -146,7 +168,7 @@ io.on("connection", (socket) => {
       console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
-  
+
   // Join role-based room
   socket.on("join:role", (role) => {
     if (role) {
@@ -155,7 +177,7 @@ io.on("connection", (socket) => {
       console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
-  
+
   // Join cart room (for mobile app users)
   socket.on("join:cart", (cartId) => {
     if (cartId) {
@@ -166,7 +188,7 @@ io.on("connection", (socket) => {
       socket.emit("join:cafe", cartId);
     }
   });
-  
+
   // Join kiosk room (for mobile app users)
   socket.on("join:kiosk", (kioskId) => {
     if (kioskId) {
@@ -175,11 +197,13 @@ io.on("connection", (socket) => {
       console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
-  
+
   socket.on("disconnect", (reason) => {
-    console.log(`[SOCKET] Client disconnected: ${socket.id}, reason: ${reason}`);
+    console.log(
+      `[SOCKET] Client disconnected: ${socket.id}, reason: ${reason}`
+    );
   });
-  
+
   // Handle socket errors
   socket.on("error", (error) => {
     console.error(`[SOCKET] Error for ${socket.id}:`, error);
@@ -193,7 +217,9 @@ const emitToCafe = (io, cafeId, event, data) => {
     const cartRoom = `cart:${cafeId}`;
     io.to(cafeRoom).emit(event, data);
     io.to(cartRoom).emit(event, data); // Also emit to cart room
-    console.log(`[SOCKET] Emitted ${event} to cafe:${cafeId} and cart:${cafeId}`);
+    console.log(
+      `[SOCKET] Emitted ${event} to cafe:${cafeId} and cart:${cafeId}`
+    );
   }
 };
 
@@ -234,7 +260,7 @@ app.set("emitToKiosk", emitToKiosk);
 app.set("io", io);
 
 // Schedule background jobs
-scheduleOrderAutoRelease(io);
+// scheduleOrderAutoRelease(io); // DISABLED: Orders should only be cancelled by customer or admin, not automatically
 scheduleDailyRevenue();
 scheduleMonthlyRevenue();
 
@@ -250,7 +276,7 @@ app.use((req, res) => {
 const startServer = async () => {
   try {
     await connectDB();
-    
+
     const PORT = process.env.PORT || 5001;
     server.listen(PORT, () => {
       // Server started
