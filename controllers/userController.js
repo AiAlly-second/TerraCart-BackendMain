@@ -468,11 +468,9 @@ exports.createUser = async (req, res) => {
       "customer",
     ];
     if (!validRoles.includes(role)) {
-      return res
-        .status(400)
-        .json({
-          message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
-        });
+      return res.status(400).json({
+        message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
+      });
     }
 
     // Handle file uploads for franchise admin
@@ -510,11 +508,9 @@ exports.createUser = async (req, res) => {
       // This is mandatory for all new franchises
       const franchiseCodeData = await generateFranchiseCode(name);
       if (!franchiseCodeData || !franchiseCodeData.franchiseCode) {
-        return res
-          .status(500)
-          .json({
-            message: "Failed to generate franchise code. Please try again.",
-          });
+        return res.status(500).json({
+          message: "Failed to generate franchise code. Please try again.",
+        });
       }
       userData.franchiseShortcut = franchiseCodeData.franchiseShortcut;
       userData.franchiseSequence = franchiseCodeData.franchiseSequence;
@@ -639,6 +635,17 @@ exports.registerCafeAdmin = async (req, res) => {
         .json({ message: "Franchise ID is required for registration" });
     }
 
+    // Look up franchise GST number so new carts can inherit it by default
+    let franchiseGstNumber = null;
+    if (franchiseId) {
+      const franchiseUser = await User.findById(franchiseId).select(
+        "gstNumber"
+      );
+      if (franchiseUser && franchiseUser.gstNumber) {
+        franchiseGstNumber = franchiseUser.gstNumber;
+      }
+    }
+
     // Handle file uploads for cafe admin documents
     let filePaths = {};
     if (req.files) {
@@ -683,6 +690,35 @@ exports.registerCafeAdmin = async (req, res) => {
       isApproved: false, // Requires franchise admin approval
       franchiseId: franchiseId, // Link to franchise
     };
+
+    // If GST number is provided explicitly for the cart, keep it (editable override).
+    // Otherwise, inherit GST number from the parent franchise (if available).
+    if (req.body.gstNumber && typeof req.body.gstNumber === "string") {
+      userData.gstNumber = req.body.gstNumber;
+    } else if (franchiseGstNumber) {
+      userData.gstNumber = franchiseGstNumber;
+    }
+
+    // #region agent log
+    fetch("http://127.0.0.1:7242/ingest/660a5fbf-4359-420f-956f-3831103456fb", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "GST-INHERIT-1",
+        location: "backend/controllers/userController.js:registerCafeAdmin",
+        message: "Registering cafe admin with GST inheritance decision",
+        data: {
+          franchiseId: franchiseId ? franchiseId.toString() : null,
+          franchiseGstNumber: franchiseGstNumber || null,
+          cartHasCustomGst: !!req.body.gstNumber,
+          finalCartGstNumber: userData.gstNumber || null,
+        },
+        timestamp: Date.now(),
+      }),
+    }).catch(() => {});
+    // #endregion agent log
 
     // Generate unique Cart Code (e.g., MAH001, MAH002 - based on franchise shortcut) - REQUIRED
     if (franchiseId) {
@@ -990,22 +1026,18 @@ exports.toggleCafeStatus = async (req, res) => {
     // For super admin: allow toggling any cart
     if (userRole === "franchise_admin") {
       if (user.franchiseId?.toString() !== userId.toString()) {
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. This cafe does not belong to your franchise.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. This cafe does not belong to your franchise.",
+        });
       }
 
       // For franchise admin: check if cafe is approved first
       if (!user.isApproved) {
-        return res
-          .status(400)
-          .json({
-            message:
-              "Cannot activate/deactivate an unapproved cafe. Please approve the cafe first.",
-          });
+        return res.status(400).json({
+          message:
+            "Cannot activate/deactivate an unapproved cafe. Please approve the cafe first.",
+        });
       }
     }
 
@@ -1086,6 +1118,8 @@ exports.getMe = async (req, res) => {
       franchiseCode: user.franchiseCode,
       cartCode: user.cartCode,
       isActive: user.isActive,
+      // Include GST number so franchise admins can inherit it for new carts
+      gstNumber: user.gstNumber,
     };
 
     if (user.role === "employee") {
@@ -1153,12 +1187,10 @@ exports.getUserById = async (req, res) => {
           !user.franchiseId ||
           user.franchiseId.toString() !== req.user._id.toString()
         ) {
-          return res
-            .status(403)
-            .json({
-              message:
-                "Access denied. This cafe does not belong to your franchise.",
-            });
+          return res.status(403).json({
+            message:
+              "Access denied. This cafe does not belong to your franchise.",
+          });
         }
       } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
         // For employee users, check if they belong to this franchise
@@ -1173,40 +1205,32 @@ exports.getUserById = async (req, res) => {
             !employee.franchiseId ||
             employee.franchiseId.toString() !== req.user._id.toString()
           ) {
-            return res
-              .status(403)
-              .json({
-                message:
-                  "Access denied. This employee does not belong to your franchise.",
-              });
+            return res.status(403).json({
+              message:
+                "Access denied. This employee does not belong to your franchise.",
+            });
           }
         } else if (
           user.franchiseId &&
           user.franchiseId.toString() !== req.user._id.toString()
         ) {
-          return res
-            .status(403)
-            .json({
-              message:
-                "Access denied. This employee does not belong to your franchise.",
-            });
+          return res.status(403).json({
+            message:
+              "Access denied. This employee does not belong to your franchise.",
+          });
         } else if (!user.franchiseId) {
           // If no franchiseId, deny access (employee must belong to a franchise)
-          return res
-            .status(403)
-            .json({
-              message:
-                "Access denied. This employee does not belong to your franchise.",
-            });
+          return res.status(403).json({
+            message:
+              "Access denied. This employee does not belong to your franchise.",
+          });
         }
       } else {
         // For other roles, deny access
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. You can only view cafe admins and employees under your franchise.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. You can only view cafe admins and employees under your franchise.",
+        });
       }
     } else if (req.user.role === "admin") {
       // Cafe admin can view themselves OR their franchise admin (for invoice/billing purposes)
@@ -1217,12 +1241,10 @@ exports.getUserById = async (req, res) => {
         user._id.toString() === req.user.franchiseId.toString();
 
       if (!isSelf && !isFranchiseAdmin) {
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. You can only view your own profile or your franchise admin's profile.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. You can only view your own profile or your franchise admin's profile.",
+        });
       }
     } else if (
       ["waiter", "cook", "captain", "manager"].includes(req.user.role)
@@ -1243,12 +1265,10 @@ exports.getUserById = async (req, res) => {
         console.log(
           `[GET_USER_BY_ID] User cafeId: ${req.user.cafeId}, Requested user ID: ${user._id}`
         );
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. You can only view your own profile or your associated cart/cafe.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. You can only view your own profile or your associated cart/cafe.",
+        });
       }
 
       console.log(
@@ -1286,23 +1306,19 @@ exports.updateUser = async (req, res) => {
     if (req.user.role === "franchise_admin") {
       // Franchise admin can only update cafe admins (role: "admin") under their franchise
       if (user.role !== "admin") {
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. You can only update cafe admins under your franchise.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. You can only update cafe admins under your franchise.",
+        });
       }
       if (
         !user.franchiseId ||
         user.franchiseId.toString() !== req.user._id.toString()
       ) {
-        return res
-          .status(403)
-          .json({
-            message:
-              "Access denied. This cafe does not belong to your franchise.",
-          });
+        return res.status(403).json({
+          message:
+            "Access denied. This cafe does not belong to your franchise.",
+        });
       }
       // Franchise admin cannot change role
       if (req.body.role !== undefined && req.body.role !== user.role) {
@@ -1313,11 +1329,9 @@ exports.updateUser = async (req, res) => {
     } else if (req.user.role === "admin") {
       // Cafe admin can only update themselves
       if (user._id.toString() !== req.user._id.toString()) {
-        return res
-          .status(403)
-          .json({
-            message: "Access denied. You can only update your own profile.",
-          });
+        return res.status(403).json({
+          message: "Access denied. You can only update your own profile.",
+        });
       }
       // Cafe admin cannot change role
       if (req.body.role !== undefined && req.body.role !== user.role) {
@@ -1357,11 +1371,9 @@ exports.updateUser = async (req, res) => {
         "customer",
       ];
       if (!validRoles.includes(role)) {
-        return res
-          .status(400)
-          .json({
-            message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
-          });
+        return res.status(400).json({
+          message: `Invalid role. Must be one of: ${validRoles.join(", ")}`,
+        });
       }
       // Only super admin can change roles (checked above)
       user.role = role;
@@ -1573,11 +1585,9 @@ exports.toggleFranchiseStatus = async (req, res) => {
     }
 
     if (user.role !== "franchise_admin") {
-      return res
-        .status(400)
-        .json({
-          message: "Only franchise admins can have their status toggled",
-        });
+      return res.status(400).json({
+        message: "Only franchise admins can have their status toggled",
+      });
     }
 
     user.isActive = user.isActive === false ? true : false;
@@ -1631,11 +1641,9 @@ exports.generateMyFranchiseCode = async (req, res) => {
     }
 
     if (user.role !== "franchise_admin") {
-      return res
-        .status(403)
-        .json({
-          message: "Only franchise admins can generate franchise codes",
-        });
+      return res.status(403).json({
+        message: "Only franchise admins can generate franchise codes",
+      });
     }
 
     // Check if code already exists

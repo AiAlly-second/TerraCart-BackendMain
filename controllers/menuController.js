@@ -15,13 +15,13 @@ exports.getPublicMenu = async (req, res) => {
   try {
     // Get cartId from query parameter (passed from frontend based on table)
     const { cartId } = req.query;
-    
+
     // Build query - filter by cartId if provided
     const categoryQuery = { isActive: true };
     const itemQuery = { isAvailable: true };
-    
+
     let targetCafeId = null;
-    
+
     // Priority 1: Use cartId from query parameter (for public access)
     if (cartId) {
       // Validate cartId format
@@ -29,17 +29,22 @@ exports.getPublicMenu = async (req, res) => {
         return res.status(400).json({ message: "Invalid cart ID" });
       }
       targetCafeId = cartId;
-    } 
+    }
     // Priority 2: For authenticated mobile users, get cafeId from their Employee record
-    else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+    else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       const Employee = require("../models/employeeModel");
-      const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      const employee = await Employee.findOne({
+        email: req.user.email?.toLowerCase(),
+      }).lean();
       if (employee && employee.cafeId) {
         targetCafeId = employee.cafeId;
-        console.log('[MENU] getPublicMenu - Mobile user cafeId:', {
+        console.log("[MENU] getPublicMenu - Mobile user cafeId:", {
           userId: req.user._id,
           email: req.user.email,
-          cafeId: targetCafeId
+          cafeId: targetCafeId,
         });
       }
     }
@@ -47,17 +52,19 @@ exports.getPublicMenu = async (req, res) => {
     else if (req.user && req.user.role === "admin") {
       targetCafeId = req.user._id;
     }
-    
+
     if (targetCafeId) {
       categoryQuery.cafeId = targetCafeId;
       itemQuery.cafeId = targetCafeId;
-      console.log('[MENU] getPublicMenu - Filtering by cafeId:', targetCafeId);
+      console.log("[MENU] getPublicMenu - Filtering by cafeId:", targetCafeId);
     } else {
       // Return empty menu if no cafeId - prevents showing all carts' menus
-      console.log('[MENU] getPublicMenu - No cafeId found, returning empty menu');
+      console.log(
+        "[MENU] getPublicMenu - No cafeId found, returning empty menu"
+      );
       return res.json([]);
     }
-    
+
     const categories = await MenuCategory.find(categoryQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
@@ -77,20 +84,20 @@ exports.getPublicMenu = async (req, res) => {
 
     // Helper function to decode HTML entities in image URLs
     const decodeImageUrl = (imageUrl) => {
-      if (!imageUrl || typeof imageUrl !== 'string') return '';
+      if (!imageUrl || typeof imageUrl !== "string") return "";
       return imageUrl
-        .replace(/&amp;#x2F;/g, '/')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
+        .replace(/&amp;#x2F;/g, "/")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
         .replace(/&quot;/g, '"')
-        .replace(/&#x2F;/g, '/')
+        .replace(/&#x2F;/g, "/")
         .replace(/&#39;/g, "'")
         .trim();
     };
 
     // Decode image URLs in items
-    items.forEach(item => {
+    items.forEach((item) => {
       if (item.image) {
         item.image = decodeImageUrl(item.image);
       }
@@ -115,23 +122,23 @@ exports.listMenu = async (req, res) => {
     const cafeId = req.user && req.user.role === "admin" ? req.user._id : null;
     const categoryQuery = {};
     const itemQuery = {};
-    
+
     if (cafeId) {
       categoryQuery.cafeId = cafeId;
       itemQuery.cafeId = cafeId;
     }
-    
+
     const categories = await MenuCategory.find(categoryQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
     const categoryIds = categories.map((cat) => cat._id);
-    
+
     if (categoryIds.length > 0) {
       itemQuery.category = { $in: categoryIds };
     } else {
       itemQuery.category = { $in: [] }; // No categories, so no items
     }
-    
+
     const items = await MenuItem.find(itemQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
@@ -151,7 +158,13 @@ exports.listMenu = async (req, res) => {
 
 exports.createCategory = async (req, res) => {
   try {
-    const { name, description, icon, sortOrder, isActive = true } = req.body || {};
+    const {
+      name,
+      description,
+      icon,
+      sortOrder,
+      isActive = true,
+    } = req.body || {};
     if (!name) {
       return res.status(400).json({ message: "Category name is required" });
     }
@@ -172,7 +185,10 @@ exports.createCategory = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (cafeId) {
-      emitToCafe(io, cafeId.toString(), "menu:updated", { type: "category_created", category });
+      emitToCafe(io, cafeId.toString(), "menu:updated", {
+        type: "category_created",
+        category,
+      });
     }
 
     return res.status(201).json(category);
@@ -206,7 +222,10 @@ exports.updateCategory = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (category.cafeId) {
-      emitToCafe(io, category.cafeId.toString(), "menu:updated", { type: "category_updated", category });
+      emitToCafe(io, category.cafeId.toString(), "menu:updated", {
+        type: "category_updated",
+        category,
+      });
     }
 
     return res.json(category);
@@ -222,26 +241,36 @@ exports.deleteCategory = async (req, res) => {
       return res.status(400).json({ message: "Invalid category id" });
     }
 
-    const hasItems = await MenuItem.exists({ category: id });
-    if (hasItems) {
-      return res.status(409).json({
-        message: "Cannot delete category while items exist. Remove items first.",
-      });
-    }
-
-    const category = await MenuCategory.findByIdAndDelete(id);
+    // Find the category first to get cafeId for socket events
+    const category = await MenuCategory.findById(id);
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
     }
+
+    // Delete all items in this category first (cascade delete)
+    const itemsDeleted = await MenuItem.deleteMany({ category: id });
+    console.log(
+      `[Menu] Deleted ${itemsDeleted.deletedCount} item(s) from category ${id} before deleting category`
+    );
+
+    // Now delete the category
+    await MenuCategory.findByIdAndDelete(id);
 
     // Emit socket event to cafe room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (category.cafeId) {
-      emitToCafe(io, category.cafeId.toString(), "menu:updated", { type: "category_deleted", categoryId: id });
+      emitToCafe(io, category.cafeId.toString(), "menu:updated", {
+        type: "category_deleted",
+        categoryId: id,
+        itemsDeleted: itemsDeleted.deletedCount,
+      });
     }
 
-    return res.json({ message: "Category deleted" });
+    return res.json({
+      message: "Category deleted successfully",
+      itemsDeleted: itemsDeleted.deletedCount,
+    });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -276,7 +305,9 @@ exports.createItem = async (req, res) => {
     if (!SPICE_LEVELS.includes(spiceLevel)) {
       return res
         .status(400)
-        .json({ message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}` });
+        .json({
+          message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
+        });
     }
 
     const category = await MenuCategory.findById(categoryId);
@@ -286,8 +317,14 @@ exports.createItem = async (req, res) => {
 
     // Set cafeId if user is cafe admin, and verify category belongs to same cafe
     const cafeId = req.user && req.user.role === "admin" ? req.user._id : null;
-    if (cafeId && category.cafeId && category.cafeId.toString() !== cafeId.toString()) {
-      return res.status(403).json({ message: "Category does not belong to your cafe" });
+    if (
+      cafeId &&
+      category.cafeId &&
+      category.cafeId.toString() !== cafeId.toString()
+    ) {
+      return res
+        .status(403)
+        .json({ message: "Category does not belong to your cafe" });
     }
     const finalCafeId = cafeId || category.cafeId || null;
 
@@ -311,13 +348,18 @@ exports.createItem = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (finalCafeId) {
-      emitToCafe(io, finalCafeId.toString(), "menu:updated", { type: "item_created", item });
+      emitToCafe(io, finalCafeId.toString(), "menu:updated", {
+        type: "item_created",
+        item,
+      });
     }
 
     return res.status(201).json(item);
   } catch (err) {
     if (err.code === 11000) {
-      return res.status(409).json({ message: "Duplicate menu item name within category" });
+      return res
+        .status(409)
+        .json({ message: "Duplicate menu item name within category" });
     }
     return res.status(500).json({ message: err.message });
   }
@@ -361,7 +403,9 @@ exports.updateItem = async (req, res) => {
     if (updates.spiceLevel && !SPICE_LEVELS.includes(updates.spiceLevel)) {
       return res
         .status(400)
-        .json({ message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}` });
+        .json({
+          message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
+        });
     }
 
     const item = await MenuItem.findByIdAndUpdate(id, updates, {
@@ -374,15 +418,30 @@ exports.updateItem = async (req, res) => {
     }
 
     // Auto-sync to costing if price was updated and user is cart admin
-    if (updates.price !== undefined && req.user.role === "admin" && item.cafeId) {
+    if (
+      updates.price !== undefined &&
+      req.user.role === "admin" &&
+      item.cafeId
+    ) {
       try {
-        const { syncDefaultMenuToCosting } = require("../services/costing-v2/syncDefaultMenuToCosting");
+        const {
+          syncDefaultMenuToCosting,
+        } = require("../services/costing-v2/syncDefaultMenuToCosting");
         // Sync only this specific cart's menu to costing
-        await syncDefaultMenuToCosting(null, item.cafeId.toString(), item.cafeId.toString());
-        console.log(`[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${item.cafeId}`);
+        await syncDefaultMenuToCosting(
+          null,
+          item.cafeId.toString(),
+          item.cafeId.toString()
+        );
+        console.log(
+          `[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${item.cafeId}`
+        );
       } catch (syncError) {
         // Don't fail the request if sync fails - just log it
-        console.error(`[MENU CONTROLLER] Failed to auto-sync to costing:`, syncError.message);
+        console.error(
+          `[MENU CONTROLLER] Failed to auto-sync to costing:`,
+          syncError.message
+        );
       }
     }
 
@@ -390,13 +449,18 @@ exports.updateItem = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "menu:updated", { type: "item_updated", item });
+      emitToCafe(io, item.cafeId.toString(), "menu:updated", {
+        type: "item_updated",
+        item,
+      });
     }
 
     return res.json(item);
   } catch (err) {
     if (err.code === 11000) {
-      return res.status(409).json({ message: "Duplicate menu item name within category" });
+      return res
+        .status(409)
+        .json({ message: "Duplicate menu item name within category" });
     }
     return res.status(500).json({ message: err.message });
   }
@@ -411,7 +475,9 @@ exports.updateItemAvailability = async (req, res) => {
       return res.status(400).json({ message: "Invalid item id" });
     }
     if (typeof isAvailable !== "boolean") {
-      return res.status(400).json({ message: "isAvailable boolean is required" });
+      return res
+        .status(400)
+        .json({ message: "isAvailable boolean is required" });
     }
 
     const item = await MenuItem.findByIdAndUpdate(
@@ -428,7 +494,10 @@ exports.updateItemAvailability = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "menu:updated", { type: "item_availability_updated", item });
+      emitToCafe(io, item.cafeId.toString(), "menu:updated", {
+        type: "item_availability_updated",
+        item,
+      });
     }
 
     return res.json(item);
@@ -457,7 +526,10 @@ exports.deleteItem = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (cafeId) {
-      emitToCafe(io, cafeId.toString(), "menu:updated", { type: "item_deleted", itemId: id });
+      emitToCafe(io, cafeId.toString(), "menu:updated", {
+        type: "item_deleted",
+        itemId: id,
+      });
     }
 
     return res.json({ message: "Menu item deleted" });
@@ -504,8 +576,8 @@ exports.uploadMenuImage = [
     if (!req.file) {
       return res.status(400).json({ message: "No image uploaded" });
     }
-      // Return relative URL so it works across different domains/environments
-      const fileUrl = `/uploads/${req.file.filename}`;
+    // Return relative URL so it works across different domains/environments
+    const fileUrl = `/uploads/${req.file.filename}`;
     return res.status(201).json({
       url: fileUrl,
       filename: req.file.filename,
@@ -513,4 +585,3 @@ exports.uploadMenuImage = [
     });
   },
 ];
-
