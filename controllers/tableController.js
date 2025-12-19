@@ -1432,6 +1432,9 @@ exports.updateTable = async (req, res) => {
       return res.status(404).json({ message: "Table not found" });
     }
 
+    // Save original status before any updates
+    const originalStatus = table.status;
+
     if (updates.number !== undefined && updates.number !== table.number) {
       // Check for duplicate number within the same cart
       const query = { number: updates.number, _id: { $ne: table._id } };
