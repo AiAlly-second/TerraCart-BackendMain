@@ -308,18 +308,12 @@ exports.listTables = async (req, res) => {
     // Build query based on user role (handles mobile roles too)
     const query = await buildHierarchyQuery(req.user);
 
-    // Debug logging
-    console.log("[TABLE] listTables - User:", {
-      id: req.user?._id,
-      role: req.user?.role,
-      email: req.user?.email,
-    });
-    console.log("[TABLE] listTables - Query:", JSON.stringify(query, null, 2));
+    // Removed verbose logging
 
     // If query is empty (no cartId/franchiseId), return empty array
     // This prevents returning all tables when user has no associated cart
     if (Object.keys(query).length === 0) {
-      console.log("[TABLE] listTables - Empty query, returning empty array");
+      // Empty query - returning empty array
       return res.json({
         success: true,
         data: [],
@@ -351,21 +345,14 @@ exports.listTables = async (req, res) => {
         const tableCartId = table.cartId?.toString();
         const queryCartId = query.cartId.toString();
         if (tableCartId !== queryCartId) {
-          console.log(
-            `[TABLE] Filtering out table ${table.number} - cartId mismatch: ${tableCartId} !== ${queryCartId}`
-          );
+          // Filtering out table - cartId mismatch
           return false;
         }
       }
       return true;
     });
 
-    console.log("[TABLE] listTables - Found tables:", filteredTables.length);
-    filteredTables.forEach((t) => {
-      console.log(
-        `[TABLE] - Table ${t.number}: cartId=${t.cartId}, cafeId=${t.cafeId}, franchiseId=${t.franchiseId}`
-      );
-    });
+    // Found tables
 
     // Deduplicate: If multiple tables have the same number, keep only the first one
     // Group by table number and cartId, then take the first occurrence
@@ -380,14 +367,11 @@ exports.listTables = async (req, res) => {
         seen.set(key, true);
         uniqueTables.push(table);
       } else {
-        console.log(`[TABLE] listTables - Skipping duplicate: ${key}`);
+        // Skipping duplicate table
       }
     }
 
-    console.log(
-      "[TABLE] listTables - After deduplication:",
-      uniqueTables.length
-    );
+    // After deduplication
 
     // Populate mergedTables and mergedWith for capacity calculation
     const tablesWithMerged = await Table.find({
@@ -587,27 +571,34 @@ exports.lookupTableBySlug = async (req, res) => {
       }
     }
 
-    // CRITICAL: Check if user has an active unpaid order with matching sessionToken
-    // This allows customers with active orders to access their table even if sessionToken doesn't match exactly
+    // CRITICAL: Check if user has an active unpaid order.
+    // This allows customers with active orders to access their table without being forced back into waitlist.
     let hasActiveUnpaidOrder = false;
-    if (table.currentOrder && clientSessionToken) {
+    let activeOrder = null;
+    if (table.currentOrder) {
       const Order = require("../models/orderModel");
       try {
-        const activeOrder = await Order.findById(table.currentOrder).lean();
+        activeOrder = await Order.findById(table.currentOrder).lean();
         if (activeOrder) {
-          // Check if order belongs to this customer's session
-          const orderBelongsToCustomer =
-            activeOrder.sessionToken === clientSessionToken ||
-            activeOrder.sessionToken === table.sessionToken;
-          // Check if order is unpaid
           const isUnpaid =
             activeOrder.status &&
             !["Paid", "Cancelled", "Returned"].includes(activeOrder.status);
 
-          if (orderBelongsToCustomer && isUnpaid) {
+          // For unpaid orders on this table, allow access if:
+          // 1. Order's sessionToken matches client's sessionToken, OR
+          // 2. Order's sessionToken matches table's sessionToken, OR
+          // 3. No sessionToken on order (legacy order), OR
+          // 4. Client has no sessionToken but order exists (user refreshing/navigating)
+          const orderBelongsToCustomer =
+            !activeOrder.sessionToken || // Legacy order - allow access
+            !clientSessionToken || // Client has no session token but order exists - allow access
+            activeOrder.sessionToken === clientSessionToken ||
+            activeOrder.sessionToken === table.sessionToken;
+
+          if (isUnpaid && orderBelongsToCustomer) {
             hasActiveUnpaidOrder = true;
             console.log(
-              `[Table ${table.number}] Customer has active unpaid order (${activeOrder._id}) - will grant access`
+              `[Table ${table.number}] Found active unpaid order (${activeOrder._id}) - granting access`
             );
           }
         }
@@ -655,14 +646,27 @@ exports.lookupTableBySlug = async (req, res) => {
     const emitToCafe = req.app.get("emitToCafe");
 
     const emitTableStatus = async () => {
+      const tableStatusPayload = {
+        id: table._id,
+        number: table.number,
+        status: table.status,
+        currentOrder: table.currentOrder || null,
+        sessionToken: table.sessionToken || null,
+      };
+
+      // Emit to cafe room (for admin panel)
       if (io && emitToCafe && table.cartId) {
-        emitToCafe(io, table.cartId.toString(), "table:status:updated", {
-          id: table._id,
-          number: table.number,
-          status: table.status,
-          currentOrder: table.currentOrder || null,
-          sessionToken: table.sessionToken || null,
-        });
+        emitToCafe(
+          io,
+          table.cartId.toString(),
+          "table:status:updated",
+          tableStatusPayload
+        );
+      }
+
+      // Also emit globally so customers can receive real-time updates
+      if (io) {
+        io.emit("table:status:updated", tableStatusPayload);
       }
     };
 
@@ -903,21 +907,40 @@ exports.lookupTableBySlug = async (req, res) => {
                 console.log(
                   `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
                 );
-              } else {
-                // No existing entry - create new waitlist entry
-                const token = crypto.randomBytes(6).toString("hex");
-                waitlistEntry = await Waitlist.create({
-                  table: table._id,
-                  tableNumber: String(table.number),
-                  token,
-                  sessionToken: clientSessionToken || undefined,
+                // User already has an entry - return it
+                const position = await getWaitlistPosition(waitlistEntry);
+                return res.status(423).json({
+                  table: buildPublicTableResponse(table, waitlistLength, {
+                    sessionOwner: false,
+                  }),
+                  sessionActive: true,
+                  message: `Table is ready for another guest. You are #${position} in the waitlist.`,
+                  waitlist: {
+                    token: waitlistEntry.token,
+                    status: waitlistEntry.status,
+                    position: position,
+                    name: waitlistEntry.name || null,
+                    partySize: waitlistEntry.partySize || 1,
+                    notifiedAt: waitlistEntry.notifiedAt,
+                    sessionToken: null,
+                  },
                 });
-                console.log(
-                  `[Table ${table.number}] Created new waitlist entry: ${token}`
-                );
+              } else {
+                // No existing entry - DON'T auto-create, let user join via frontend
+                // Just return 423 status to indicate table is occupied
+                return res.status(423).json({
+                  table: buildPublicTableResponse(table, waitlistLength, {
+                    sessionOwner: false,
+                  }),
+                  sessionActive: true,
+                  message:
+                    "Table is currently occupied. Please join the waitlist.",
+                  waitlist: null, // No waitlist entry - user must join manually
+                });
               }
             }
 
+            // If waitlistEntry exists (from waitToken), return it
             const position = await getWaitlistPosition(waitlistEntry);
             return res.status(423).json({
               table: buildPublicTableResponse(table, waitlistLength, {
@@ -982,10 +1005,25 @@ exports.lookupTableBySlug = async (req, res) => {
 
     // Handle OCCUPIED table
     if (table.status === "OCCUPIED") {
-      if (isSessionOwner) {
-        // Session owner - allow access
+      if (isSessionOwner || hasActiveUnpaidOrder) {
+        // Session owner or has active unpaid order - allow access
         table.lastAssignedAt = new Date();
         await table.save();
+
+        // If user has active order, return it so frontend can restore order state
+        if (hasActiveUnpaidOrder && activeOrder) {
+          console.log(
+            `[Table ${table.number}] Returning active order ${activeOrder._id} to customer (OCCUPIED table)`
+          );
+          return res.json({
+            table: buildPublicTableResponse(table, waitlistLength, {
+              includeSessionToken: true,
+              sessionOwner: true,
+            }),
+            sessionToken: table.sessionToken,
+            order: activeOrder,
+          });
+        }
 
         return res.json({
           table: buildPublicTableResponse(table, waitlistLength, {
@@ -1320,14 +1358,27 @@ exports.occupyTable = async (req, res) => {
       // Emit to cart admin / cafe so status updates in real-time
       const io = req.app.get("io");
       const emitToCafe = req.app.get("emitToCafe");
+      const tableStatusPayload = {
+        id: table._id,
+        number: table.number,
+        status: table.status,
+        currentOrder: table.currentOrder || null,
+        sessionToken: table.sessionToken || null,
+      };
+
+      // Emit to cafe room (for admin panel)
       if (io && table.cartId && emitToCafe) {
-        emitToCafe(io, table.cartId.toString(), "table:status:updated", {
-          id: table._id,
-          number: table.number,
-          status: table.status,
-          currentOrder: table.currentOrder || null,
-          sessionToken: table.sessionToken || null,
-        });
+        emitToCafe(
+          io,
+          table.cartId.toString(),
+          "table:status:updated",
+          tableStatusPayload
+        );
+      }
+
+      // Also emit globally so customers can receive real-time updates
+      if (io) {
+        io.emit("table:status:updated", tableStatusPayload);
       }
     }
     // If table is already OCCUPIED, do nothing
@@ -1456,25 +1507,53 @@ exports.updateTable = async (req, res) => {
     const emitToCafe = req.app.get("emitToCafe");
 
     // Emit socket event for table status update
+    const tableStatusPayload = {
+      id: table._id,
+      number: table.number,
+      status: table.status,
+      currentOrder: table.currentOrder || null,
+    };
+
+    // Emit to cafe room (for admin panel)
     if (io && emitToCafe && table.cartId) {
-      emitToCafe(io, table.cartId.toString(), "table:status:updated", {
-        id: table._id,
-        number: table.number,
-        status: table.status,
-        currentOrder: table.currentOrder || null,
-      });
+      emitToCafe(
+        io,
+        table.cartId.toString(),
+        "table:status:updated",
+        tableStatusPayload
+      );
+    }
+
+    // Also emit globally so customers can receive real-time updates
+    if (io) {
+      io.emit("table:status:updated", tableStatusPayload);
     }
 
     // When table becomes AVAILABLE, notify next waitlist person
-    // Don't cancel waitlist entries - let the flow handle it naturally
-    if (updates.status === "AVAILABLE" && table.status === "AVAILABLE") {
-      // Notify next person in waitlist (if any)
-      await notifyNextWaitlist(table._id, io);
-      // Note: We don't cancel waitlist entries here
-      // They will be handled when:
-      // 1. NOTIFIED person accesses table and gets seated
-      // 2. Someone takes direct access (no waitlist entries)
-      // 3. Waitlist entries expire or are cancelled
+    // CRITICAL: Only notify if table status actually changed FROM non-AVAILABLE TO AVAILABLE
+    // This prevents loops when updateTable is called multiple times or when table is already AVAILABLE
+    const statusChangedToAvailable =
+      updates.status === "AVAILABLE" &&
+      table.status === "AVAILABLE" &&
+      originalStatus !== "AVAILABLE";
+
+    if (statusChangedToAvailable) {
+      // Check if there's already a NOTIFIED entry before calling notifyNextWaitlist
+      // This prevents loops and duplicate notifications
+      const existingNotified = await Waitlist.findOne({
+        table: table._id,
+        status: "NOTIFIED",
+      });
+
+      // Only notify if there's no existing NOTIFIED entry
+      // notifyNextWaitlist already has this check, but adding it here prevents unnecessary calls
+      if (!existingNotified) {
+        await notifyNextWaitlist(table._id, io);
+      } else {
+        console.log(
+          `[TABLE] Table ${table.number} became AVAILABLE but already has NOTIFIED waitlist entry - skipping notification`
+        );
+      }
     }
 
     const waitlistLength = await countActiveWaitlist(table._id);
@@ -1500,19 +1579,16 @@ exports.deleteTable = async (req, res) => {
       return res.status(404).json({ message: "Table not found" });
     }
 
-    if (table.currentOrder) {
-      return res
-        .status(400)
-        .json({ message: "Cannot delete table with active order" });
-    }
-
+    // Cancel all active waitlist entries for this table
     await Waitlist.updateMany(
       { table: table._id, status: { $in: activeWaitlistStatuses } },
       { status: "CANCELLED" }
     );
 
+    // Delete the table directly
     await table.deleteOne();
-    return res.json({ message: "Table deleted" });
+
+    return res.json({ message: "Table deleted successfully" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

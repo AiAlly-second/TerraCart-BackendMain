@@ -149,14 +149,13 @@ if (
 
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
-  console.log(`[SOCKET] Client connected: ${socket.id}`);
+  // Client connected - removed verbose logging
 
   // Join cafe room
   socket.on("join:cafe", (cafeId) => {
     if (cafeId) {
       const room = `cafe:${cafeId}`;
       socket.join(room);
-      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
 
@@ -165,7 +164,6 @@ io.on("connection", (socket) => {
     if (franchiseId) {
       const room = `franchise:${franchiseId}`;
       socket.join(room);
-      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
 
@@ -174,7 +172,6 @@ io.on("connection", (socket) => {
     if (role) {
       const room = `role:${role}`;
       socket.join(room);
-      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
 
@@ -183,7 +180,6 @@ io.on("connection", (socket) => {
     if (cartId) {
       const room = `cart:${cartId}`;
       socket.join(room);
-      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
       // Also join cafe room for backward compatibility
       socket.emit("join:cafe", cartId);
     }
@@ -194,19 +190,19 @@ io.on("connection", (socket) => {
     if (kioskId) {
       const room = `kiosk:${kioskId}`;
       socket.join(room);
-      console.log(`[SOCKET] ${socket.id} joined room: ${room}`);
     }
   });
 
   socket.on("disconnect", (reason) => {
-    console.log(
-      `[SOCKET] Client disconnected: ${socket.id}, reason: ${reason}`
-    );
+    // Client disconnected - removed verbose logging
   });
 
   // Handle socket errors
   socket.on("error", (error) => {
-    console.error(`[SOCKET] Error for ${socket.id}:`, error);
+    // Only log actual errors, not normal disconnections
+    if (error.message && !error.message.includes("transport close")) {
+      console.error(`[SOCKET] Error:`, error.message);
+    }
   });
 });
 
@@ -217,9 +213,7 @@ const emitToCafe = (io, cafeId, event, data) => {
     const cartRoom = `cart:${cafeId}`;
     io.to(cafeRoom).emit(event, data);
     io.to(cartRoom).emit(event, data); // Also emit to cart room
-    console.log(
-      `[SOCKET] Emitted ${event} to cafe:${cafeId} and cart:${cafeId}`
-    );
+    // Emitted to cafe and cart rooms
   }
 };
 
@@ -238,7 +232,7 @@ const emitToCart = (io, cartId, event, data) => {
     const cafeRoom = `cafe:${cartId}`;
     io.to(cartRoom).emit(event, data);
     io.to(cafeRoom).emit(event, data); // Also emit to cafe room for backward compatibility
-    console.log(`[SOCKET] Emitted ${event} to cart:${cartId}`);
+    // Emitted to cart room
   }
 };
 
@@ -246,7 +240,7 @@ const emitToCart = (io, cartId, event, data) => {
 const emitToKiosk = (io, kioskId, event, data) => {
   if (kioskId) {
     io.to(`kiosk:${kioskId}`).emit(event, data);
-    console.log(`[SOCKET] Emitted ${event} to kiosk:${kioskId}`);
+    // Emitted to kiosk room
   }
 };
 

@@ -24,40 +24,43 @@ function buildWaitlistResponse(entry, position, table) {
 
 async function computePosition(entry) {
   if (!entry) return 0;
-  
+
+  // Ensure entry.table is an ObjectId
+  const tableId = entry.table?._id || entry.table;
+
   // For WAITING entries, count all WAITING and NOTIFIED entries created before them
   // For deterministic ordering when timestamps are identical, also consider entries with same createdAt but smaller _id
   if (entry.status === "WAITING") {
     const ahead = await Waitlist.countDocuments({
-      table: entry.table,
+      table: tableId,
       status: { $in: ["WAITING", "NOTIFIED"] },
       $or: [
         { createdAt: { $lt: entry.createdAt } },
-        { 
-          createdAt: entry.createdAt, 
-          _id: { $lt: entry._id } 
-        }
+        {
+          createdAt: entry.createdAt,
+          _id: { $lt: entry._id },
+        },
       ],
     });
     return ahead + 1;
   }
-  
+
   // For NOTIFIED entries, count all WAITING and NOTIFIED entries created before them
   if (entry.status === "NOTIFIED") {
     const ahead = await Waitlist.countDocuments({
-      table: entry.table,
+      table: tableId,
       status: { $in: ["WAITING", "NOTIFIED"] },
       $or: [
         { createdAt: { $lt: entry.createdAt } },
-        { 
-          createdAt: entry.createdAt, 
-          _id: { $lt: entry._id } 
-        }
+        {
+          createdAt: entry.createdAt,
+          _id: { $lt: entry._id },
+        },
       ],
     });
     return ahead + 1;
   }
-  
+
   // For SEATED or CANCELLED, return 0
   return 0;
 }
@@ -67,14 +70,20 @@ async function computePosition(entry) {
  */
 exports.joinWaitlist = async (req, res) => {
   try {
-    let { tableId, name, partySize, slug, token: providedToken } = req.body || {};
-    
+    let {
+      tableId,
+      name,
+      partySize,
+      slug,
+      token: providedToken,
+    } = req.body || {};
+
     // Sanitize waitToken - remove any trailing :number pattern (e.g., "token:1" -> "token")
     // This can happen if the token gets corrupted in localStorage or URL
     if (providedToken) {
-      providedToken = providedToken.replace(/:\d+$/, '');
+      providedToken = providedToken.replace(/:\d+$/, "");
     }
-    
+
     let table;
 
     if (tableId) {
@@ -89,8 +98,30 @@ exports.joinWaitlist = async (req, res) => {
 
     // Check if table is available - if so, user shouldn't join waitlist
     if (table.status === "AVAILABLE" && !table.sessionToken) {
-      return res.status(400).json({ 
-        message: "Table is available. No need to join waitlist." 
+      return res.status(400).json({
+        message: "Table is available. No need to join waitlist.",
+      });
+    }
+
+    // CRITICAL: Validate that name and partySize are provided
+    // Don't allow auto-joining without customer information
+    if (!name || !name.trim()) {
+      return res.status(400).json({
+        message: "Name is required to join the waitlist.",
+      });
+    }
+
+    if (!partySize || !Number.isFinite(partySize) || partySize <= 0) {
+      return res.status(400).json({
+        message:
+          "Valid party size (at least 1) is required to join the waitlist.",
+      });
+    }
+
+    // Validate party size against table capacity
+    if (table.capacity && partySize > table.capacity) {
+      return res.status(400).json({
+        message: `This table can accommodate a maximum of ${table.capacity} members. Please enter ${table.capacity} or fewer members.`,
       });
     }
 
@@ -121,16 +152,22 @@ exports.joinWaitlist = async (req, res) => {
     }
 
     // CRITICAL: Check if user already has an active waitlist entry for this table
-    // Check by sessionToken if available (from table lookup)
-    // This prevents duplicate entries when user clicks "Join Waitlist" multiple times
+    // BUT ONLY if they provided a token (meaning they're rejoining)
+    // If no token is provided, don't check by sessionToken - allow fresh join
+    // This ensures users can join waitlist even if they have a sessionToken from a previous visit
     const { sessionToken } = req.body;
-    if (sessionToken) {
+    // Only check by sessionToken if:
+    // 1. A token was provided (user is rejoining/updating existing entry), OR
+    // 2. We're explicitly checking for duplicates (but we want to allow fresh joins)
+    // For fresh joins (no token), don't check by sessionToken to allow new entry
+    if (sessionToken && providedToken) {
+      // User provided both sessionToken and token - check if entry exists
       const existingBySession = await Waitlist.findOne({
         table: table._id,
         sessionToken: sessionToken,
         status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
       });
-      
+
       if (existingBySession) {
         // User already has an active entry - return it instead of creating duplicate
         const position = await computePosition(existingBySession);
@@ -148,6 +185,7 @@ exports.joinWaitlist = async (req, res) => {
         });
       }
     }
+    // If no token provided, don't check by sessionToken - allow fresh join with name/partySize
 
     const token = providedToken || crypto.randomBytes(6).toString("hex");
     const entry = await Waitlist.create({
@@ -159,23 +197,39 @@ exports.joinWaitlist = async (req, res) => {
       sessionToken: sessionToken || undefined, // Link to session if available
     });
 
-    // Calculate position after entry is created - this ensures accurate ordering
-    const position = await computePosition(entry);
-    
+    // CRITICAL: Small delay to ensure all concurrent entries are saved before calculating position
+    // This prevents race conditions where multiple users join at the same time
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Re-fetch the entry to ensure we have the latest data
+    const freshEntry = await Waitlist.findById(entry._id);
+    if (!freshEntry) {
+      return res
+        .status(500)
+        .json({ message: "Failed to create waitlist entry" });
+    }
+
+    // Calculate position after entry is created and all concurrent entries are saved
+    // This ensures accurate ordering even when multiple users join simultaneously
+    const position = await computePosition(freshEntry);
+
     // Fallback: if computePosition returns 0 (shouldn't happen for WAITING), calculate manually
     // Count all active entries created before or at the same time as this entry
     // For same timestamp, use _id comparison for deterministic ordering
-    const finalPosition = position > 0 ? position : (await Waitlist.countDocuments({
-      table: table._id,
-      status: { $in: ["WAITING", "NOTIFIED"] },
-      $or: [
-        { createdAt: { $lt: entry.createdAt } },
-        { 
-          createdAt: entry.createdAt, 
-          _id: { $lte: entry._id } 
-        }
-      ],
-    }));
+    const finalPosition =
+      position > 0
+        ? position
+        : await Waitlist.countDocuments({
+            table: table._id,
+            status: { $in: ["WAITING", "NOTIFIED"] },
+            $or: [
+              { createdAt: { $lt: freshEntry.createdAt } },
+              {
+                createdAt: freshEntry.createdAt,
+                _id: { $lte: freshEntry._id },
+              },
+            ],
+          });
 
     const io = req.app?.get("io");
     if (io) {
@@ -214,7 +268,7 @@ exports.getWaitlistStatus = async (req, res) => {
     }
 
     // Sanitize waitToken - remove any trailing :number pattern (e.g., "token:1" -> "token")
-    token = token.replace(/:\d+$/, '');
+    token = token.replace(/:\d+$/, "");
 
     const entry = await Waitlist.findOne({ token });
     if (!entry) {
@@ -240,7 +294,7 @@ exports.cancelWaitlistEntry = async (req, res) => {
   try {
     let { token } = req.params;
     // Sanitize waitToken - remove any trailing :number pattern
-    token = token.replace(/:\d+$/, '');
+    token = token.replace(/:\d+$/, "");
     const entry = await Waitlist.findOne({ token });
     if (!entry) {
       return res.status(404).json({ message: "Waitlist entry not found" });
@@ -261,7 +315,7 @@ exports.cancelWaitlistEntry = async (req, res) => {
         token: entry.token,
         status: entry.status,
       });
-      
+
       // If cancelled entry was NOTIFIED, notify next person
       if (wasNotified) {
         await exports.notifyNextWaitlist(entry.table, io);
@@ -282,7 +336,7 @@ exports.seatWaitlistEntry = async (req, res) => {
   try {
     let { token } = req.params;
     // Sanitize waitToken - remove any trailing :number pattern
-    token = token.replace(/:\d+$/, '');
+    token = token.replace(/:\d+$/, "");
     const entry = await Waitlist.findOne({ token });
     if (!entry) {
       return res.status(404).json({ message: "Waitlist entry not found" });
@@ -290,8 +344,8 @@ exports.seatWaitlistEntry = async (req, res) => {
 
     // Only allow seating if entry is WAITING or NOTIFIED
     if (!["WAITING", "NOTIFIED"].includes(entry.status)) {
-      return res.status(400).json({ 
-        message: `Cannot seat waitlist entry with status: ${entry.status}. Only WAITING or NOTIFIED entries can be seated.` 
+      return res.status(400).json({
+        message: `Cannot seat waitlist entry with status: ${entry.status}. Only WAITING or NOTIFIED entries can be seated.`,
       });
     }
 
@@ -303,8 +357,8 @@ exports.seatWaitlistEntry = async (req, res) => {
     // Check if table is available or reserved
     // If OCCUPIED, we can still seat if it's the same person (session owner)
     if (!["AVAILABLE", "RESERVED", "OCCUPIED"].includes(table.status)) {
-      return res.status(400).json({ 
-        message: `Cannot seat at table with status: ${table.status}` 
+      return res.status(400).json({
+        message: `Cannot seat at table with status: ${table.status}`,
       });
     }
 
@@ -317,14 +371,14 @@ exports.seatWaitlistEntry = async (req, res) => {
       try {
         sessionToken = crypto.randomBytes(10).toString("hex");
         table.sessionToken = sessionToken;
-        
+
         // Update table status - mark as RESERVED when waitlist entry is seated
         // Table will be marked as OCCUPIED when order is created
         if (table.status === "AVAILABLE") {
           table.status = "RESERVED";
         }
         // If RESERVED or OCCUPIED, keep status but assign session token
-        
+
         table.lastAssignedAt = new Date();
         await table.save();
         saved = true;
@@ -384,7 +438,18 @@ exports.listWaitlistForTable = async (req, res) => {
       .sort({ createdAt: 1 })
       .lean();
 
-    return res.json(entries);
+    // Calculate position for each entry to ensure sync with customer view
+    const entriesWithPositions = await Promise.all(
+      entries.map(async (entry) => {
+        const position = await computePosition(entry);
+        return {
+          ...entry,
+          position,
+        };
+      })
+    );
+
+    return res.json(entriesWithPositions);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -432,7 +497,9 @@ exports.notifyNextWaitlist = async (tableId, io) => {
       });
     }
 
-    console.log(`[Waitlist] Notified next person for table ${tableId}: ${next.token}`);
+    console.log(
+      `[Waitlist] Notified next person for table ${tableId}: ${next.token}`
+    );
     return next;
   } catch (err) {
     console.error("notifyNextWaitlist error:", err);
@@ -458,7 +525,9 @@ exports.notifyNextWaitlistRoute = async (req, res) => {
     const io = req.app?.get("io");
     const entry = await exports.notifyNextWaitlist(id, io);
     if (!entry) {
-      return res.status(404).json({ message: "No waiting guests for this table" });
+      return res
+        .status(404)
+        .json({ message: "No waiting guests for this table" });
     }
 
     return res.json(entry);
@@ -474,7 +543,7 @@ exports.notifyWaitlistEntry = async (req, res) => {
   try {
     let { token } = req.params;
     // Sanitize waitToken - remove any trailing :number pattern
-    token = token.replace(/:\d+$/, '');
+    token = token.replace(/:\d+$/, "");
     const entry = await Waitlist.findOne({ token });
     if (!entry) {
       return res.status(404).json({ message: "Waitlist entry not found" });
@@ -485,7 +554,9 @@ exports.notifyWaitlistEntry = async (req, res) => {
     }
 
     if (entry.status !== "WAITING") {
-      return res.status(400).json({ message: "Only waiting guests can be notified" });
+      return res
+        .status(400)
+        .json({ message: "Only waiting guests can be notified" });
     }
 
     // Cancel any other NOTIFIED entries for this table first

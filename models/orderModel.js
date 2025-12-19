@@ -14,11 +14,11 @@ const itemSchema = new mongoose.Schema(
 
 const kotLineSchema = new mongoose.Schema(
   {
-    items:        { type: [itemSchema], required: true },
-    subtotal:     { type: Number, required: true },
-    gst:          { type: Number, required: true },
-    totalAmount:  { type: Number, required: true },
-    createdAt:    { type: Date,   default: Date.now }
+    items: { type: [itemSchema], required: true },
+    subtotal: { type: Number, required: true },
+    gst: { type: Number, required: true },
+    totalAmount: { type: Number, required: true },
+    createdAt: { type: Date, default: Date.now },
   },
   { _id: false }
 );
@@ -26,9 +26,9 @@ const kotLineSchema = new mongoose.Schema(
 /* ---------- order schema ---------- */
 const orderSchema = new mongoose.Schema(
   {
-    _id:         { type: String }, // add this line
+    _id: { type: String }, // add this line
     tableNumber: { type: String },
-    table:       { type: mongoose.Schema.Types.ObjectId, ref: "Table" },
+    table: { type: mongoose.Schema.Types.ObjectId, ref: "Table" },
     serviceType: {
       type: String,
       enum: ["DINE_IN", "TAKEAWAY"],
@@ -38,7 +38,7 @@ const orderSchema = new mongoose.Schema(
     customerName: { type: String },
     customerMobile: { type: String },
     customerEmail: { type: String },
-    kotLines:    { type: [kotLineSchema], default: [] },
+    kotLines: { type: [kotLineSchema], default: [] },
     status: {
       type: String,
       enum: [
@@ -65,13 +65,18 @@ const orderSchema = new mongoose.Schema(
     returnedAt: Date,
     autoReleasedAt: Date,
     sessionToken: { type: String, index: true, sparse: true }, // Session token for dine-in orders
+    // Simple sequential token for takeaway orders (1, 2, 3, etc.) - unique per cart
+    takeawayToken: { type: Number, index: true, sparse: true },
     // Cart admin association for data isolation
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Franchise association - orders belong to franchises through carts
-    franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    franchiseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      index: true,
+    },
   },
   { timestamps: true }
 );
-
 
 module.exports = mongoose.model("Order", orderSchema);
