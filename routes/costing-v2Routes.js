@@ -61,6 +61,8 @@ const {
   createExpenseCategory,
   // Sync
   syncMenuItemsFromDefault,
+  // Push
+  pushToCartAdmins,
 } = require("../controllers/costing-v2/costingController");
 const { protect } = require("../middleware/authMiddleware");
 const { authorize } = require("../middleware/authMiddleware");
@@ -138,7 +140,15 @@ router.post(
 // Get inventory from costing-v2 ingredients for mobile app
 router.get(
   "/inventory",
-  authorize(["super_admin", "franchise_admin", "admin", "waiter", "cook", "captain", "manager"]),
+  authorize([
+    "super_admin",
+    "franchise_admin",
+    "admin",
+    "waiter",
+    "cook",
+    "captain",
+    "manager",
+  ]),
   getCostingInventory
 );
 router.post(
@@ -324,6 +334,13 @@ router.post(
   "/menu-items/sync-from-default",
   authorize(["super_admin", "franchise_admin", "admin"]),
   syncMenuItemsFromDefault
+);
+
+// ==================== PUSH ====================
+router.post(
+  "/push-to-cart-admins",
+  authorize(["super_admin"]),
+  pushToCartAdmins
 );
 
 module.exports = router;

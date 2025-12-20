@@ -25,14 +25,18 @@ const logDebug = (location, message, data, hypothesisId) => {
   }
 };
 const MenuItem = require("../../models/costing-v2/menuItemModel");
+const { MenuItem: OperationalMenuItem } = require("../../models/menuItemModel");
+const MenuCategory = require("../../models/menuCategoryModel");
 const Waste = require("../../models/costing-v2/wasteModel");
 const LabourCost = require("../../models/costing-v2/labourCostModel");
 const Overhead = require("../../models/costing-v2/overheadModel");
+const User = require("../../models/userModel");
+const Cart = require("../../models/cartModel");
+const CartMenuItem = require("../../models/cartMenuModel");
 const CostingExpense = require("../../models/costing-v2/expenseModel");
 const CostingExpenseCategory = require("../../models/costing-v2/expenseCategoryModel");
 const Order = require("../../models/orderModel");
 const DefaultMenu = require("../../models/defaultMenuModel");
-const User = require("../../models/userModel");
 const FIFOService = require("../../services/costing-v2/fifoService");
 const { convertUnit } = require("../../utils/costing-v2/unitConverter");
 const {
@@ -1847,9 +1851,68 @@ exports.deleteMenuItem = async (req, res) => {
 /**
  * @route   GET /api/costing-v2/default-menu-items
  * @desc    Get default menu items for selection/import
+ *          - Super admin: gets global default menu
+ *          - Franchise admin: gets their franchise default menu
+ *          - Cart admin: gets their cart menu items
  */
 exports.getDefaultMenuItems = async (req, res) => {
   try {
+    // For cart admin, get menu items from their operational menu (MenuItem with cafeId)
+    if (req.user.role === "admin") {
+      const userId = req.user._id;
+      const userIdStr = userId.toString();
+
+      // Cart admins use MenuItem model with cafeId = their _id
+      // Get menu items for this cart admin
+      const operationalMenuItems = await OperationalMenuItem.find({
+        cafeId: userId,
+      })
+        .populate("category", "name")
+        .sort({ sortOrder: 1, name: 1 })
+        .lean();
+
+      console.log(
+        `[getDefaultMenuItems] Found ${operationalMenuItems.length} operational menu items for cart admin ${userId}`
+      );
+
+      // Get all categories for this cart admin to map IDs to names
+      const categories = await MenuCategory.find({ cafeId: userId })
+        .select("_id name")
+        .lean();
+      const categoryMap = new Map();
+      categories.forEach((cat) => {
+        categoryMap.set(cat._id.toString(), cat.name);
+      });
+
+      // Format menu items to match default menu item structure
+      const menuItems = operationalMenuItems.map((item) => {
+        // Handle category - it might be populated (object) or just an ID
+        let categoryName = "Uncategorized";
+        if (item.category) {
+          if (typeof item.category === "object" && item.category.name) {
+            categoryName = item.category.name;
+          } else {
+            // Category is just an ID, look it up in the map
+            const categoryId = item.category.toString();
+            categoryName = categoryMap.get(categoryId) || categoryId;
+          }
+        }
+
+        return {
+          name: item.name,
+          category: categoryName,
+          price: item.price,
+          description: item.description || "",
+          image: item.image || "",
+          franchiseId: req.user.franchiseId || null,
+          defaultMenuPath: `cart/${userIdStr}/${categoryName}/${item.name}`,
+        };
+      });
+
+      return res.json({ success: true, data: menuItems });
+    }
+
+    // For super admin and franchise admin, get from default menu
     // Get franchise ID based on user role
     let franchiseId = null;
     if (req.user.role === "franchise_admin") {
@@ -3516,5 +3579,289 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @route   POST /api/costing-v2/push-to-cart-admins
+ * @desc    Push super admin ingredients and BOMs to cart admins
+ * @access  Super Admin only
+ */
+exports.pushToCartAdmins = async (req, res) => {
+  try {
+    // Only super admin can push
+    if (req.user.role !== "super_admin") {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Access denied. Only super admin can push data to cart admins.",
+      });
+    }
+
+    const { outletId } = req.body; // Optional: push to specific cart admin, or all if not provided
+
+    // Get all super admin ingredients (outletId: null)
+    const superAdminIngredients = await Ingredient.find({
+      outletId: null,
+      isActive: true,
+    }).lean();
+
+    // Get all super admin recipes/BOMs (outletId: null)
+    const superAdminRecipes = await Recipe.find({
+      outletId: null,
+      isActive: true,
+    })
+      .populate("ingredients.ingredientId", "name uom baseUnit")
+      .lean();
+
+    // Get target cart admins
+    let cartAdmins = [];
+    if (outletId) {
+      // Push to specific cart admin
+      const cartAdmin = await User.findById(outletId);
+      if (!cartAdmin || cartAdmin.role !== "admin") {
+        return res.status(404).json({
+          success: false,
+          message: "Cart admin not found",
+        });
+      }
+      cartAdmins = [cartAdmin];
+    } else {
+      // Push to all cart admins
+      cartAdmins = await User.find({ role: "admin", isActive: { $ne: false } });
+    }
+
+    const results = {
+      ingredients: { created: 0, updated: 0, skipped: 0 },
+      recipes: { created: 0, updated: 0, skipped: 0 },
+      cartAdmins: [],
+    };
+
+    // Process each cart admin
+    for (const cartAdmin of cartAdmins) {
+      const cartAdminId = cartAdmin._id;
+      const cartAdminFranchiseId = cartAdmin.franchiseId;
+      const cartAdminResult = {
+        cartAdminId: cartAdminId.toString(),
+        cartAdminName: cartAdmin.name || cartAdmin.cartName || "Unknown",
+        ingredients: { created: 0, updated: 0, skipped: 0 },
+        recipes: { created: 0, updated: 0, skipped: 0 },
+      };
+
+      // Push ingredients
+      for (const superIngredient of superAdminIngredients) {
+        // Check if cart admin already has this ingredient (by name)
+        const existingIngredient = await Ingredient.findOne({
+          name: superIngredient.name,
+          outletId: cartAdminId,
+        });
+
+        if (existingIngredient) {
+          // Update existing ingredient with super admin data, but preserve cart admin's inventory data
+          const updateData = {
+            category: superIngredient.category,
+            storageLocation: superIngredient.storageLocation,
+            uom: superIngredient.uom,
+            baseUnit: superIngredient.baseUnit,
+            conversionFactors: superIngredient.conversionFactors,
+            shelfTimeDays: superIngredient.shelfTimeDays,
+            // Preserve cart admin's own data:
+            // - qtyOnHand (keep existing)
+            // - reorderLevel (keep existing)
+            // - currentCostPerBaseUnit (keep existing - from their purchases)
+            // - fifoLayers (keep existing)
+            // - preferredSupplierId (keep existing)
+            isActive: superIngredient.isActive,
+          };
+
+          await Ingredient.findByIdAndUpdate(
+            existingIngredient._id,
+            updateData,
+            {
+              runValidators: true,
+            }
+          );
+          cartAdminResult.ingredients.updated++;
+          results.ingredients.updated++;
+        } else {
+          // Create new ingredient for cart admin
+          const newIngredient = new Ingredient({
+            name: superIngredient.name,
+            category: superIngredient.category,
+            storageLocation: superIngredient.storageLocation,
+            uom: superIngredient.uom,
+            baseUnit: superIngredient.baseUnit,
+            conversionFactors: superIngredient.conversionFactors,
+            reorderLevel: superIngredient.reorderLevel || 0,
+            shelfTimeDays: superIngredient.shelfTimeDays,
+            currentCostPerBaseUnit: 0, // Will be set when cart admin makes purchases
+            qtyOnHand: 0, // Cart admin starts with 0 inventory
+            fifoLayers: [], // Empty FIFO layers
+            isActive: superIngredient.isActive,
+            outletId: cartAdminId,
+            franchiseId: cartAdminFranchiseId,
+          });
+
+          await newIngredient.save();
+          cartAdminResult.ingredients.created++;
+          results.ingredients.created++;
+        }
+      }
+
+      // Push recipes/BOMs
+      for (const superRecipe of superAdminRecipes) {
+        // Check if cart admin already has this recipe (by name)
+        const existingRecipe = await Recipe.findOne({
+          name: superRecipe.name,
+          outletId: cartAdminId,
+        });
+
+        if (existingRecipe) {
+          // Update existing recipe with super admin data
+          // Map ingredient IDs from super admin to cart admin ingredients
+          const mappedIngredients = [];
+          for (const superIngredient of superRecipe.ingredients || []) {
+            if (superIngredient.ingredientId) {
+              // Get ingredient name - handle both populated and non-populated cases
+              let ingredientName = null;
+              if (
+                typeof superIngredient.ingredientId === "object" &&
+                superIngredient.ingredientId.name
+              ) {
+                // Populated ingredient
+                ingredientName = superIngredient.ingredientId.name;
+              } else {
+                // Not populated - fetch the ingredient to get name
+                const superIngredientDoc = await Ingredient.findById(
+                  superIngredient.ingredientId
+                );
+                if (superIngredientDoc) {
+                  ingredientName = superIngredientDoc.name;
+                }
+              }
+
+              if (ingredientName) {
+                // Find corresponding ingredient in cart admin's ingredients by name
+                const cartAdminIngredient = await Ingredient.findOne({
+                  name: ingredientName,
+                  outletId: cartAdminId,
+                });
+
+                if (cartAdminIngredient) {
+                  mappedIngredients.push({
+                    ingredientId: cartAdminIngredient._id,
+                    qty: superIngredient.qty,
+                    uom: superIngredient.uom,
+                  });
+                }
+              }
+            }
+          }
+
+          const updateData = {
+            yieldPercent: superRecipe.yieldPercent,
+            portions: superRecipe.portions,
+            instructions: superRecipe.instructions,
+            ingredients: mappedIngredients,
+            isActive: superRecipe.isActive,
+          };
+
+          await Recipe.findByIdAndUpdate(existingRecipe._id, updateData, {
+            runValidators: true,
+          });
+
+          // Recalculate cost for updated recipe
+          const updatedRecipe = await Recipe.findById(existingRecipe._id);
+          if (updatedRecipe) {
+            await updatedRecipe.calculateCost(cartAdminId.toString());
+            await updatedRecipe.save();
+          }
+
+          cartAdminResult.recipes.updated++;
+          results.recipes.updated++;
+        } else {
+          // Create new recipe for cart admin
+          // Map ingredient IDs from super admin to cart admin ingredients
+          const mappedIngredients = [];
+          for (const superIngredient of superRecipe.ingredients || []) {
+            if (superIngredient.ingredientId) {
+              // Get ingredient name - handle both populated and non-populated cases
+              let ingredientName = null;
+              if (
+                typeof superIngredient.ingredientId === "object" &&
+                superIngredient.ingredientId.name
+              ) {
+                // Populated ingredient
+                ingredientName = superIngredient.ingredientId.name;
+              } else {
+                // Not populated - fetch the ingredient to get name
+                const superIngredientDoc = await Ingredient.findById(
+                  superIngredient.ingredientId
+                );
+                if (superIngredientDoc) {
+                  ingredientName = superIngredientDoc.name;
+                }
+              }
+
+              if (ingredientName) {
+                // Find corresponding ingredient in cart admin's ingredients by name
+                const cartAdminIngredient = await Ingredient.findOne({
+                  name: ingredientName,
+                  outletId: cartAdminId,
+                });
+
+                if (cartAdminIngredient) {
+                  mappedIngredients.push({
+                    ingredientId: cartAdminIngredient._id,
+                    qty: superIngredient.qty,
+                    uom: superIngredient.uom,
+                  });
+                }
+              }
+            }
+          }
+
+          if (mappedIngredients.length > 0) {
+            const newRecipe = new Recipe({
+              name: superRecipe.name,
+              yieldPercent: superRecipe.yieldPercent,
+              portions: superRecipe.portions,
+              instructions: superRecipe.instructions,
+              ingredients: mappedIngredients,
+              isActive: superRecipe.isActive,
+              outletId: cartAdminId,
+              franchiseId: cartAdminFranchiseId,
+            });
+
+            await newRecipe.save();
+
+            // Calculate cost for new recipe
+            await newRecipe.calculateCost(cartAdminId.toString());
+            await newRecipe.save();
+
+            cartAdminResult.recipes.created++;
+            results.recipes.created++;
+          } else {
+            // Skip if no matching ingredients found
+            cartAdminResult.recipes.skipped++;
+            results.recipes.skipped++;
+          }
+        }
+      }
+
+      results.cartAdmins.push(cartAdminResult);
+    }
+
+    res.json({
+      success: true,
+      message: `Successfully pushed data to ${cartAdmins.length} cart admin(s)`,
+      data: results,
+    });
+  } catch (error) {
+    console.error("[PUSH_TO_CART_ADMINS] Error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to push data to cart admins",
+    });
   }
 };
