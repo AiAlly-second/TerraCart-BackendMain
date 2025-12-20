@@ -79,4 +79,18 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Performance indexes for faster queries
+// Compound index for filtering orders by cart and status (most common query)
+orderSchema.index({ cartId: 1, status: 1, createdAt: -1 });
+// Compound index for filtering by franchise and status
+orderSchema.index({ franchiseId: 1, status: 1, createdAt: -1 });
+// Index for status-based queries
+orderSchema.index({ status: 1, createdAt: -1 });
+// Index for date-based queries
+orderSchema.index({ createdAt: -1 });
+// Compound index for cart and date queries
+orderSchema.index({ cartId: 1, createdAt: -1 });
+// Index for service type queries
+orderSchema.index({ cartId: 1, serviceType: 1, status: 1 });
+
 module.exports = mongoose.model("Order", orderSchema);

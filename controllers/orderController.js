@@ -1471,39 +1471,66 @@ const getOrders = async (req, res) => {
 
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
+    // Use select to limit fields and improve performance
     const orders = await Order.find(query)
-      .sort({ createdAt: -1 }) // Sort by newest first
+      .sort({ createdAt: -1 }) // Sort by newest first (uses index)
       .limit(10000) // Safety limit to prevent infinite queries
-      .populate("table")
+      .populate("table", "number name status") // Only populate needed fields
+      .select("-__v") // Exclude version field
       .lean();
 
-    // Ensure franchiseId is set for orders that have cartId but missing franchiseId
+    // Optimize franchiseId population: Batch fetch instead of N+1 queries
     const User = require("../models/userModel");
-    for (const order of orders) {
-      if (!order.franchiseId && order.cartId) {
-        try {
-          const cartId = order.cartId.toString
-            ? order.cartId.toString()
-            : order.cartId;
-          const cafe = await User.findById(cartId).select("franchiseId").lean();
-          if (cafe && cafe.franchiseId) {
-            order.franchiseId = cafe.franchiseId;
-            // Update order in database (non-blocking)
-            Order.findByIdAndUpdate(order._id, {
-              franchiseId: cafe.franchiseId,
-            }).catch((err) => {
-              console.warn(
-                `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
-                err.message
-              );
-            });
-          }
-        } catch (err) {
-          console.warn(
-            `[GET_ORDERS] Error fetching franchiseId for order ${order._id}:`,
-            err.message
+    const ordersNeedingFranchiseId = orders.filter(
+      (order) => !order.franchiseId && order.cartId
+    );
+    
+    if (ordersNeedingFranchiseId.length > 0) {
+      // Batch fetch all cafes at once
+      const cartIds = [
+        ...new Set(
+          ordersNeedingFranchiseId.map((o) =>
+            o.cartId.toString ? o.cartId.toString() : o.cartId
+          )
+        ),
+      ];
+      
+      const cafes = await User.find({ _id: { $in: cartIds } })
+        .select("_id franchiseId")
+        .lean();
+      
+      const cafeMap = new Map(
+        cafes.map((c) => [c._id.toString(), c.franchiseId])
+      );
+      
+      // Update orders in memory and batch update in background
+      const updatePromises = [];
+      for (const order of ordersNeedingFranchiseId) {
+        const cartId = order.cartId.toString
+          ? order.cartId.toString()
+          : order.cartId;
+        const franchiseId = cafeMap.get(cartId);
+        if (franchiseId) {
+          order.franchiseId = franchiseId;
+          // Batch update in background (non-blocking)
+          updatePromises.push(
+            Order.findByIdAndUpdate(order._id, { franchiseId }).catch(
+              (err) => {
+                console.warn(
+                  `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
+                  err.message
+                );
+              }
+            )
           );
         }
+      }
+      
+      // Execute updates in background (don't await)
+      if (updatePromises.length > 0) {
+        Promise.all(updatePromises).catch((err) => {
+          console.warn("[GET_ORDERS] Background update error:", err.message);
+        });
       }
     }
 
@@ -1939,12 +1966,13 @@ const updateOrderStatus = async (req, res) => {
 
     const io = req.app.get("io");
 
-    order.status = status;
+    // Prepare update object for faster atomic update
+    const updateData = { status };
     if (status === "Paid") {
-      order.paidAt = new Date();
+      updateData.paidAt = new Date();
     } else if (status === "Returned") {
-      order.returnedAt = new Date();
-      order.paidAt = null;
+      updateData.returnedAt = new Date();
+      updateData.paidAt = null;
       if (Array.isArray(order.kotLines)) {
         order.kotLines.forEach((kot, index) => {
           const kotLine = order.kotLines[index];
@@ -1960,130 +1988,126 @@ const updateOrderStatus = async (req, res) => {
           kotLine.gst = 0;
           kotLine.totalAmount = 0;
         });
+        updateData.kotLines = order.kotLines;
       }
-      order.markModified("kotLines");
     }
 
-    await order.save();
+    // Use findByIdAndUpdate for faster atomic update (instead of find + save)
+    const updatedOrder = await Order.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true, runValidators: false } // Skip validators for speed
+    )
+      .populate("table", "number name status")
+      .lean();
+
+    if (!updatedOrder) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Update local order object for socket emission
+    Object.assign(order, updatedOrder);
 
     // Automatically consume ingredients when order is marked as Ready, Paid, or Finalized
     // This ensures ingredients are consumed when order is sold, even if it skips "Ready" status
+    // Run in background to not block status update response
     const shouldConsumeIngredients =
       (status === "Ready" || status === "Paid" || status === "Finalized") &&
       req.user;
 
     if (shouldConsumeIngredients) {
-      try {
-        console.log(
-          `[COSTING] Order ${order._id} marked as ${status} - consuming ingredients...`
-        );
-        console.log(`[COSTING] Order details:`, {
-          orderId: order._id,
-          cartId: order.cartId,
-          cafeId: order.cafeId,
-          kotLinesCount: order.kotLines?.length || 0,
-          itemsCount:
-            order.kotLines?.reduce(
-              (sum, kot) => sum + (kot.items?.length || 0),
-              0
-            ) || 0,
+      // Run ingredient consumption in background (non-blocking)
+      consumeIngredientsForOrder(updatedOrder, req.user._id)
+        .then((consumptionResult) => {
+          if (consumptionResult.success) {
+            console.log(
+              `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`
+            );
+          } else {
+            console.warn(
+              `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
+              consumptionResult.error || consumptionResult.message
+            );
+          }
+        })
+        .catch((consumptionError) => {
+          console.error(
+            `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
+            consumptionError
+          );
         });
-
-        // Ensure order is populated before consumption
-        const orderForConsumption = await Order.findById(order._id).lean();
-        if (!orderForConsumption) {
-          console.error(`[COSTING] Order ${order._id} not found after save`);
-          return;
-        }
-
-        const consumptionResult = await consumeIngredientsForOrder(
-          orderForConsumption,
-          req.user._id
-        );
-        if (consumptionResult.success) {
-          console.log(
-            `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`
-          );
-          if (consumptionResult.summary) {
-            console.log(`[COSTING] Consumption summary:`, {
-              itemsProcessed: consumptionResult.summary.itemsProcessed,
-              ingredientsConsumed:
-                consumptionResult.summary.ingredientsConsumed.length,
-              totalCost: consumptionResult.summary.totalCost,
-              errors: consumptionResult.summary.errors.length,
-            });
-            if (consumptionResult.summary.errors.length > 0) {
-              console.warn(
-                `[COSTING] ⚠️ Consumption errors:`,
-                consumptionResult.summary.errors
-              );
-            }
-          }
-        } else {
-          console.warn(
-            `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
-            consumptionResult.error || consumptionResult.message
-          );
-          if (consumptionResult.summary?.errors) {
-            console.warn(`[COSTING] Errors:`, consumptionResult.summary.errors);
-          }
-          // Don't fail the order status update if consumption fails - log warning only
-        }
-      } catch (consumptionError) {
-        console.error(
-          `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
-          consumptionError
-        );
-        console.error(`[COSTING] Error stack:`, consumptionError.stack);
-        // Don't fail the order status update if consumption fails - log error only
-      }
     }
 
-    if (status === "Paid") {
-      const { payment, created } = await ensurePaymentRecord(order, {
-        status: "PAID",
-        method: "CASH",
-        description: "Payment recorded via admin panel",
-      });
-      if (payment && io) {
-        const payload = formatPaymentPayload(payment);
-        if (payload) {
-          io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
-        }
-      }
-    }
-
-    if (status === "Returned") {
-      const payments = await Payment.find({ orderId: order._id });
-      for (const payment of payments) {
-        payment.status = "CANCELLED";
-        payment.cancelledAt = new Date();
-        payment.cancellationReason = "Order returned";
-        await payment.save();
-        if (io) {
-          const payload = formatPaymentPayload(payment);
-          if (payload) {
-            io.emit("paymentUpdated", payload);
-          }
-        }
-      }
-    }
-
-    // Release table for final statuses (Paid, Cancelled, Returned, Finalized)
+    // Handle payment updates in background (non-blocking)
     const emitToCafe = req.app.get("emitToCafe");
-    if (["Paid", "Cancelled", "Returned", "Finalized"].includes(status)) {
-      await releaseTableForOrder(order, io, emitToCafe);
-    }
-
-    // Emit socket event to cafe room (only for admin panel, not customer frontend)
+    
+    // Emit socket event immediately for fast UI update
     if (order.cartId && io && emitToCafe) {
-      // Only emit to admin panel - customer frontend uses polling to avoid loops
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      // Emit immediately with updated order data
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", updatedOrder);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", updatedOrder); // Legacy support
     }
 
-    // Status updated successfully
-    return res.json(order);
+    // Handle payment and table release in background (non-blocking)
+    Promise.all([
+      // Payment handling
+      (async () => {
+        if (status === "Paid") {
+          try {
+            const { payment, created } = await ensurePaymentRecord(updatedOrder, {
+              status: "PAID",
+              method: "CASH",
+              description: "Payment recorded via admin panel",
+            });
+            if (payment && io) {
+              const payload = formatPaymentPayload(payment);
+              if (payload) {
+                io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
+              }
+            }
+          } catch (err) {
+            console.error("[UPDATE_STATUS] Payment error:", err);
+          }
+        }
+
+        if (status === "Returned") {
+          try {
+            const payments = await Payment.find({ orderId: order._id });
+            const updatePromises = payments.map((payment) => {
+              payment.status = "CANCELLED";
+              payment.cancelledAt = new Date();
+              payment.cancellationReason = "Order returned";
+              return payment.save().then(() => {
+                if (io) {
+                  const payload = formatPaymentPayload(payment);
+                  if (payload) {
+                    io.emit("paymentUpdated", payload);
+                  }
+                }
+              });
+            });
+            await Promise.all(updatePromises);
+          } catch (err) {
+            console.error("[UPDATE_STATUS] Payment cancellation error:", err);
+          }
+        }
+      })(),
+      // Table release
+      (async () => {
+        if (["Paid", "Cancelled", "Returned", "Finalized"].includes(status)) {
+          try {
+            await releaseTableForOrder(updatedOrder, io, emitToCafe);
+          } catch (err) {
+            console.error("[UPDATE_STATUS] Table release error:", err);
+          }
+        }
+      })(),
+    ]).catch((err) => {
+      console.error("[UPDATE_STATUS] Background task error:", err);
+    });
+
+    // Return immediately - don't wait for background tasks
+    return res.json(updatedOrder);
   } catch (err) {
     console.error("Status update error:", err);
     return res.status(500).json({ message: err.message });
