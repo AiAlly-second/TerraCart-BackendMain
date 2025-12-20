@@ -32,10 +32,18 @@ const taskSchema = new mongoose.Schema(
     // Hierarchy relationships
     cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
-    // Task category/type
+    // Task category/type - More specific categories
     category: {
       type: String,
-      enum: ["cleaning", "maintenance", "inventory", "service", "other"],
+      enum: [
+        "cleaning",
+        "maintenance",
+        "inventory",
+        "service",
+        "food_preparation",
+        "safety",
+        "other",
+      ],
       default: "other",
     },
     // Frequency for recurring tasks (days of week)

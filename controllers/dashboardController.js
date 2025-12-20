@@ -49,78 +49,98 @@ exports.getDashboardStats = async (req, res) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // Active orders (today, excluding all completed/inactive statuses)
-    // Inactive statuses: Paid, Returned, Finalized, Cancelled, Exit (for takeaway)
-    const activeOrders = await Order.countDocuments({
-      cartId: cafeId,
-      createdAt: { $gte: today },
-      status: { 
-        $nin: [
-          "Finalized", 
-          "Cancelled", 
-          "Paid", 
-          "Returned", 
-          "Exit" // Takeaway final status
-        ] 
-      },
-    });
+    // Run all queries in parallel for faster response
+    const [
+      activeOrders,
+      todayOrders,
+      pendingKOTs,
+      lowStockItems,
+      todayAttendance,
+      occupiedTables,
+      totalTables,
+    ] = await Promise.all([
+      // Active orders (today, excluding all completed/inactive statuses)
+      Order.countDocuments({
+        cartId: cafeId,
+        createdAt: { $gte: today },
+        status: { 
+          $nin: [
+            "Finalized", 
+            "Cancelled", 
+            "Paid", 
+            "Returned", 
+            "Exit" // Takeaway final status
+          ] 
+        },
+      }),
 
-    // Today's revenue - from orders that are Paid, Finalized, or Exit (includes both DINE_IN and TAKEAWAY)
-    // Calculate revenue from kotLines totalAmount (sum of all kotLines in each order)
-    const todayOrders = await Order.find({
-      cartId: cafeId,
-      createdAt: { $gte: today, $lt: tomorrow },
-      status: { $in: ["Paid", "Finalized", "Exit"] },
-    }).lean();
+      // Today's revenue orders - use aggregation for faster calculation
+      Order.aggregate([
+        {
+          $match: {
+            cartId: cafeId,
+            createdAt: { $gte: today, $lt: tomorrow },
+            status: { $in: ["Paid", "Finalized", "Exit"] },
+          },
+        },
+        {
+          $project: {
+            revenue: {
+              $reduce: {
+                input: { $ifNull: ["$kotLines", []] },
+                initialValue: 0,
+                in: { $add: ["$$value", { $ifNull: ["$$this.totalAmount", 0] }] },
+              },
+            },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: "$revenue" },
+          },
+        },
+      ]),
 
-    const todayRevenue = todayOrders.reduce((sum, order) => {
-      // For revenue calculation, sum all kotLines totalAmount
-      // Each KOT represents items that were ordered and paid for
-      if (!order.kotLines || order.kotLines.length === 0) {
-        return sum;
-      }
-      const orderTotal = order.kotLines.reduce(
-        (lineSum, kotLine) => lineSum + (Number(kotLine.totalAmount) || 0),
-        0
-      );
-      return sum + orderTotal;
-    }, 0);
+      // Pending KOTs (orders with status pending/preparing)
+      Order.countDocuments({
+        cartId: cafeId,
+        status: { $in: ["Pending", "Confirmed", "Preparing", "Ready"] },
+      }),
+
+      // Low stock items (threshold can be configured)
+      InventoryItem.countDocuments({
+        cafeId: cafeId,
+        $or: [
+          { stockQuantity: { $lt: 10 } },
+          { stockQuantity: { $exists: false } },
+        ],
+      }),
+
+      // Today's attendance count
+      EmployeeAttendance.countDocuments({
+        cafeId: cafeId,
+        date: { $gte: today, $lt: tomorrow },
+        "checkIn.time": { $exists: true },
+      }),
+
+      // Occupied tables (Table model uses cartId)
+      Table.countDocuments({
+        cartId: cafeId,
+        isOccupied: true,
+      }),
+
+      // Total tables
+      Table.countDocuments({
+        cartId: cafeId,
+      }),
+    ]);
+
+    // Extract revenue from aggregation result
+    const todayRevenue = todayOrders.length > 0 ? todayOrders[0].totalRevenue || 0 : 0;
 
     // Pending tasks (if you have a tasks model, otherwise return 0)
     const pendingTasks = 0; // TODO: Implement when tasks model is available
-
-    // Pending KOTs (orders with status pending/preparing)
-    const pendingKOTs = await Order.countDocuments({
-      cartId: cafeId,
-      status: { $in: ["Pending", "Confirmed", "Preparing", "Ready"] },
-    });
-
-    // Low stock items (threshold can be configured)
-    const lowStockItems = await InventoryItem.countDocuments({
-      cafeId: cafeId,
-      $or: [
-        { stockQuantity: { $lt: 10 } },
-        { stockQuantity: { $exists: false } },
-      ],
-    });
-
-    // Today's attendance count
-    const todayAttendance = await EmployeeAttendance.countDocuments({
-      cafeId: cafeId,
-      date: { $gte: today, $lt: tomorrow },
-      "checkIn.time": { $exists: true },
-    });
-
-    // Occupied tables (Table model uses cartId)
-    const occupiedTables = await Table.countDocuments({
-      cartId: cafeId,
-      isOccupied: true,
-    });
-
-    // Total tables
-    const totalTables = await Table.countDocuments({
-      cartId: cafeId,
-    });
 
     res.json({
       success: true,
