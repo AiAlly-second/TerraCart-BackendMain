@@ -479,8 +479,18 @@ exports.getAvailableTables = async (_req, res) => {
 exports.lookupTableBySlug = async (req, res) => {
   try {
     await syncTableFields();
-    const { slug } = req.params;
+    let { slug } = req.params;
     let { waitToken, sessionToken: clientSessionToken } = req.query;
+
+    // Decode URL-encoded slug (in case it was encoded)
+    if (slug) {
+      try {
+        slug = decodeURIComponent(slug);
+      } catch (e) {
+        // If decoding fails, use original slug
+        console.warn("[Table Lookup] Failed to decode slug:", slug, e);
+      }
+    }
 
     // Sanitize waitToken - remove any trailing :number pattern (e.g., "token:1" -> "token")
     // This can happen if the token gets corrupted in localStorage or URL
@@ -488,8 +498,46 @@ exports.lookupTableBySlug = async (req, res) => {
       waitToken = waitToken.replace(/:\d+$/, "");
     }
 
-    const table = await Table.findOne({ qrSlug: slug });
+    // Log the lookup attempt for debugging (only in production if needed)
+    if (
+      process.env.NODE_ENV === "production" &&
+      process.env.ENABLE_REQUEST_LOGGING === "true"
+    ) {
+      console.log(`[Table Lookup] Looking for table with slug: ${slug}`);
+    }
+
+    // Try exact match first (case-sensitive)
+    let table = await Table.findOne({ qrSlug: slug });
+
+    // If not found, try case-insensitive match (in case of encoding issues)
+    if (!table && slug) {
+      table = await Table.findOne({
+        qrSlug: { $regex: new RegExp(`^${slug}$`, "i") },
+      });
+
+      if (table) {
+        console.warn(
+          `[Table Lookup] Found table with case-insensitive match. Expected: ${slug}, Found: ${table.qrSlug}`
+        );
+      }
+    }
+
     if (!table) {
+      // Log available slugs for debugging (only in development or if explicitly enabled)
+      if (
+        process.env.NODE_ENV !== "production" ||
+        process.env.ENABLE_DEBUG_LOGGING === "true"
+      ) {
+        const sampleTables = await Table.find({})
+          .select("qrSlug number")
+          .limit(5)
+          .lean();
+        console.log(`[Table Lookup] Table not found. Slug searched: ${slug}`);
+        console.log(
+          `[Table Lookup] Sample table slugs in DB:`,
+          sampleTables.map((t) => ({ number: t.number, qrSlug: t.qrSlug }))
+        );
+      }
       return res.status(404).json({ message: "Table not found" });
     }
 
