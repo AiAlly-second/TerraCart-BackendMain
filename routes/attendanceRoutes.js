@@ -14,8 +14,8 @@ const {
 } = require("../controllers/attendanceController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 
-// Get all attendance records
-router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin", "manager"]), getAllAttendance);
+// Get all attendance records - any authenticated user can view their own attendance
+router.get("/", protect, getAllAttendance);
 
 // Get today's attendance
 router.get("/today", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTodayAttendance);

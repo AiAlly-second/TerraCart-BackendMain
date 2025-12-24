@@ -9,32 +9,8 @@ const buildHierarchyQuery = async (user) => {
     query.cafeId = user._id;
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
-  } else if (user.role === "manager") {
-    // Managers should see all employees' attendance from their cart
-    // Get cafeId from user or employee record
-    let cafeId = null;
-    
-    // First check if User has cafeId directly
-    if (user.cafeId) {
-      cafeId = user.cafeId;
-      console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - has direct cafeId: ${cafeId}`);
-    } else {
-      // Fallback: find Employee record by email to get cafeId
-      const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cafeId) {
-        cafeId = employee.cafeId;
-        console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - found cafeId from employee record: ${cafeId}`);
-      } else {
-        console.log(`[ATTENDANCE_QUERY] Manager ${user._id} - no cafeId found`);
-      }
-    }
-    
-    if (cafeId) {
-      query.cafeId = cafeId;
-      // Do NOT set employeeId - managers should see all employees' attendance
-    }
-  } else if (["waiter", "cook", "captain"].includes(user.role)) {
-    // Other mobile users (waiter, cook, captain) - only show their own attendance
+  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users (waiter, cook, captain, manager) - only show their own attendance
     // Get their employee record to find cafeId and employeeId
     let employee = await Employee.findOne({ userId: user._id }).lean();
     if (!employee && user.email) {
@@ -45,6 +21,9 @@ const buildHierarchyQuery = async (user) => {
       query.cafeId = employee.cafeId;
       // For individual mobile users, only show their own attendance
       query.employeeId = employee._id;
+    } else {
+      // If no employee record found, use a query that will return no results
+      query.employeeId = { $exists: false }; // This will ensure no results are returned
     }
   } else if (user.role === "employee") {
     // Legacy employee role - look up Employee
@@ -52,6 +31,27 @@ const buildHierarchyQuery = async (user) => {
     if (employee) {
       query.cafeId = employee.cafeId;
       query.employeeId = employee._id;
+    } else {
+      // If no employee record found, use a query that will return no results
+      query.employeeId = { $exists: false }; // This will ensure no results are returned
+    }
+  } else {
+    // For any other role, ensure they can only see their own attendance if they have an employee record
+    // Otherwise, return no results
+    const employee = await Employee.findOne({ userId: user._id }).lean();
+    if (!employee && user.email) {
+      const employeeByEmail = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+      if (employeeByEmail) {
+        query.cafeId = employeeByEmail.cafeId;
+        query.employeeId = employeeByEmail._id;
+      } else {
+        query.employeeId = { $exists: false }; // No employee record found, return no results
+      }
+    } else if (employee) {
+      query.cafeId = employee.cafeId;
+      query.employeeId = employee._id;
+    } else {
+      query.employeeId = { $exists: false }; // No employee record found, return no results
     }
   }
   return query;
