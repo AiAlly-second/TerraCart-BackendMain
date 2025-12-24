@@ -2,6 +2,44 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
+// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB)
+const getISTDate = () => {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds (UTC+5:30)
+  const istNow = new Date(now.getTime() + istOffset);
+  
+  // Get start of day in IST
+  const istDate = new Date(istNow);
+  istDate.setUTCHours(0, 0, 0, 0);
+  
+  // Convert back to UTC for MongoDB storage
+  istDate.setTime(istDate.getTime() - istOffset);
+  
+  return istDate;
+};
+
+// Helper function to get IST date range (today start and tomorrow start in UTC)
+const getISTDateRange = () => {
+  const today = getISTDate();
+  const tomorrow = new Date(today);
+  tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
+  return { today, tomorrow };
+};
+
+// Helper function to get current IST time
+const getISTNow = () => {
+  const now = new Date();
+  const istOffset = 5.5 * 60 * 60 * 1000;
+  return new Date(now.getTime() + istOffset);
+};
+
+// Helper function to get day name in IST
+const getISTDayName = () => {
+  const istNow = getISTNow();
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return dayNames[istNow.getUTCDay()];
+};
+
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
   const query = {};
@@ -67,6 +105,80 @@ exports.getAllAttendance = async (req, res) => {
       query.employeeId = employeeId;
     }
 
+    // Check if querying for today's attendance
+    const { today, tomorrow } = getISTDateRange();
+    const istNow = getISTNow();
+    const now = new Date();
+
+    // If querying today's attendance, mark absent employees
+    const isQueryingToday = (!startDate && !endDate) || 
+      (startDate && new Date(startDate) <= today && (!endDate || new Date(endDate) >= today));
+
+    if (isQueryingToday && !employeeId) {
+      // Get all employees in the hierarchy
+      const employeeQuery = await buildHierarchyQuery(req.user);
+      const employees = await Employee.find(employeeQuery)
+        .select("_id name employeeRole cafeId franchiseId")
+        .lean();
+
+      // Get existing attendance for today
+      const todayQuery = {
+        ...query,
+        date: { $gte: today, $lt: tomorrow },
+      };
+      const existingAttendance = await EmployeeAttendance.find(todayQuery)
+        .select("employeeId")
+        .lean();
+      const attendanceEmployeeIds = new Set(
+        existingAttendance.map((a) => a.employeeId?.toString() || a.employeeId?._id?.toString())
+      );
+
+      // Get day name for today in IST
+      const todayDay = getISTDayName();
+
+      // Mark absent for employees who haven't checked in on working days
+      for (const employee of employees) {
+        const empId = employee._id.toString();
+        
+        if (attendanceEmployeeIds.has(empId)) {
+          continue;
+        }
+
+        const schedule = await EmployeeSchedule.findOne({ employeeId: employee._id }).lean();
+        
+        if (schedule && schedule.weeklySchedule) {
+          const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
+          
+          if (todaySchedule && todaySchedule.isWorking) {
+          const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
+          const istOffset = 5.5 * 60 * 60 * 1000;
+          const scheduledStartTimeIST = new Date(istNow);
+          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
+          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset);
+          
+          // Add 30 minute buffer
+          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+            
+            if (now >= bufferTime) {
+              try {
+                await EmployeeAttendance.create({
+                  employeeId: employee._id,
+                  date: today,
+                  status: "absent",
+                  cafeId: employee.cafeId,
+                  franchiseId: employee.franchiseId,
+                });
+              } catch (err) {
+                if (err.code !== 11000) {
+                  console.error(`[ATTENDANCE] Error creating absent record:`, err.message);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     if (startDate || endDate) {
       query.date = {};
       if (startDate) {
@@ -75,6 +187,9 @@ exports.getAllAttendance = async (req, res) => {
       if (endDate) {
         query.date.$lte = new Date(endDate);
       }
+    } else if (isQueryingToday) {
+      // If querying today, ensure date filter is set
+      query.date = { $gte: today, $lt: tomorrow };
     }
 
     if (status) {
@@ -95,18 +210,10 @@ exports.getAllAttendance = async (req, res) => {
 // Get today's attendance for all employees
 exports.getTodayAttendance = async (req, res) => {
   try {
-    // Use IST timezone to match check-in logic (IST is UTC+5:30)
+    // Get today's date in IST (using helper function)
+    const { today, tomorrow } = getISTDateRange();
+    const istNow = getISTNow();
     const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
-    const istNow = new Date(now.getTime() + istOffset);
-    
-    // Get today's date in IST, then convert back to UTC for MongoDB query
-    const today = new Date(istNow);
-    today.setUTCHours(0, 0, 0, 0);
-    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
-    
-    const tomorrow = new Date(today);
-    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
 
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = {
@@ -114,13 +221,78 @@ exports.getTodayAttendance = async (req, res) => {
       date: { $gte: today, $lt: tomorrow },
     };
 
-    const attendance = await EmployeeAttendance.find(query)
+    // Get existing attendance records
+    let attendance = await EmployeeAttendance.find(query)
       .populate("employeeId", "name mobile employeeRole")
       .sort({ "checkIn.time": -1 })
       .lean();
 
+    // Get all employees in the hierarchy to check for absent employees
+    const employeeQuery = await buildHierarchyQuery(req.user);
+    const employees = await Employee.find(employeeQuery)
+      .select("_id name employeeRole cafeId franchiseId")
+      .lean();
+
+    // Get day name for today in IST
+    const todayDay = getISTDayName();
+
+    // Check each employee and mark absent if they haven't checked in on a working day
+    const attendanceEmployeeIds = new Set(
+      attendance.map((a) => a.employeeId?._id?.toString() || a.employeeId?.toString())
+    );
+
+    for (const employee of employees) {
+      const employeeId = employee._id.toString();
+      
+      // Skip if attendance already exists
+      if (attendanceEmployeeIds.has(employeeId)) {
+        continue;
+      }
+
+      // Get employee's work schedule
+      const schedule = await EmployeeSchedule.findOne({ employeeId: employee._id }).lean();
+      
+      if (schedule && schedule.weeklySchedule) {
+        const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
+        
+        // If today is a working day and employee hasn't checked in, mark as absent
+        if (todaySchedule && todaySchedule.isWorking) {
+          // Check if it's past the scheduled start time (with 30 minute buffer)
+          const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
+          const istOffset = 5.5 * 60 * 60 * 1000;
+          const scheduledStartTimeIST = new Date(istNow);
+          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
+          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset); // Convert to UTC
+          
+          // Add 30 minute buffer - only mark absent if it's 30 minutes past scheduled start time
+          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+          
+          if (now >= bufferTime) {
+            // Create absent attendance record
+            try {
+              const absentAttendance = await EmployeeAttendance.create({
+                employeeId: employee._id,
+                date: today,
+                status: "absent",
+                cafeId: employee.cafeId,
+                franchiseId: employee.franchiseId,
+              });
+              
+              await absentAttendance.populate("employeeId", "name mobile employeeRole");
+              attendance.push(absentAttendance.toObject());
+              attendanceEmployeeIds.add(employeeId);
+            } catch (err) {
+              // If record already exists (race condition), skip
+              if (err.code !== 11000) {
+                console.error(`[ATTENDANCE] Error creating absent record for employee ${employeeId}:`, err.message);
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Calculate real-time working hours for employees who are checked in but not checked out
-    // Note: 'now' is already declared at the beginning of the function
     const attendanceWithWorkingHours = attendance.map((record) => {
       // If already checked out, use stored values
       if (record.checkOut?.time) {
@@ -236,19 +408,9 @@ exports.checkIn = async (req, res) => {
       }
     }
 
-    // Check if already checked in today (using IST timezone)
-    // IST is UTC+5:30
-    const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
-    const istNow = new Date(now.getTime() + istOffset);
-    
-    // Get today's date in IST
-    const today = new Date(istNow);
-    today.setUTCHours(0, 0, 0, 0);
-    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
-    
-    const tomorrow = new Date(today);
-    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
+    // Get today's date in IST (using helper function)
+    const { today, tomorrow } = getISTDateRange();
+    const istNow = getISTNow();
 
     let attendance = await EmployeeAttendance.findOne({
       employeeId: targetEmployeeId,
@@ -267,14 +429,14 @@ exports.checkIn = async (req, res) => {
     let isLate = false;
 
     if (schedule && schedule.weeklySchedule) {
-      const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
       // Use IST date for day calculation
-      const todayDay = dayNames[istNow.getUTCDay()];
+      const todayDay = getISTDayName();
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.startTime) {
         const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
         // Create scheduled time in IST, then convert to UTC for comparison
+        const istOffset = 5.5 * 60 * 60 * 1000;
         const scheduledTimeIST = new Date(istNow);
         scheduledTimeIST.setUTCHours(hours, minutes, 0, 0);
         scheduledTimeIST.setTime(scheduledTimeIST.getTime() - istOffset); // Convert to UTC
@@ -292,7 +454,8 @@ exports.checkIn = async (req, res) => {
     }
 
     if (attendance) {
-      // Update existing record
+      // Update existing record - ensure date is set to today's IST date
+      attendance.date = today;
       attendance.checkIn = {
         time: checkInTime,
         location: location || "",
@@ -382,18 +545,9 @@ exports.checkOut = async (req, res) => {
       }
     }
 
-    // Find today's attendance (using IST timezone)
-    const now = new Date();
-    const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
-    const istNow = new Date(now.getTime() + istOffset);
-    
-    // Get today's date in IST
-    const today = new Date(istNow);
-    today.setUTCHours(0, 0, 0, 0);
-    today.setTime(today.getTime() - istOffset); // Convert back to UTC for MongoDB query
-    
-    const tomorrow = new Date(today);
-    tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
+    // Get today's date in IST (using helper function)
+    const { today, tomorrow } = getISTDateRange();
+    const istNow = getISTNow();
 
     const attendance = await EmployeeAttendance.findOne({
       employeeId: targetEmployeeId,
@@ -420,14 +574,14 @@ exports.checkOut = async (req, res) => {
     let overtime = 0;
 
     if (schedule && schedule.weeklySchedule) {
-      const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
       // Use IST date for day calculation
-      const todayDay = dayNames[istNow.getUTCDay()];
+      const todayDay = getISTDayName();
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
         // Create scheduled end time in IST, then convert to UTC for comparison
+        const istOffset = 5.5 * 60 * 60 * 1000;
         const scheduledEndTimeIST = new Date(istNow);
         scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
         scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
@@ -439,6 +593,9 @@ exports.checkOut = async (req, res) => {
       }
     }
 
+    // Ensure date field is set to today's IST date (in case it was set incorrectly)
+    attendance.date = today;
+    
     attendance.checkOut = {
       time: checkOutTime,
       location: location || "",
@@ -527,15 +684,13 @@ exports.checkOutById = async (req, res) => {
     let overtime = 0;
 
     if (schedule && schedule.weeklySchedule) {
-      const now = new Date();
-      const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds
-      const istNow = new Date(now.getTime() + istOffset);
-      const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-      const todayDay = dayNames[istNow.getUTCDay()];
+      const istNow = getISTNow();
+      const todayDay = getISTDayName();
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
+        const istOffset = 5.5 * 60 * 60 * 1000;
         const scheduledEndTimeIST = new Date(istNow);
         scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
         scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
@@ -546,6 +701,12 @@ exports.checkOutById = async (req, res) => {
       }
     }
 
+    // Get today's IST date to ensure date field is correct
+    const { today } = getISTDateRange();
+    
+    // Ensure date field is set to today's IST date (in case it was set incorrectly)
+    attendance.date = today;
+    
     attendance.checkOut = {
       time: checkOutTime,
       location: location || "",
