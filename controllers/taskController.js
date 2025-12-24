@@ -1,6 +1,7 @@
 const Task = require("../models/taskModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
+const EmployeeSchedule = require("../models/employeeScheduleModel");
 
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
@@ -35,17 +36,111 @@ const buildHierarchyQuery = async (user) => {
   return query;
 };
 
+// Helper function to get day name from date
+const getDayName = (date) => {
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return dayNames[date.getDay()];
+};
+
+// Helper function to check if task should be shown today based on frequency and work schedule
+const shouldShowTaskToday = (task, employeeSchedule, today) => {
+  // If task has no frequency, show it normally
+  if (!task.frequency || task.frequency.length === 0) {
+    return true;
+  }
+
+  const todayDayName = getDayName(today);
+  
+  // Check if today is in the frequency list
+  if (!task.frequency.includes(todayDayName)) {
+    return false;
+  }
+
+  // If employee schedule exists, check if today is a working day
+  if (employeeSchedule && employeeSchedule.weeklySchedule) {
+    const todaySchedule = employeeSchedule.weeklySchedule.find(
+      (s) => s.day === todayDayName
+    );
+    // Only show task if it's a working day
+    return todaySchedule && todaySchedule.isWorking;
+  }
+
+  // If no schedule, show task if day matches frequency
+  return true;
+};
+
+// Helper function to calculate task status based on work schedule
+const calculateTaskStatus = (task, employeeSchedule, now) => {
+  // If task is already completed or cancelled, return as is
+  if (task.status === "completed" || task.status === "cancelled") {
+    return task.status;
+  }
+
+  // If no schedule or no assigned employee, return current status
+  if (!employeeSchedule || !employeeSchedule.weeklySchedule || !task.assignedTo) {
+    return task.status;
+  }
+
+  // Get employee ID (handle both populated and non-populated)
+  const employeeId = task.assignedTo._id ? task.assignedTo._id.toString() : task.assignedTo.toString();
+  const scheduleEmployeeId = employeeSchedule.employeeId?._id ? 
+    employeeSchedule.employeeId._id.toString() : 
+    employeeSchedule.employeeId?.toString();
+
+  // Only calculate status if schedule matches the assigned employee
+  if (employeeId !== scheduleEmployeeId) {
+    return task.status;
+  }
+
+  const taskDayName = getDayName(new Date(task.dueDate));
+  const daySchedule = employeeSchedule.weeklySchedule.find(
+    (s) => s.day === taskDayName
+  );
+
+  if (!daySchedule || !daySchedule.isWorking) {
+    return task.status; // Not a working day, keep current status
+  }
+
+  // Parse start and end times
+  const [startHour, startMinute] = daySchedule.startTime.split(":").map(Number);
+  const [endHour, endMinute] = daySchedule.endTime.split(":").map(Number);
+
+  // Create scheduled times for the task's due date
+  const taskDate = new Date(task.dueDate);
+  const scheduledStart = new Date(taskDate);
+  scheduledStart.setHours(startHour, startMinute, 0, 0);
+  
+  const scheduledEnd = new Date(taskDate);
+  scheduledEnd.setHours(endHour, endMinute, 0, 0);
+
+  // Check if task is late (past scheduled start time and not completed)
+  if (now > scheduledStart && task.status !== "completed") {
+    const lateMinutes = Math.floor((now - scheduledStart) / (1000 * 60));
+    if (lateMinutes > 15) {
+      // More than 15 minutes late
+      return "late";
+    }
+  }
+
+  // Check if it's past end time and not completed - mark as overdue
+  if (now > scheduledEnd && task.status !== "completed") {
+    return "pending"; // Keep as pending but will show as overdue
+  }
+
+  return task.status;
+};
+
 // Get all tasks
 exports.getAllTasks = async (req, res) => {
   try {
     const { status, priority, category, assignedTo } = req.query;
     const user = req.user;
     const query = {};
+    let employeeId = null;
+    let employeeSchedule = null;
 
     // For mobile users (waiter, cook, captain, manager), only show tasks assigned to them
     if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
-      let employeeId = null;
-      
       if (user.employeeId) {
         employeeId = user.employeeId;
       } else {
@@ -64,6 +159,8 @@ exports.getAllTasks = async (req, res) => {
       if (employeeId) {
         // Only show tasks assigned to this employee
         query.assignedTo = employeeId;
+        // Fetch employee schedule
+        employeeSchedule = await EmployeeSchedule.findOne({ employeeId }).lean();
       } else {
         // If no employee found, return empty array
         return res.json([]);
@@ -86,6 +183,8 @@ exports.getAllTasks = async (req, res) => {
     // Allow filtering by assignedTo in query params (for admin users)
     if (assignedTo && !["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
       query.assignedTo = assignedTo;
+      // Fetch schedule for the assigned employee
+      employeeSchedule = await EmployeeSchedule.findOne({ employeeId: assignedTo }).lean();
     }
 
     const tasks = await Task.find(query)
@@ -95,7 +194,40 @@ exports.getAllTasks = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json(tasks);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    // For admin view with multiple employees, we need to fetch schedules per employee
+    // For now, we'll handle the current employee's schedule and improve later if needed
+    const employeeSchedulesMap = new Map();
+    if (employeeSchedule && employeeId) {
+      employeeSchedulesMap.set(employeeId.toString(), employeeSchedule);
+    }
+
+    // Filter and enhance tasks based on frequency and work schedule
+    const filteredTasks = tasks
+      .filter((task) => {
+        // For recurring tasks, check if they should be shown today
+        if (task.frequency && task.frequency.length > 0) {
+          // Get the schedule for the assigned employee
+          const taskEmployeeId = task.assignedTo?._id ? task.assignedTo._id.toString() : task.assignedTo?.toString();
+          const taskSchedule = taskEmployeeId ? employeeSchedulesMap.get(taskEmployeeId) : employeeSchedule;
+          return shouldShowTaskToday(task, taskSchedule, today);
+        }
+        return true;
+      })
+      .map((task) => {
+        // Get the schedule for the assigned employee
+        const taskEmployeeId = task.assignedTo?._id ? task.assignedTo._id.toString() : task.assignedTo?.toString();
+        const taskSchedule = taskEmployeeId ? employeeSchedulesMap.get(taskEmployeeId) : employeeSchedule;
+        
+        // Calculate status based on work schedule
+        const calculatedStatus = calculateTaskStatus(task, taskSchedule, now);
+        
+        return { ...task, status: calculatedStatus };
+      });
+
+    return res.json(filteredTasks);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -152,22 +284,71 @@ exports.getTodayTasks = async (req, res) => {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
+    const user = req.user;
+    let employeeId = null;
+    let employeeSchedule = null;
+
+    // Get employee ID and schedule for mobile users
+    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+      if (user.employeeId) {
+        employeeId = user.employeeId;
+      } else {
+        const employee = await Employee.findOne({
+          $or: [
+            { userId: user._id },
+            { email: user.email?.toLowerCase() }
+          ]
+        }).lean();
+        if (employee) {
+          employeeId = employee._id;
+        }
+      }
+      
+      if (employeeId) {
+        employeeSchedule = await EmployeeSchedule.findOne({ employeeId }).lean();
+      }
+    }
+
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = {
       ...hierarchyQuery,
-      $or: [
-        { dueDate: { $gte: today, $lt: tomorrow } },
-        { createdAt: { $gte: today, $lt: tomorrow } },
-      ],
     };
 
-    const tasks = await Task.find(query)
+    // For mobile users, only show tasks assigned to them
+    if (employeeId) {
+      query.assignedTo = employeeId;
+    }
+
+    // Get all tasks (including recurring ones)
+    const allTasks = await Task.find(query)
       .populate("assignedTo", "name mobile employeeRole")
       .populate("assignedToUser", "name email role")
       .sort({ priority: 1, createdAt: -1 })
       .lean();
 
-    return res.json(tasks);
+    // Filter tasks that should be shown today
+    const todayTasks = allTasks.filter((task) => {
+      // Check if task is due today or is a recurring task that should show today
+      const taskDueDate = new Date(task.dueDate);
+      const isDueToday = taskDueDate >= today && taskDueDate < tomorrow;
+      
+      // If it's a recurring task, check frequency and work schedule
+      if (task.frequency && task.frequency.length > 0) {
+        return shouldShowTaskToday(task, employeeSchedule, today);
+      }
+      
+      return isDueToday;
+    });
+
+    const now = new Date();
+    
+    // Calculate status for each task based on work schedule
+    const tasksWithStatus = todayTasks.map((task) => {
+      const calculatedStatus = calculateTaskStatus(task, employeeSchedule, now);
+      return { ...task, status: calculatedStatus };
+    });
+
+    return res.json(tasksWithStatus);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
