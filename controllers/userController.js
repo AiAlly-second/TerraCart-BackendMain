@@ -1131,6 +1131,34 @@ exports.getMe = async (req, res) => {
       }
     }
 
+    // Fetch franchise name if franchiseId exists
+    if (userResponse.franchiseId) {
+      try {
+        const franchise = await User.findById(userResponse.franchiseId)
+          .select("name")
+          .lean();
+        if (franchise) {
+          userResponse.franchiseName = franchise.name;
+        }
+      } catch (err) {
+        console.error("[GET_ME] Error fetching franchise name:", err.message);
+      }
+    }
+
+    // Fetch cart name if cafeId exists
+    if (userResponse.cafeId) {
+      try {
+        const cart = await User.findById(userResponse.cafeId)
+          .select("cartName name")
+          .lean();
+        if (cart) {
+          userResponse.cartName = cart.cartName || cart.name;
+        }
+      } catch (err) {
+        console.error("[GET_ME] Error fetching cart name:", err.message);
+      }
+    }
+
     res.json({
       success: true,
       user: userResponse,
