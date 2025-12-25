@@ -9,8 +9,8 @@ const paymentQrSchema = new mongoose.Schema(
       index: true,
       sparse: true,
     },
-    // Cafe ID if it's cafe-specific
-    cafeId: {
+    // Cart ID if it's cart-specific (changed from cafeId to cartId)
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       index: true,
@@ -42,9 +42,9 @@ const paymentQrSchema = new mongoose.Schema(
   }
 );
 
-// Index to ensure one active QR per cafe/user
+// Index to ensure one active QR per cart/user
 paymentQrSchema.index({ userId: 1, isActive: 1 });
-paymentQrSchema.index({ cafeId: 1, isActive: 1 });
+paymentQrSchema.index({ cartId: 1, isActive: 1 }); // Changed from cafeId to cartId
 
 module.exports = mongoose.model("PaymentQR", paymentQrSchema);
 

@@ -38,15 +38,15 @@ const revenueHistorySchema = new mongoose.Schema(
         },
       },
     ],
-    // Revenue breakdown by cafe
-    cafeRevenue: [
+    // Revenue breakdown by cart (changed from cafeRevenue to cartRevenue, cafeId to cartId)
+    cartRevenue: [
       {
-        cafeId: {
+        cartId: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",
           required: true,
         },
-        cafeName: String,
+        cartName: String,
         franchiseId: {
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",

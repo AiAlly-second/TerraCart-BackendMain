@@ -41,7 +41,7 @@ const employeeSchema = new mongoose.Schema(
     // User account link (for mobile app login)
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true, sparse: true },
     // Hierarchy relationships
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Status
     isActive: { type: Boolean, default: true },

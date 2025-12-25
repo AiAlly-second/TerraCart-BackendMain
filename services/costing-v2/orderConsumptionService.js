@@ -1,6 +1,7 @@
 /**
  * Order Consumption Service
- * Automatically consumes ingredients from inventory when orders are ready
+ * Automatically consumes ingredients from inventory when orders are ready/paid/completed
+ * Handles both DINE_IN and TAKEAWAY orders, including items converted from dine-in to takeaway
  */
 
 const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
@@ -10,8 +11,9 @@ const FIFOService = require("./fifoService");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 
 /**
- * Consume ingredients for an order when it's marked as Ready
- * @param {Object} order - Order document
+ * Consume ingredients for an order when it's marked as Ready, Paid, Finalized, or Completed
+ * Processes all items in the order (dine-in, takeaway, and converted-to-takeaway items)
+ * @param {Object} order - Order document (can be DINE_IN or TAKEAWAY)
  * @param {String} userId - User ID who triggered the consumption
  * @returns {Promise<Object>} Consumption summary
  */
@@ -24,7 +26,9 @@ async function consumeIngredientsForOrder(order, userId) {
     });
 
     if (existingConsumption) {
-      console.log(`[COSTING] Order ${order._id} already has ingredients consumed`);
+      console.log(
+        `[COSTING] Order ${order._id} already has ingredients consumed`
+      );
       return {
         success: true,
         alreadyProcessed: true,
@@ -32,17 +36,19 @@ async function consumeIngredientsForOrder(order, userId) {
       };
     }
 
-    // Get outlet ID from order - handle both ObjectId and string formats
-    let outletId = order.cartId || order.cafeId;
-    if (outletId && typeof outletId === 'object' && outletId._id) {
-      outletId = outletId._id;
+    // Get cart ID from order - handle both ObjectId and string formats
+    let cartId = order.cartId || order.cafeId;
+    if (cartId && typeof cartId === "object" && cartId._id) {
+      cartId = cartId._id;
     }
-    if (outletId && typeof outletId === 'object' && outletId.toString) {
-      outletId = outletId.toString();
+    if (cartId && typeof cartId === "object" && cartId.toString) {
+      cartId = cartId.toString();
     }
-    
-    if (!outletId) {
-      console.warn(`[COSTING] Order ${order._id} has no cartId/cafeId, skipping consumption`);
+
+    if (!cartId) {
+      console.warn(
+        `[COSTING] Order ${order._id} has no cartId/cafeId, skipping consumption`
+      );
       console.warn(`[COSTING] Order data:`, {
         cartId: order.cartId,
         cafeId: order.cafeId,
@@ -50,11 +56,11 @@ async function consumeIngredientsForOrder(order, userId) {
       });
       return {
         success: false,
-        message: "Order has no outlet association",
+        message: "Order has no cart association",
       };
     }
-    
-    console.log(`[COSTING] Processing order ${order._id} for outlet ${outletId}`);
+
+    console.log(`[COSTING] Processing order ${order._id} for cart ${cartId}`);
 
     const consumptionSummary = {
       orderId: order._id,
@@ -77,21 +83,45 @@ async function consumeIngredientsForOrder(order, userId) {
       if (!kotLine.items || kotLine.items.length === 0) continue;
 
       for (const orderItem of kotLine.items) {
-        // Skip returned items
+        // Skip returned items (takeaway items and converted-to-takeaway items are still processed)
         if (orderItem.returned) continue;
 
         const itemQuantity = orderItem.quantity || 1;
         const itemName = orderItem.name;
 
+        // Log if item is takeaway for debugging
+        if (orderItem.convertedToTakeaway || order.serviceType === "TAKEAWAY") {
+          console.log(
+            `[COSTING] Processing ${
+              orderItem.convertedToTakeaway
+                ? "converted-to-takeaway"
+                : "takeaway"
+            } item: ${itemName} (qty: ${itemQuantity})`
+          );
+        }
+
         try {
           // Normalize item name for matching (trim and lowercase)
           const normalizedItemName = itemName.trim();
-          
+
           // Find menu item by name - try multiple strategies
+          // Use cartId to match against outletId in menu items (cartId = outletId for cart admin)
           let menuItem = await MenuItemV2.findOne({
             $or: [
-              { name: normalizedItemName, outletId: outletId, isActive: true },
-              { name: { $regex: new RegExp(`^${normalizedItemName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") }, outletId: outletId, isActive: true },
+              { name: normalizedItemName, outletId: cartId, isActive: true },
+              {
+                name: {
+                  $regex: new RegExp(
+                    `^${normalizedItemName.replace(
+                      /[.*+?^${}()|[\]\\]/g,
+                      "\\$&"
+                    )}$`,
+                    "i"
+                  ),
+                },
+                outletId: cartId,
+                isActive: true,
+              },
             ],
           });
 
@@ -100,40 +130,83 @@ async function consumeIngredientsForOrder(order, userId) {
             menuItem = await MenuItemV2.findOne({
               $or: [
                 { name: normalizedItemName, isActive: true },
-                { name: { $regex: new RegExp(`^${normalizedItemName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") }, isActive: true },
+                {
+                  name: {
+                    $regex: new RegExp(
+                      `^${normalizedItemName.replace(
+                        /[.*+?^${}()|[\]\\]/g,
+                        "\\$&"
+                      )}$`,
+                      "i"
+                    ),
+                  },
+                  isActive: true,
+                },
                 { defaultMenuItemName: normalizedItemName, isActive: true },
-                { defaultMenuItemName: { $regex: new RegExp(`^${normalizedItemName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, "i") }, isActive: true },
+                {
+                  defaultMenuItemName: {
+                    $regex: new RegExp(
+                      `^${normalizedItemName.replace(
+                        /[.*+?^${}()|[\]\\]/g,
+                        "\\$&"
+                      )}$`,
+                      "i"
+                    ),
+                  },
+                  isActive: true,
+                },
               ],
             });
           }
 
           if (!menuItem) {
-            console.warn(`[COSTING] Menu item not found in costing: "${itemName}" for outlet ${outletId}`);
+            console.warn(
+              `[COSTING] Menu item not found in costing: "${itemName}" for cart ${cartId}`
+            );
             console.warn(`[COSTING] Searched for: "${normalizedItemName}"`);
-            console.warn(`[COSTING] Available menu items in costing:`, await MenuItemV2.find({ outletId: outletId, isActive: true }).select("name").limit(10).lean().then(items => items.map(i => i.name)));
+            console.warn(
+              `[COSTING] Available menu items in costing:`,
+              await MenuItemV2.find({ outletId: cartId, isActive: true })
+                .select("name")
+                .limit(10)
+                .lean()
+                .then((items) => items.map((i) => i.name))
+            );
             consumptionSummary.errors.push({
               item: itemName,
-              error: "Menu item not found in costing system. Please add this item to costing menu items.",
+              error:
+                "Menu item not found in costing system. Please add this item to costing menu items.",
             });
             continue;
           }
 
           // Skip if menu item has no recipe
           if (!menuItem.recipeId) {
-            console.warn(`[COSTING] Menu item "${itemName}" has no recipe linked. Skipping consumption.`);
+            console.warn(
+              `[COSTING] Menu item "${itemName}" has no recipe linked. Skipping consumption.`
+            );
             consumptionSummary.errors.push({
               item: itemName,
-              error: "Menu item has no recipe linked. Please link a recipe to this menu item.",
+              error:
+                "Menu item has no recipe linked. Please link a recipe to this menu item.",
             });
             continue;
           }
 
-          console.log(`[COSTING] Found menu item: ${menuItem.name} (ID: ${menuItem._id}) for order item: ${itemName}`);
+          console.log(
+            `[COSTING] Found menu item: ${menuItem.name} (ID: ${menuItem._id}) for order item: ${itemName}`
+          );
 
           // Get recipe
           const recipe = await RecipeV2.findById(menuItem.recipeId);
-          if (!recipe || !recipe.ingredients || recipe.ingredients.length === 0) {
-            console.warn(`[COSTING] Recipe not found or empty for menu item: ${itemName}`);
+          if (
+            !recipe ||
+            !recipe.ingredients ||
+            recipe.ingredients.length === 0
+          ) {
+            console.warn(
+              `[COSTING] Recipe not found or empty for menu item: ${itemName}`
+            );
             consumptionSummary.errors.push({
               item: itemName,
               error: "Recipe not found or empty",
@@ -148,9 +221,13 @@ async function consumeIngredientsForOrder(order, userId) {
           // Consume each ingredient in the recipe
           for (const recipeIngredient of recipe.ingredients) {
             try {
-              const ingredient = await IngredientV2.findById(recipeIngredient.ingredientId);
+              const ingredient = await IngredientV2.findById(
+                recipeIngredient.ingredientId
+              );
               if (!ingredient) {
-                console.warn(`[COSTING] Ingredient not found: ${recipeIngredient.ingredientId}`);
+                console.warn(
+                  `[COSTING] Ingredient not found: ${recipeIngredient.ingredientId}`
+                );
                 continue;
               }
 
@@ -166,10 +243,15 @@ async function consumeIngredientsForOrder(order, userId) {
                   recipeIngredient.uom
                 );
               } catch (conversionError) {
-                console.error(`[COSTING] Unit conversion error for ${ingredient.name}:`, conversionError.message);
+                console.error(
+                  `[COSTING] Unit conversion error for ${ingredient.name}:`,
+                  conversionError.message
+                );
                 // Try to add conversion factor if missing
                 if (!ingredient.conversionFactors.has(recipeIngredient.uom)) {
-                  console.warn(`[COSTING] Adding missing conversion factor for ${recipeIngredient.uom} to ${ingredient.baseUnit}`);
+                  console.warn(
+                    `[COSTING] Adding missing conversion factor for ${recipeIngredient.uom} to ${ingredient.baseUnit}`
+                  );
                   // Assume 1:1 if same unit type, otherwise skip
                   if (recipeIngredient.uom === ingredient.baseUnit) {
                     ingredient.conversionFactors.set(recipeIngredient.uom, 1);
@@ -195,14 +277,14 @@ async function consumeIngredientsForOrder(order, userId) {
                 continue;
               }
 
-              // Consume using FIFO
+              // Consume using FIFO - pass cartId (which matches outletId in purchases/ingredients)
               const consumeResult = await FIFOService.consume(
                 recipeIngredient.ingredientId,
                 qtyInBaseUnit,
                 "order",
                 order._id,
                 userId,
-                outletId
+                cartId // cartId from order matches outletId in database
               );
 
               consumptionSummary.ingredientsConsumed.push({
@@ -228,7 +310,10 @@ async function consumeIngredientsForOrder(order, userId) {
 
           consumptionSummary.itemsProcessed++;
         } catch (itemError) {
-          console.error(`[COSTING] Error processing item ${itemName} for order ${order._id}:`, itemError.message);
+          console.error(
+            `[COSTING] Error processing item ${itemName} for order ${order._id}:`,
+            itemError.message
+          );
           consumptionSummary.errors.push({
             item: itemName,
             error: itemError.message,
@@ -249,7 +334,10 @@ async function consumeIngredientsForOrder(order, userId) {
       summary: consumptionSummary,
     };
   } catch (error) {
-    console.error(`[COSTING] Error consuming ingredients for order ${order._id}:`, error);
+    console.error(
+      `[COSTING] Error consuming ingredients for order ${order._id}:`,
+      error
+    );
     return {
       success: false,
       error: error.message,
@@ -260,4 +348,3 @@ async function consumeIngredientsForOrder(order, userId) {
 module.exports = {
   consumeIngredientsForOrder,
 };
-

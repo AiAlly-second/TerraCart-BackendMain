@@ -1423,9 +1423,15 @@ exports.getRecipes = async (req, res) => {
 
     // Apply role-based filtering (recipes can be shared or kiosk-specific)
     // For franchise_admin, also include global/shared recipes (franchiseId=null)
+    // For super_admin: only show global BOMs (outletId: null) unless filtering by specific outletId
     const costingFilter = await buildCostingQuery(req.user, filter, {
       includeShared: true,
     });
+
+    // Super admin should only see global BOMs (outletId: null) unless filtering by specific outlet
+    if (req.user.role === "super_admin" && !outletId) {
+      costingFilter.outletId = null;
+    }
 
     const recipes = await Recipe.find(costingFilter)
       .populate(
@@ -1489,6 +1495,21 @@ exports.createRecipe = async (req, res) => {
   try {
     // Set outlet context (recipes can be shared, so outletId is optional)
     const data = await setOutletContext(req.user, { ...req.body }, false);
+
+    // Check for duplicate BOM name for the same outlet before creating
+    const existingRecipe = await Recipe.findOne({
+      name: data.name.trim(),
+      outletId: data.outletId || null,
+    });
+
+    if (existingRecipe) {
+      const outletInfo = data.outletId ? " for this outlet" : " (global BOM)";
+      return res.status(400).json({
+        success: false,
+        message: `A BOM with the name "${data.name}" already exists${outletInfo}. Please use a different name or edit the existing BOM.`,
+      });
+    }
+
     const recipe = new Recipe(data);
 
     // Calculate cost - for Cart Admin, use their outletId to check outlet-specific purchases
@@ -1505,6 +1526,14 @@ exports.createRecipe = async (req, res) => {
 
     res.status(201).json({ success: true, data: recipe });
   } catch (error) {
+    // Handle MongoDB duplicate key error with a user-friendly message
+    if (error.code === 11000) {
+      const duplicateField = Object.keys(error.keyPattern || {})[0];
+      return res.status(400).json({
+        success: false,
+        message: `A BOM with this name already exists for this outlet. Please use a different name or edit the existing BOM.`,
+      });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };

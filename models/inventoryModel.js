@@ -76,8 +76,8 @@ const inventoryItemSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
-    // Cafe admin association for data isolation
-    cafeId: { 
+    // Cart admin association for data isolation (changed from cafeId to cartId)
+    cartId: { 
       type: mongoose.Schema.Types.ObjectId, 
       ref: "User", 
       index: true 
@@ -102,7 +102,7 @@ const inventoryItemSchema = new mongoose.Schema(
 
 // Index for efficient queries
 inventoryItemSchema.index({ name: 1, category: 1 });
-inventoryItemSchema.index({ cafeId: 1, isActive: 1 });
+inventoryItemSchema.index({ cartId: 1, isActive: 1 }); // Changed from cafeId to cartId
 
 // Virtual for stock status
 inventoryItemSchema.virtual("stockStatus").get(function () {

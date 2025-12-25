@@ -281,15 +281,26 @@ const createOrder = async (req, res) => {
     userId: req.user?._id?.toString(),
   });
   try {
+    console.log("[ORDER] Request body:", {
+      serviceType: req.body.serviceType,
+      orderType: req.body.orderType,
+      hasItems: !!req.body.items && req.body.items.length > 0,
+      itemsCount: req.body.items?.length || 0,
+      hasCartId: !!req.body.cartId,
+      cartId: req.body.cartId,
+    });
     const {
       items,
       serviceType = "DINE_IN",
+      orderType, // PICKUP or DELIVERY (for TAKEAWAY service type)
       tableId,
       sessionToken,
       customerName,
       customerMobile,
       customerEmail,
-      cartId: requestCartId, // Accept cartId from request body (for takeaway orders from customer frontend)
+      cartId: requestCartId, // Accept cartId from request body (for takeaway/pickup/delivery orders)
+      customerLocation, // { latitude, longitude, address }
+      specialInstructions, // Special notes from customer
     } = req.body;
     let { tableNumber } = req.body;
 
@@ -297,14 +308,30 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ message: "No items supplied" });
     }
 
-    const isTableService =
-      serviceType === "DINE_IN" || serviceType === "TAKEAWAY";
-    if (!isTableService) {
+    // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
+    const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
+    if (!validServiceTypes.includes(serviceType)) {
       return res.status(400).json({ message: "Invalid service type" });
     }
 
+    // For PICKUP/DELIVERY, validate orderType
+    if (
+      (serviceType === "PICKUP" || serviceType === "DELIVERY") &&
+      !orderType
+    ) {
+      return res.status(400).json({
+        message:
+          "orderType (PICKUP or DELIVERY) is required for this service type",
+      });
+    }
+
     let tableDoc = null;
-    const isTakeaway = serviceType === "TAKEAWAY";
+    const isTakeaway =
+      serviceType === "TAKEAWAY" ||
+      serviceType === "PICKUP" ||
+      serviceType === "DELIVERY";
+    const isPickup = serviceType === "PICKUP" || orderType === "PICKUP";
+    const isDelivery = serviceType === "DELIVERY" || orderType === "DELIVERY";
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -523,17 +550,20 @@ const createOrder = async (req, res) => {
 
     // Set cartId: priority 1) from authenticated cafe admin, 2) from request body (for takeaway from customer frontend), 3) from table's cartId (for dine-in only), 4) from first active cafe (for takeaway fallback)
     let cartId = null;
+    let deliveryInfo = null; // Store delivery info for delivery orders
+    let pickupCartData = null; // Store cart data for pickup location
+    let cartAdmin = null; // Store cart admin user (for pickup/delivery orders)
     if (req.user && req.user.role === "admin" && req.user._id) {
       cartId = req.user._id;
       console.log(
         "[ORDER] Using cartId from authenticated user:",
         cartId.toString()
       );
-    } else if (isTakeaway && requestCartId) {
-      // For takeaway orders, use cartId from request body (sent by customer frontend)
+    } else if (isTakeaway && requestCartId && !isPickup && !isDelivery) {
+      // For regular takeaway orders (not pickup/delivery), use cartId from request body (sent by customer frontend)
       // Validate that the cartId exists and is an active admin
       const User = require("../models/userModel");
-      const cartAdmin = await User.findById(requestCartId)
+      cartAdmin = await User.findById(requestCartId)
         .select("_id franchiseId role isActive isApproved")
         .lean();
       if (
@@ -558,8 +588,169 @@ const createOrder = async (req, res) => {
       console.log("[ORDER] Using cartId from table:", cartId.toString());
     }
 
+    // For PICKUP/DELIVERY orders, validate cart configuration and delivery eligibility
+    if (isPickup || isDelivery) {
+      if (!requestCartId) {
+        return res.status(400).json({
+          message: "cartId is required for pickup/delivery orders",
+        });
+      }
+
+      const Cart = require("../models/cartModel");
+      const User = require("../models/userModel");
+      const { isWithinDeliveryRange } = require("../utils/distanceCalculator");
+
+      let cart = null;
+      let cartAdminId = null;
+      // Note: cartAdmin is already declared at function level (line 547)
+
+      try {
+        // Check if requestCartId is a Cart document ID or cartAdminId (user ID)
+        cart = await Cart.findById(requestCartId).lean();
+
+        if (cart && cart.cartAdminId) {
+          // It's a Cart document ID - get the cartAdminId
+          // Convert ObjectId to string if needed
+          cartAdminId = cart.cartAdminId.toString
+            ? cart.cartAdminId.toString()
+            : cart.cartAdminId;
+          console.log("[ORDER] Found Cart document, using cartAdminId:", {
+            cartId: requestCartId,
+            cartAdminId: cartAdminId,
+          });
+        } else {
+          // Assume it's a cartAdminId (user ID) - backward compatibility
+          cartAdminId = requestCartId.toString
+            ? requestCartId.toString()
+            : requestCartId;
+          console.log(
+            "[ORDER] Using requestCartId as cartAdminId (backward compatibility):",
+            cartAdminId
+          );
+        }
+
+        if (!cartAdminId) {
+          return res.status(400).json({
+            message: "Unable to determine cart admin ID",
+          });
+        }
+
+        // Get cart admin user
+        cartAdmin = await User.findById(cartAdminId)
+          .select("_id franchiseId role isActive isApproved")
+          .lean();
+
+        if (!cartAdmin || cartAdmin.role !== "admin" || !cartAdmin.isActive) {
+          return res.status(400).json({
+            message: "Invalid or inactive cart",
+          });
+        }
+
+        // If we didn't find cart by ID, find it by cartAdminId
+        if (!cart) {
+          cart = await Cart.findOne({
+            cartAdminId: cartAdminId,
+            isActive: true,
+          }).lean();
+        }
+
+        if (!cart || !cart.isActive) {
+          return res.status(400).json({
+            message: "Cart not found or inactive",
+          });
+        }
+      } catch (cartError) {
+        console.error(
+          "[ORDER] Error processing cart for pickup/delivery:",
+          cartError
+        );
+        return res.status(400).json({
+          message: `Failed to process cart: ${cartError.message}`,
+        });
+      }
+
+      // Validate pickup/delivery configuration
+      if (isPickup && !cart.pickupEnabled) {
+        return res.status(400).json({
+          message: "Pickup is not enabled for this cart",
+        });
+      }
+
+      if (isDelivery) {
+        if (!cart.deliveryEnabled) {
+          return res.status(400).json({
+            message: "Delivery is not enabled for this cart",
+          });
+        }
+
+        // Validate customer location for delivery
+        if (
+          !customerLocation ||
+          !customerLocation.latitude ||
+          !customerLocation.longitude
+        ) {
+          return res.status(400).json({
+            message:
+              "Customer location (latitude and longitude) is required for delivery orders",
+          });
+        }
+
+        // Validate cart has coordinates
+        if (
+          !cart.coordinates ||
+          !cart.coordinates.latitude ||
+          !cart.coordinates.longitude
+        ) {
+          return res.status(400).json({
+            message:
+              "Cart location not configured. Please configure cart coordinates.",
+          });
+        }
+
+        // Check if customer is within delivery radius
+        const rangeCheck = isWithinDeliveryRange(
+          customerLocation.latitude,
+          customerLocation.longitude,
+          cart.coordinates.latitude,
+          cart.coordinates.longitude,
+          cart.deliveryRadius || 5
+        );
+
+        if (!rangeCheck.isWithinRange) {
+          return res.status(400).json({
+            message: `Delivery not available. You are ${rangeCheck.distance.toFixed(
+              2
+            )} km away, but maximum delivery radius is ${
+              cart.deliveryRadius || 5
+            } km.`,
+            distance: rangeCheck.distance,
+            maxRadius: cart.deliveryRadius || 5,
+          });
+        }
+
+        // Store delivery info (will be added to orderData after it's created)
+        // Store in variables to use later
+        deliveryInfo = {
+          distance: rangeCheck.distance,
+          deliveryCharge: cart.deliveryCharge || 0,
+          estimatedTime: Math.ceil(rangeCheck.distance * 2), // Rough estimate: 2 min per km
+        };
+      }
+
+      // Set cartId to cartAdminId (user ID), not Cart document ID
+      cartId = cartAdminId;
+      console.log("[ORDER] Set cartId for pickup/delivery order:", {
+        requestCartId: requestCartId,
+        cartAdminId: cartAdminId,
+        finalCartId: cartId,
+      });
+
+      // Store cart data for later use (pickup location)
+      pickupCartData = cart;
+    }
+
     // Fallback: For takeaway orders without cartId, get the first active cafe admin
-    if (isTakeaway && !cartId) {
+    if (isTakeaway && !cartId && !isPickup && !isDelivery) {
       const User = require("../models/userModel");
       const firstCafe = await User.findOne({
         role: "admin",
@@ -582,12 +773,15 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Set franchiseId: priority 1) from authenticated cafe admin's franchise, 2) from table's franchiseId, 3) from cafe's franchise
+    // Set franchiseId: priority 1) from authenticated cafe admin's franchise, 2) from table's franchiseId, 3) from cart admin's franchise (for pickup/delivery), 4) from cafe's franchise
     let franchiseId = null;
     if (req.user && req.user.role === "admin" && req.user.franchiseId) {
       franchiseId = req.user.franchiseId;
     } else if (!isTakeaway && tableDoc && tableDoc.franchiseId) {
       franchiseId = tableDoc.franchiseId;
+    } else if ((isPickup || isDelivery) && cartAdmin && cartAdmin.franchiseId) {
+      // For pickup/delivery orders, use franchiseId from cartAdmin (already fetched)
+      franchiseId = cartAdmin.franchiseId;
     } else if (cartId) {
       // If we have cartId but no franchiseId, get it from the cafe admin user
       const User = require("../models/userModel");
@@ -602,9 +796,10 @@ const createOrder = async (req, res) => {
     const orderData = {
       _id: orderId,
       tableNumber: String(tableNumber),
-      table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway
-      serviceType,
-      // For takeaway orders, store session token to isolate each customer session
+      table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/pickup/delivery
+      serviceType: isPickup || isDelivery ? "TAKEAWAY" : serviceType, // Store as TAKEAWAY for backward compatibility
+      orderType: isPickup ? "PICKUP" : isDelivery ? "DELIVERY" : undefined,
+      // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
       kotLines: [kot],
@@ -612,16 +807,47 @@ const createOrder = async (req, res) => {
     };
 
     // Only set cartId and franchiseId if they exist (they're optional in the schema)
+    // Convert to ObjectId if needed (Mongoose will handle this automatically, but we ensure it's valid)
     if (cartId) {
-      orderData.cartId = cartId;
+      if (mongoose.Types.ObjectId.isValid(cartId)) {
+        orderData.cartId =
+          typeof cartId === "string"
+            ? new mongoose.Types.ObjectId(cartId)
+            : cartId;
+      } else {
+        console.warn("[ORDER] Invalid cartId format:", cartId);
+        // Still set it - Mongoose might handle it
+        orderData.cartId = cartId;
+      }
     }
     if (franchiseId) {
-      orderData.franchiseId = franchiseId;
+      if (mongoose.Types.ObjectId.isValid(franchiseId)) {
+        orderData.franchiseId =
+          typeof franchiseId === "string"
+            ? new mongoose.Types.ObjectId(franchiseId)
+            : franchiseId;
+      } else {
+        console.warn("[ORDER] Invalid franchiseId format:", franchiseId);
+        // Still set it - Mongoose might handle it
+        orderData.franchiseId = franchiseId;
+      }
     }
 
-    // Add customer information for takeaway orders only (optional)
-    if (isTakeaway) {
-      // Customer fields are optional - only set if provided
+    // Add customer information for takeaway/pickup/delivery orders
+    if (isTakeaway || isPickup || isDelivery) {
+      // Customer fields are required for pickup/delivery
+      if (isPickup || isDelivery) {
+        if (!customerName || !customerName.trim()) {
+          return res.status(400).json({ message: "Customer name is required" });
+        }
+        if (!customerMobile || !customerMobile.trim()) {
+          return res
+            .status(400)
+            .json({ message: "Customer mobile number is required" });
+        }
+      }
+
+      // Set customer information
       if (customerName && customerName.trim()) {
         orderData.customerName = customerName.trim();
       }
@@ -630,6 +856,39 @@ const createOrder = async (req, res) => {
       }
       if (customerEmail && customerEmail.trim()) {
         orderData.customerEmail = customerEmail.trim();
+      }
+
+      // Store customer location for pickup/delivery
+      if (customerLocation) {
+        orderData.customerLocation = {
+          latitude: customerLocation.latitude,
+          longitude: customerLocation.longitude,
+          address:
+            customerLocation.address || customerLocation.fullAddress || "",
+        };
+      }
+
+      // Store special instructions
+      if (specialInstructions && specialInstructions.trim()) {
+        orderData.specialInstructions = specialInstructions.trim();
+      }
+
+      // Store delivery info for delivery orders
+      if (isDelivery && deliveryInfo) {
+        orderData.deliveryInfo = deliveryInfo;
+      }
+
+      // Store pickup location (cart address) for pickup/delivery orders
+      if ((isPickup || isDelivery) && pickupCartData) {
+        if (pickupCartData.address || pickupCartData.coordinates) {
+          orderData.pickupLocation = {
+            address:
+              pickupCartData.address?.fullAddress ||
+              pickupCartData.location ||
+              "Address not set",
+            coordinates: pickupCartData.coordinates || null,
+          };
+        }
       }
 
       // Generate simple takeaway token (1, 2, 3, etc.) per cart
@@ -681,11 +940,36 @@ const createOrder = async (req, res) => {
 
     // Order data prepared
 
+    // Log order data before creation for debugging
+    console.log("[ORDER] Creating order with data:", {
+      orderId: orderData._id,
+      serviceType: orderData.serviceType,
+      orderType: orderData.orderType,
+      cartId: orderData.cartId ? orderData.cartId.toString() : null,
+      franchiseId: orderData.franchiseId
+        ? orderData.franchiseId.toString()
+        : null,
+      hasKotLines: !!orderData.kotLines && orderData.kotLines.length > 0,
+      kotLinesCount: orderData.kotLines?.length || 0,
+      customerName: orderData.customerName || null,
+      customerMobile: orderData.customerMobile || null,
+    });
+
     let order;
     try {
       order = await Order.create(orderData);
+      console.log("[ORDER] Order created successfully:", order._id);
     } catch (createError) {
       console.error("[ORDER] Failed to create order:", createError);
+      console.error("[ORDER] Error name:", createError.name);
+      console.error("[ORDER] Error message:", createError.message);
+      console.error("[ORDER] Error stack:", createError.stack);
+      if (createError.errors) {
+        console.error(
+          "[ORDER] Validation errors:",
+          JSON.stringify(createError.errors, null, 2)
+        );
+      }
       console.error(
         "[ORDER] Order data that failed:",
         JSON.stringify(orderData, null, 2)
@@ -788,32 +1072,32 @@ const createOrder = async (req, res) => {
             query = { email: normalizedEmail };
           }
 
-          // Filter by cafeId to ensure customer belongs to the right cafe
-          // Customer model uses cafeId (not cartId)
+          // Filter by cartId to ensure customer belongs to the right cart
+          // Customer model uses cartId (changed from cafeId)
           if (cartId) {
             const mongoose = require("mongoose");
-            const cafeIdValue = cartId._id || cartId;
-            // Ensure cafeId is ObjectId for proper matching
-            const cafeIdObj = mongoose.Types.ObjectId.isValid(cafeIdValue)
-              ? typeof cafeIdValue === "string"
-                ? new mongoose.Types.ObjectId(cafeIdValue)
-                : cafeIdValue
-              : cafeIdValue;
+            const cartIdValue = cartId._id || cartId;
+            // Ensure cartId is ObjectId for proper matching
+            const cartIdObj = mongoose.Types.ObjectId.isValid(cartIdValue)
+              ? typeof cartIdValue === "string"
+                ? new mongoose.Types.ObjectId(cartIdValue)
+                : cartIdValue
+              : cartIdValue;
 
-            console.log("[ORDER] Setting cafeId for customer query:", {
+            console.log("[ORDER] Setting cartId for customer query:", {
               cartId: cartId.toString(),
-              cafeIdValue: cafeIdValue.toString(),
-              cafeIdObj: cafeIdObj.toString(),
-              cafeIdType: typeof cafeIdObj,
+              cartIdValue: cartIdValue.toString(),
+              cartIdObj: cartIdObj.toString(),
+              cartIdType: typeof cartIdObj,
             });
 
             if (query.$or) {
-              // If we have $or, wrap it in $and with cafeId filter
+              // If we have $or, wrap it in $and with cartId filter
               query = {
-                $and: [{ $or: query.$or }, { cafeId: cafeIdObj }],
+                $and: [{ $or: query.$or }, { cartId: cartIdObj }],
               };
             } else {
-              query.cafeId = cafeIdObj;
+              query.cartId = cartIdObj;
             }
           }
 
@@ -830,7 +1114,7 @@ const createOrder = async (req, res) => {
             found: !!customer,
             customerId: customer?._id?.toString(),
             customerName: customer?.name,
-            customerCafeId: customer?.cafeId?.toString(),
+            customerCartId: customer?.cartId?.toString(),
           });
 
           if (customer) {
@@ -904,18 +1188,18 @@ const createOrder = async (req, res) => {
             const phoneForNewCustomer =
               normalizedPhone || `email-${Date.now()}`;
 
-            // Ensure cartId is converted to ObjectId for cafeId
-            const cafeIdValue = cartId._id || cartId;
+            // Ensure cartId is converted to ObjectId
+            const cartIdValue = cartId._id || cartId;
             const franchiseIdValue = franchiseId
               ? franchiseId._id || franchiseId
               : null;
 
             // Convert to ObjectId if they're strings (mongoose is already imported at top)
-            const cafeIdObj = mongoose.Types.ObjectId.isValid(cafeIdValue)
-              ? typeof cafeIdValue === "string"
-                ? new mongoose.Types.ObjectId(cafeIdValue)
-                : cafeIdValue
-              : cafeIdValue;
+            const cartIdObj = mongoose.Types.ObjectId.isValid(cartIdValue)
+              ? typeof cartIdValue === "string"
+                ? new mongoose.Types.ObjectId(cartIdValue)
+                : cartIdValue
+              : cartIdValue;
             const franchiseIdObj =
               franchiseIdValue &&
               mongoose.Types.ObjectId.isValid(franchiseIdValue)
@@ -926,8 +1210,8 @@ const createOrder = async (req, res) => {
 
             console.log("[ORDER] ObjectId conversion:", {
               originalCartId: cartId.toString(),
-              cafeIdValue: cafeIdValue.toString(),
-              cafeIdObj: cafeIdObj.toString(),
+              cartIdValue: cartIdValue.toString(),
+              cartIdObj: cartIdObj.toString(),
               franchiseIdObj: franchiseIdObj?.toString() || "null",
             });
 
@@ -935,7 +1219,7 @@ const createOrder = async (req, res) => {
               name: customerName ? customerName.trim() : "Guest",
               email: normalizedEmail || null,
               phone: phoneForNewCustomer,
-              cafeId: cafeIdObj, // Customer model uses cafeId (not cartId)
+              cartId: cartIdObj, // Customer model uses cartId (changed from cafeId)
               franchiseId: franchiseIdObj,
               visitCount: 1,
               firstVisitAt: new Date(),
@@ -950,9 +1234,9 @@ const createOrder = async (req, res) => {
               name: newCustomerData.name,
               phone: newCustomerData.phone,
               email: newCustomerData.email,
-              cafeId: newCustomerData.cafeId?.toString(),
+              cartId: newCustomerData.cartId?.toString(),
               franchiseId: newCustomerData.franchiseId?.toString(),
-              cafeIdType: typeof newCustomerData.cafeId,
+              cartIdType: typeof newCustomerData.cartId,
             });
 
             try {
@@ -964,7 +1248,7 @@ const createOrder = async (req, res) => {
               );
               console.log("[ORDER] Created customer details:", {
                 customerId: customer._id.toString(),
-                cafeId: customer.cafeId?.toString(),
+                cartId: customer.cartId?.toString(),
                 franchiseId: customer.franchiseId?.toString(),
                 phone: customer.phone,
                 email: customer.email,
@@ -979,7 +1263,7 @@ const createOrder = async (req, res) => {
                   "[ORDER] Customer verification - Customer exists in database:",
                   {
                     id: verifyCustomer._id.toString(),
-                    cafeId: verifyCustomer.cafeId?.toString(),
+                    cartId: verifyCustomer.cartId?.toString(),
                     name: verifyCustomer.name,
                     phone: verifyCustomer.phone,
                     email: verifyCustomer.email,
@@ -987,20 +1271,20 @@ const createOrder = async (req, res) => {
                 );
 
                 // Test query that customer management panel would use
-                const testQuery = { cafeId: cafeIdObj };
+                const testQuery = { cartId: cartIdObj };
                 const testCustomers = await Customer.find(testQuery)
                   .limit(1)
                   .lean();
                 console.log(
                   "[ORDER] Test query for customer management panel:",
                   {
-                    query: { cafeId: cafeIdObj.toString() },
+                    query: { cartId: cartIdObj.toString() },
                     foundCustomers: testCustomers.length,
                     sampleCustomer: testCustomers[0]
                       ? {
                           id: testCustomers[0]._id.toString(),
                           name: testCustomers[0].name,
-                          cafeId: testCustomers[0].cafeId?.toString(),
+                          cartId: testCustomers[0].cartId?.toString(),
                         }
                       : null,
                   }
@@ -1060,7 +1344,17 @@ const createOrder = async (req, res) => {
 
     return res.status(201).json(order);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error("[ORDER] createOrder - Unhandled error:", err);
+    console.error("[ORDER] Error stack:", err.stack);
+    console.error("[ORDER] Error details:", {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+    });
+    return res.status(500).json({
+      message: err.message || "Internal server error",
+      error: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
   }
 };
 
@@ -1300,17 +1594,17 @@ const addKot = async (req, res) => {
             query = { email: normalizedEmail };
           }
 
-          // Filter by cafeId to ensure customer belongs to the right cafe
-          // Customer model uses cafeId (not cartId)
+          // Filter by cartId to ensure customer belongs to the right cart
+          // Customer model uses cartId (changed from cafeId)
           if (order.cartId) {
-            const cafeIdValue = order.cartId._id || order.cartId;
+            const cartIdValue = order.cartId._id || order.cartId;
             if (query.$or) {
-              // If we have $or, wrap it in $and with cafeId filter
+              // If we have $or, wrap it in $and with cartId filter
               query = {
-                $and: [{ $or: query.$or }, { cafeId: cafeIdValue }],
+                $and: [{ $or: query.$or }, { cartId: cartIdValue }],
               };
             } else {
-              query.cafeId = cafeIdValue;
+              query.cartId = cartIdValue;
             }
           }
 
@@ -1484,7 +1778,7 @@ const getOrders = async (req, res) => {
     const ordersNeedingFranchiseId = orders.filter(
       (order) => !order.franchiseId && order.cartId
     );
-    
+
     if (ordersNeedingFranchiseId.length > 0) {
       // Batch fetch all cafes at once
       const cartIds = [
@@ -1494,15 +1788,15 @@ const getOrders = async (req, res) => {
           )
         ),
       ];
-      
+
       const cafes = await User.find({ _id: { $in: cartIds } })
         .select("_id franchiseId")
         .lean();
-      
+
       const cafeMap = new Map(
         cafes.map((c) => [c._id.toString(), c.franchiseId])
       );
-      
+
       // Update orders in memory and batch update in background
       const updatePromises = [];
       for (const order of ordersNeedingFranchiseId) {
@@ -1514,18 +1808,16 @@ const getOrders = async (req, res) => {
           order.franchiseId = franchiseId;
           // Batch update in background (non-blocking)
           updatePromises.push(
-            Order.findByIdAndUpdate(order._id, { franchiseId }).catch(
-              (err) => {
-                console.warn(
-                  `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
-                  err.message
-                );
-              }
-            )
+            Order.findByIdAndUpdate(order._id, { franchiseId }).catch((err) => {
+              console.warn(
+                `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
+                err.message
+              );
+            })
           );
         }
       }
-      
+
       // Execute updates in background (don't await)
       if (updatePromises.length > 0) {
         Promise.all(updatePromises).catch((err) => {
@@ -2008,11 +2300,14 @@ const updateOrderStatus = async (req, res) => {
     // Update local order object for socket emission
     Object.assign(order, updatedOrder);
 
-    // Automatically consume ingredients when order is marked as Ready, Paid, or Finalized
+    // Automatically consume ingredients when order is marked as Ready, Paid, Finalized, or Completed (for takeaway)
     // This ensures ingredients are consumed when order is sold, even if it skips "Ready" status
     // Run in background to not block status update response
     const shouldConsumeIngredients =
-      (status === "Ready" || status === "Paid" || status === "Finalized") &&
+      (status === "Ready" ||
+        status === "Paid" ||
+        status === "Finalized" ||
+        status === "Completed") &&
       req.user;
 
     if (shouldConsumeIngredients) {
@@ -2040,11 +2335,16 @@ const updateOrderStatus = async (req, res) => {
 
     // Handle payment updates in background (non-blocking)
     const emitToCafe = req.app.get("emitToCafe");
-    
+
     // Emit socket event immediately for fast UI update
     if (order.cartId && io && emitToCafe) {
       // Emit immediately with updated order data
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", updatedOrder);
+      emitToCafe(
+        io,
+        order.cartId.toString(),
+        "order:status:updated",
+        updatedOrder
+      );
       emitToCafe(io, order.cartId.toString(), "orderUpdated", updatedOrder); // Legacy support
     }
 
@@ -2054,11 +2354,14 @@ const updateOrderStatus = async (req, res) => {
       (async () => {
         if (status === "Paid") {
           try {
-            const { payment, created } = await ensurePaymentRecord(updatedOrder, {
-              status: "PAID",
-              method: "CASH",
-              description: "Payment recorded via admin panel",
-            });
+            const { payment, created } = await ensurePaymentRecord(
+              updatedOrder,
+              {
+                status: "PAID",
+                method: "CASH",
+                description: "Payment recorded via admin panel",
+              }
+            );
             if (payment && io) {
               const payload = formatPaymentPayload(payment);
               if (payload) {

@@ -30,7 +30,7 @@ const taskSchema = new mongoose.Schema(
     completedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     notes: { type: String },
     // Hierarchy relationships
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Task category/type - More specific categories
     category: {
@@ -61,7 +61,7 @@ const taskSchema = new mongoose.Schema(
 );
 
 // Compound indexes for efficient queries
-taskSchema.index({ cafeId: 1, status: 1 });
+taskSchema.index({ cartId: 1, status: 1 }); // Changed from cafeId to cartId
 taskSchema.index({ assignedTo: 1, status: 1 });
 taskSchema.index({ assignedToUser: 1, status: 1 });
 taskSchema.index({ franchiseId: 1, status: 1 });

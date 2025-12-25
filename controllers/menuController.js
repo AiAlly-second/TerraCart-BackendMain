@@ -28,7 +28,24 @@ exports.getPublicMenu = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(cartId)) {
         return res.status(400).json({ message: "Invalid cart ID" });
       }
-      targetCafeId = cartId;
+      
+      // Check if cartId is a Cart document ID or cartAdminId (user ID)
+      // Try to find Cart document first
+      const Cart = require("../models/cartModel");
+      const cart = await Cart.findById(cartId).lean();
+      
+      if (cart && cart.cartAdminId) {
+        // It's a Cart document ID - use the cartAdminId
+        targetCafeId = cart.cartAdminId;
+        console.log("[MENU] getPublicMenu - Found Cart document, using cartAdminId:", {
+          cartId: cartId,
+          cartAdminId: targetCafeId
+        });
+      } else {
+        // Assume it's already a cartAdminId (user ID) - backward compatibility
+        targetCafeId = cartId;
+        console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (backward compatibility):", targetCafeId);
+      }
     }
     // Priority 2: For authenticated mobile users, get cafeId from their Employee record
     else if (

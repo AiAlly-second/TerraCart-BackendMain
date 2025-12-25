@@ -52,7 +52,7 @@ const employeeAttendanceSchema = new mongoose.Schema(
       default: false, // Indicates if employee is currently on break
     },
     // Hierarchy relationships
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
   },
   { timestamps: true }

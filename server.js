@@ -99,6 +99,7 @@ app.use("/api/files", require("./routes/fileRoutes"));
 app.use("/api/inventory", require("./routes/inventoryRoutes"));
 app.use("/api/kiosk", require("./routes/kioskRoutes"));
 app.use("/api/kiosk-owner", require("./routes/kioskOwnerRoutes"));
+app.use("/api/carts", require("./routes/cartRoutes"));
 app.use("/api/employees", require("./routes/employeeRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));

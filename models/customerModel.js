@@ -43,7 +43,7 @@ const customerSchema = new mongoose.Schema(
     averageRating: { type: Number, default: 0, min: 0, max: 5 },
     
     // Hierarchy relationships
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     
     // Additional info
@@ -53,8 +53,8 @@ const customerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Indexes for fast lookup by customer within cafe or franchise
-customerSchema.index({ cafeId: 1, phone: 1 });
+// Indexes for fast lookup by customer within cart or franchise
+customerSchema.index({ cartId: 1, phone: 1 });
 customerSchema.index({ franchiseId: 1, phone: 1 });
 
 // Method to update average rating

@@ -31,13 +31,40 @@ const orderSchema = new mongoose.Schema(
     table: { type: mongoose.Schema.Types.ObjectId, ref: "Table" },
     serviceType: {
       type: String,
-      enum: ["DINE_IN", "TAKEAWAY"],
+      enum: ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"],
       default: "DINE_IN",
     },
-    // Customer information for takeaway orders (optional)
+    // Order fulfillment type (for TAKEAWAY service type)
+    orderType: {
+      type: String,
+      enum: ["PICKUP", "DELIVERY"],
+    },
+    // Customer information for takeaway/pickup/delivery orders
     customerName: { type: String },
     customerMobile: { type: String },
     customerEmail: { type: String },
+    // Customer location for delivery/pickup
+    customerLocation: {
+      latitude: { type: Number },
+      longitude: { type: Number },
+      address: { type: String }, // Full address string
+    },
+    // Pickup location (cart address)
+    pickupLocation: {
+      address: { type: String },
+      coordinates: {
+        latitude: { type: Number },
+        longitude: { type: Number },
+      },
+    },
+    // Delivery information
+    deliveryInfo: {
+      distance: { type: Number }, // Distance in km
+      deliveryCharge: { type: Number, default: 0 }, // Delivery charge in rupees
+      estimatedTime: { type: Number }, // Estimated delivery time in minutes
+    },
+    // Special instructions/notes from customer
+    specialInstructions: { type: String },
     kotLines: { type: [kotLineSchema], default: [] },
     status: {
       type: String,

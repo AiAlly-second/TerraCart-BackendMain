@@ -104,6 +104,8 @@ const recipeSchema = new mongoose.Schema(
 // Indexes
 recipeSchema.index({ name: 1 });
 recipeSchema.index({ isActive: 1 });
+// Unique index: prevent duplicate BOM names for the same outlet
+recipeSchema.index({ name: 1, outletId: 1 }, { unique: true });
 
 // Method to calculate recipe cost
 // @param {String} outletId - Optional outlet ID to check for outlet-specific purchases

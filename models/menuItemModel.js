@@ -59,8 +59,8 @@ const menuItemSchema = new mongoose.Schema(
       type: Number,
       min: 0,
     },
-    // Cafe admin association for data isolation
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Cart admin association for data isolation (changed from cafeId to cartId)
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
   },
   {
     timestamps: true,

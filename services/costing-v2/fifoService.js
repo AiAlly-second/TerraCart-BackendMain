@@ -1,5 +1,6 @@
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
+const Purchase = require("../../models/costing-v2/purchaseModel");
 
 /**
  * FIFO Service
@@ -47,27 +48,114 @@ class FIFOService {
    * @param {String} refType - Reference type (recipe, waste, etc.)
    * @param {String} refId - Reference ID
    * @param {String} userId - User recording the transaction
-   * @param {String} outletId - Optional outlet ID
+   * @param {String} cartId - Optional cart ID (matches outletId in database)
    * @returns {Promise<Object>} { costAllocated, remainingQty }
    */
-  static async consume(ingredientId, qtyToConsume, refType, refId, userId, outletId = null) {
+  static async consume(
+    ingredientId,
+    qtyToConsume,
+    refType,
+    refId,
+    userId,
+    cartId = null
+  ) {
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
 
-    if (ingredient.qtyOnHand < qtyToConsume) {
-      throw new Error(`Insufficient stock. Available: ${ingredient.qtyOnHand}, Required: ${qtyToConsume}`);
+    // For cart-specific consumption, check available quantity from cart's layers only
+    // cartId matches outletId in database (cart admin user ID = outletId)
+    if (cartId) {
+      // If ingredient is cart-specific and belongs to this cart, use qtyOnHand directly
+      if (
+        ingredient.outletId &&
+        ingredient.outletId.toString() === cartId.toString()
+      ) {
+        if (ingredient.qtyOnHand < qtyToConsume) {
+          throw new Error(
+            `Insufficient stock. Available: ${ingredient.qtyOnHand}, Required: ${qtyToConsume}`
+          );
+        }
+      } else {
+        // For shared ingredients, calculate available quantity from this cart's FIFO layers
+        // Check purchases that belong to this cart (cartId = outletId in purchase)
+        let availableQty = 0;
+        if (ingredient.fifoLayers && Array.isArray(ingredient.fifoLayers)) {
+          for (const layer of ingredient.fifoLayers) {
+            if (layer.remainingQty > 0 && layer.purchaseId) {
+              // Check if this purchase belongs to the cart (outletId in purchase = cartId)
+              const purchase = await Purchase.findById(layer.purchaseId);
+              if (
+                purchase &&
+                purchase.outletId &&
+                purchase.outletId.toString() === cartId.toString()
+              ) {
+                availableQty += layer.remainingQty;
+              }
+            }
+          }
+        }
+
+        if (availableQty < qtyToConsume) {
+          throw new Error(
+            `Insufficient stock for this cart. Available: ${availableQty}, Required: ${qtyToConsume}`
+          );
+        }
+      }
+    } else {
+      // Global consumption - use total qtyOnHand
+      if (ingredient.qtyOnHand < qtyToConsume) {
+        throw new Error(
+          `Insufficient stock. Available: ${ingredient.qtyOnHand}, Required: ${qtyToConsume}`
+        );
+      }
     }
 
     let remainingToConsume = qtyToConsume;
     let totalCostAllocated = 0;
 
+    console.log(
+      `[FIFO] Consuming ${qtyToConsume} ${ingredient.baseUnit} of ${
+        ingredient.name
+      }${cartId ? ` for cart ${cartId}` : " (global)"}`
+    );
+
     // Consume from oldest layers first (FIFO)
-    for (let i = 0; i < ingredient.fifoLayers.length && remainingToConsume > 0; i++) {
+    // If cartId is provided, only consume from layers belonging to that cart
+    // cartId matches outletId in purchases/ingredients
+    for (
+      let i = 0;
+      i < ingredient.fifoLayers.length && remainingToConsume > 0;
+      i++
+    ) {
       const layer = ingredient.fifoLayers[i];
-      
+
       if (layer.remainingQty <= 0) continue; // Skip empty layers
+
+      // If cartId is specified, verify this layer belongs to that cart
+      // For cart-specific ingredients, all layers belong to that cart
+      if (cartId) {
+        if (
+          ingredient.outletId &&
+          ingredient.outletId.toString() === cartId.toString()
+        ) {
+          // Cart-specific ingredient - all layers belong to this cart
+        } else if (layer.purchaseId) {
+          // Shared ingredient - check if purchase belongs to this cart (outletId = cartId)
+          const purchase = await Purchase.findById(layer.purchaseId);
+          if (
+            !purchase ||
+            !purchase.outletId ||
+            purchase.outletId.toString() !== cartId.toString()
+          ) {
+            continue; // Skip layers from other carts
+          }
+        } else {
+          // Layer has no purchaseId - skip it for cart-specific consumption
+          continue;
+        }
+      }
 
       const consumeFromLayer = Math.min(remainingToConsume, layer.remainingQty);
       const costFromLayer = consumeFromLayer * layer.unitCost;
@@ -78,7 +166,11 @@ class FIFOService {
     }
 
     if (remainingToConsume > 0) {
-      throw new Error("FIFO consumption error: Could not consume full quantity");
+      throw new Error(
+        `FIFO consumption error: Could not consume full quantity. Remaining: ${remainingToConsume}${
+          cartId ? " (cart-specific stock may be insufficient)" : ""
+        }`
+      );
     }
 
     // Update qty on hand
@@ -90,6 +182,7 @@ class FIFOService {
     await ingredient.save();
 
     // Create inventory transaction record
+    // Store cartId as outletId in transaction (cartId = outletId in database)
     const transaction = new InventoryTransaction({
       ingredientId,
       type: "OUT",
@@ -100,7 +193,7 @@ class FIFOService {
       date: new Date(),
       costAllocated: totalCostAllocated,
       recordedBy: userId,
-      outletId,
+      outletId: cartId, // cartId stored as outletId in database
     });
 
     await transaction.save();
@@ -118,11 +211,13 @@ class FIFOService {
    * @returns {Promise<Array>} FIFO layers
    */
   static async getLayers(ingredientId) {
-    const ingredient = await Ingredient.findById(ingredientId).select("fifoLayers");
+    const ingredient = await Ingredient.findById(ingredientId).select(
+      "fifoLayers"
+    );
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
-    return ingredient.fifoLayers.filter(l => l.remainingQty > 0);
+    return ingredient.fifoLayers.filter((l) => l.remainingQty > 0);
   }
 
   /**
@@ -131,12 +226,16 @@ class FIFOService {
    * @returns {Promise<Number>} Average cost per base unit
    */
   static async getAverageCost(ingredientId) {
-    const ingredient = await Ingredient.findById(ingredientId).select("fifoLayers");
+    const ingredient = await Ingredient.findById(ingredientId).select(
+      "fifoLayers"
+    );
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
 
-    const activeLayers = ingredient.fifoLayers.filter(l => l.remainingQty > 0);
+    const activeLayers = ingredient.fifoLayers.filter(
+      (l) => l.remainingQty > 0
+    );
     if (activeLayers.length === 0) {
       return ingredient.currentCostPerBaseUnit || 0;
     }
@@ -154,7 +253,3 @@ class FIFOService {
 }
 
 module.exports = FIFOService;
-
-
-
-

@@ -21,7 +21,7 @@ const kioskSchema = new mongoose.Schema(
     },
     gstNumber: { type: String },
     // Hierarchy relationships
-    cafeId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Status
     isActive: { type: Boolean, default: true },
