@@ -1781,12 +1781,63 @@ exports.mergeTables = async (req, res) => {
       secondaryCapacity;
     await primaryTable.save();
 
+    // Emit socket events for table merge
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+
+    // Get updated primary table with populated mergedTables
+    const updatedPrimaryTable = await Table.findById(primaryTableId).populate(
+      "mergedTables",
+      "number capacity"
+    );
+
+    // Emit table:merged event to cafe room (for admin panel)
+    if (io && emitToCafe && primaryTable.cartId) {
+      const mergePayload = {
+        primaryTable: {
+          id: updatedPrimaryTable._id,
+          number: updatedPrimaryTable.number,
+          status: updatedPrimaryTable.status,
+          capacity: updatedPrimaryTable.capacity,
+          mergedTables: updatedPrimaryTable.mergedTables || [],
+        },
+        secondaryTables: secondaryTables.map((t) => ({
+          id: t._id,
+          number: t.number,
+          status: t.status,
+        })),
+      };
+
+      emitToCafe(
+        io,
+        primaryTable.cartId.toString(),
+        "table:merged",
+        mergePayload
+      );
+    }
+
+    // Also emit globally for real-time updates
+    if (io) {
+      const mergePayload = {
+        primaryTable: {
+          id: updatedPrimaryTable._id,
+          number: updatedPrimaryTable.number,
+          status: updatedPrimaryTable.status,
+          capacity: updatedPrimaryTable.capacity,
+          mergedTables: updatedPrimaryTable.mergedTables || [],
+        },
+        secondaryTables: secondaryTables.map((t) => ({
+          id: t._id,
+          number: t.number,
+          status: t.status,
+        })),
+      };
+      io.emit("table:merged", mergePayload);
+    }
+
     return res.json({
       message: "Tables merged successfully",
-      primaryTable: await Table.findById(primaryTableId).populate(
-        "mergedTables",
-        "number capacity"
-      ),
+      primaryTable: updatedPrimaryTable,
       mergedTables: secondaryTables,
     });
   } catch (err) {
@@ -1928,6 +1979,43 @@ exports.unmergeTables = async (req, res) => {
         table.originalCapacity = undefined; // Clear after restore
       }
       await table.save();
+
+      // Emit socket events for table unmerge
+      const io = req.app.get("io");
+      const emitToCafe = req.app.get("emitToCafe");
+
+      const unmergePayload = {
+        unmergedTable: {
+          id: table._id,
+          number: table.number,
+          status: table.status,
+          capacity: table.capacity,
+        },
+        primaryTable: primaryTable
+          ? {
+              id: primaryTable._id,
+              number: primaryTable.number,
+              capacity: primaryTable.capacity,
+              mergedTables: primaryTable.mergedTables || [],
+            }
+          : null,
+      };
+
+      // Emit to cafe room (for admin panel)
+      if (io && emitToCafe && table.cartId) {
+        emitToCafe(
+          io,
+          table.cartId.toString(),
+          "table:unmerged",
+          unmergePayload
+        );
+      }
+
+      // Also emit globally for real-time updates
+      if (io) {
+        io.emit("table:unmerged", unmergePayload);
+      }
+
       return res.json({ message: "Table unmerged successfully", table });
     }
 
@@ -1970,6 +2058,41 @@ exports.unmergeTables = async (req, res) => {
       table.originalCapacity = undefined; // Clear originalCapacity after restore
       table.mergedTables = [];
       await table.save();
+
+      // Emit socket events for table unmerge (all tables)
+      const io = req.app.get("io");
+      const emitToCafe = req.app.get("emitToCafe");
+
+      const unmergePayload = {
+        primaryTable: {
+          id: table._id,
+          number: table.number,
+          status: table.status,
+          capacity: table.capacity,
+          mergedTables: [],
+        },
+        unmergedTables: secondaryTablesToUnmerge.map((t) => ({
+          id: t._id,
+          number: t.number,
+          status: t.status,
+          capacity: t.capacity,
+        })),
+      };
+
+      // Emit to cafe room (for admin panel)
+      if (io && emitToCafe && table.cartId) {
+        emitToCafe(
+          io,
+          table.cartId.toString(),
+          "table:unmerged",
+          unmergePayload
+        );
+      }
+
+      // Also emit globally for real-time updates
+      if (io) {
+        io.emit("table:unmerged", unmergePayload);
+      }
 
       return res.json({
         message: "All merged tables unmerged successfully",
