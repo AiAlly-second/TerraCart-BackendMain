@@ -129,6 +129,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
   let ingredientsWithoutPurchases = []; // Track ingredients without purchases
 
   for (const item of this.ingredients) {
+    // Refresh ingredient to get latest cost (important after purchases)
     const ingredient = await Ingredient.findById(item.ingredientId);
     if (!ingredient) {
       ingredientsWithoutPurchases.push(
@@ -332,153 +333,59 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
       continue; // Skip this ingredient in cost calculation
     }
 
-    // For outlet-specific cost, we need to get the cost from the most recent purchase for this outlet
+    // Get weighted average cost per base unit
+    // For outlet-specific ingredients, use the ingredient's weighted average (already calculated)
+    // For shared ingredients with outletId, calculate outlet-specific weighted average from transactions
     let ingredientCost = 0;
-    if (outletId) {
-      // Get the most recent purchase transaction for this outlet
-      const latestTransaction = await InventoryTransactionV2.findOne({
+    
+    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
+      // Cart-specific ingredient - use weighted average directly
+      ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+    } else if (outletId) {
+      // Shared ingredient with outletId - calculate outlet-specific weighted average from transactions
+      // But if no outlet-specific transactions exist, use global cost
+      const outletTransactions = await InventoryTransactionV2.find({
         ingredientId: item.ingredientId,
         outletId: outletId,
-        type: "IN",
-        refType: "purchase",
-      }).sort({ date: -1 });
+      }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
 
-      if (latestTransaction && latestTransaction.refId) {
-        // Get the purchase to find the unit price for this ingredient
-        const purchase = await Purchase.findById(latestTransaction.refId);
-        // CRITICAL: Verify this purchase belongs to the current outlet
-        if (
-          purchase &&
-          purchase.outletId &&
-          purchase.outletId.toString() === outletId.toString() &&
-          purchase.items
-        ) {
-          // Find the item in the purchase that matches this ingredient
-          const purchaseItem = purchase.items.find(
-            (pi) => pi.ingredientId.toString() === item.ingredientId.toString()
-          );
-          if (purchaseItem && purchaseItem.unitPrice > 0) {
-            // Convert purchase item unit price to base unit
-            const purchaseQtyInBaseUnit = ingredient.convertToBaseUnit(
-              purchaseItem.qty,
-              purchaseItem.uom
-            );
-            if (purchaseQtyInBaseUnit > 0) {
-              // Calculate cost per base unit: total / qty in base unit
-              ingredientCost = purchaseItem.total / purchaseQtyInBaseUnit;
-              // #region agent log
-              logDebug(
-                "recipeModel.js:355",
-                "Using purchase cost from current outlet",
-                {
-                  ingredientId: item.ingredientId,
-                  ingredientName: ingredient.name,
-                  outletId: outletId,
-                  purchaseId: purchase._id,
-                  purchaseOutletId: purchase.outletId,
-                  ingredientCost: ingredientCost,
-                  purchaseItemUnitPrice: purchaseItem.unitPrice,
-                },
-                "C"
-              );
-              // #endregion
-            }
+      let totalQty = 0;
+      let weightedAvgCost = 0;
+
+      for (const txn of outletTransactions) {
+        const txnQty = txn.qtyInBaseUnit || txn.qty;
+        if (txn.type === "IN" || txn.type === "RETURN") {
+          // Add to inventory - recalculate weighted average
+          const txnCost = txn.costAllocated || 0;
+          if (totalQty > 0 && txnQty > 0) {
+            // Weighted average: (existing total value + new value) / (existing qty + new qty)
+            const existingTotalValue = totalQty * weightedAvgCost;
+            weightedAvgCost = (existingTotalValue + txnCost) / (totalQty + txnQty);
+          } else if (txnQty > 0) {
+            // First purchase
+            weightedAvgCost = txnCost / txnQty;
           }
-        } else if (
-          purchase &&
-          purchase.outletId &&
-          purchase.outletId.toString() !== outletId.toString()
-        ) {
-          // #region agent log
-          logDebug(
-            "recipeModel.js:375",
-            "Purchase belongs to different outlet - skipping",
-            {
-              ingredientId: item.ingredientId,
-              ingredientName: ingredient.name,
-              currentOutletId: outletId,
-              purchaseId: purchase._id,
-              purchaseOutletId: purchase.outletId,
-            },
-            "C"
-          );
-          // #endregion
+          totalQty += txnQty;
+        } else if (txn.type === "OUT" || txn.type === "WASTE") {
+          // Remove from inventory (cost already allocated, just reduce quantity)
+          totalQty -= txnQty;
+          if (totalQty < 0) totalQty = 0;
+          // Weighted average cost doesn't change on consumption
         }
       }
 
-      // If still no cost found, fallback to transaction cost (only if transaction belongs to this outlet)
-      if (ingredientCost <= 0) {
-        if (
-          latestTransaction &&
-          latestTransaction.outletId &&
-          latestTransaction.outletId.toString() === outletId.toString() &&
-          latestTransaction.costAllocated > 0 &&
-          latestTransaction.qty > 0
-        ) {
-          ingredientCost =
-            latestTransaction.costAllocated / latestTransaction.qty;
-          // #region agent log
-          logDebug(
-            "recipeModel.js:390",
-            "Using transaction cost from current outlet",
-            {
-              ingredientId: item.ingredientId,
-              ingredientName: ingredient.name,
-              outletId: outletId,
-              ingredientCost: ingredientCost,
-              transactionOutletId: latestTransaction.outletId,
-            },
-            "C"
-          );
-          // #endregion
-        } else {
-          // Don't use global ingredient cost - it might be from another outlet
-          ingredientCost = 0;
-          // #region agent log
-          logDebug(
-            "recipeModel.js:405",
-            "No valid cost found for this outlet - setting to 0",
-            {
-              ingredientId: item.ingredientId,
-              ingredientName: ingredient.name,
-              outletId: outletId,
-              hasTransaction: !!latestTransaction,
-              transactionOutletId: latestTransaction?.outletId,
-            },
-            "C"
-          );
-          // #endregion
-        }
+      // Use calculated weighted average cost if we have outlet-specific transactions
+      // Otherwise, use global cost (which includes purchases from all outlets for shared ingredients)
+      if (outletTransactions.length > 0 && totalQty > 0 && weightedAvgCost > 0) {
+        ingredientCost = weightedAvgCost;
+      } else {
+        // No outlet-specific transactions or stock - use global cost
+        // This ensures shared ingredients reflect purchases from all outlets
+        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
       }
-      // #region agent log
-      logDebug(
-        "recipeModel.js:420",
-        "Final outlet-specific cost calculated",
-        {
-          ingredientId: item.ingredientId,
-          ingredientName: ingredient.name,
-          outletId: outletId,
-          ingredientCost: ingredientCost,
-          hasTransaction: !!latestTransaction,
-        },
-        "C"
-      );
-      // #endregion
     } else {
-      // Use ingredient's currentCostPerBaseUnit (for global/franchise-level)
+      // Global/shared ingredient - use weighted average directly
       ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-      // #region agent log
-      logDebug(
-        "recipeModel.js:175",
-        "Global cost used",
-        {
-          ingredientId: item.ingredientId,
-          ingredientName: ingredient.name,
-          ingredientCost: ingredientCost,
-        },
-        "C"
-      );
-      // #endregion
     }
 
     if (ingredientCost <= 0) {

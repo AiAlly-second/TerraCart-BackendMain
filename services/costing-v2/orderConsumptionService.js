@@ -7,7 +7,7 @@
 const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
 const RecipeV2 = require("../../models/costing-v2/recipeModel");
 const IngredientV2 = require("../../models/costing-v2/ingredientModel");
-const FIFOService = require("./fifoService");
+const WeightedAverageService = require("./weightedAverageService");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 
 /**
@@ -277,8 +277,8 @@ async function consumeIngredientsForOrder(order, userId) {
                 continue;
               }
 
-              // Consume using FIFO - pass cartId (which matches outletId in purchases/ingredients)
-              const consumeResult = await FIFOService.consume(
+              // Consume using weighted average - pass cartId (which matches outletId in purchases/ingredients)
+              const consumeResult = await WeightedAverageService.consume(
                 recipeIngredient.ingredientId,
                 qtyInBaseUnit,
                 "order",
@@ -286,6 +286,22 @@ async function consumeIngredientsForOrder(order, userId) {
                 userId,
                 cartId // cartId from order matches outletId in database
               );
+
+              // Create inventory transaction for order consumption
+              const transaction = new InventoryTransaction({
+                ingredientId: recipeIngredient.ingredientId,
+                type: "OUT",
+                qty: totalQtyToConsume, // Original quantity
+                uom: recipeIngredient.uom, // Original unit
+                qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit
+                refType: "order",
+                refId: order._id,
+                date: new Date(),
+                costAllocated: consumeResult.costAllocated,
+                recordedBy: userId,
+                outletId: cartId || null,
+              });
+              await transaction.save();
 
               consumptionSummary.ingredientsConsumed.push({
                 ingredient: ingredient.name,

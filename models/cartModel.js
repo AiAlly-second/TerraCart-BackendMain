@@ -15,6 +15,7 @@ const cartSchema = new mongoose.Schema(
       required: true,
     },
     location: { type: String },
+    pinCode: { type: String }, // Pin code for easier location search and geocoding
     // Address for pickup/delivery
     address: {
       street: { type: String },

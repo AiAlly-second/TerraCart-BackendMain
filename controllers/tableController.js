@@ -43,16 +43,16 @@ const buildHierarchyQuery = async (user) => {
       const employee = await Employee.findOne({
         $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
       }).lean();
-      if (employee && employee.cafeId) {
-        query.cartId = employee.cafeId;
+      if (employee && employee.cartId) { // Changed from employee.cafeId to employee.cartId
+        query.cartId = employee.cartId;
         console.log(
           "[TABLE] buildHierarchyQuery - Mobile user employee found:",
           {
             userId: user._id,
             email: user.email,
             employeeId: employee._id,
-            cafeId: employee.cafeId,
-            cartId: query.cartId,
+            cartId: employee.cartId, // Changed from cafeId to cartId
+            queryCartId: query.cartId,
           }
         );
       } else {
@@ -74,8 +74,8 @@ const buildHierarchyQuery = async (user) => {
       const employee = await Employee.findOne({
         $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
       }).lean();
-      if (employee && employee.cafeId) {
-        query.cartId = employee.cafeId;
+      if (employee && employee.cartId) { // Changed from employee.cafeId to employee.cartId
+        query.cartId = employee.cartId;
       }
     }
   }

@@ -44,38 +44,39 @@ const buildHierarchyQuery = async (user) => {
   
   if (userRole === "admin") {
     // CRITICAL: Cart admin - ONLY see employees from their own cart
-    // Employee model uses cafeId (which should match cart admin's _id)
-    query.cafeId = user._id;
-    console.log(`[EMPLOYEE_QUERY] Cart admin ${user._id} - filtering by cafeId: ${user._id}`);
+    // Employee model uses cartId (changed from cafeId, which should match cart admin's _id)
+    query.cartId = user._id;
+    console.log(`[EMPLOYEE_QUERY] Cart admin ${user._id} - filtering by cartId: ${user._id}`);
   } else if (user.role === "franchise_admin") {
     // Franchise admin - see employees from all cafes under their franchise
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users (waiter, cook, captain, manager) - get cafeId from user or employee record
-    let cafeId = null;
+    // Mobile users (waiter, cook, captain, manager) - get cartId from user or employee record
+    // Note: user.cafeId is the User model field (for mobile users linking to cart admin) - keep as is
+    let cartId = null;
     
-    // First check if User has cafeId directly
+    // First check if User has cafeId directly (this is the User model field, not Employee model)
     if (user.cafeId) {
-      cafeId = user.cafeId;
-      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - has direct cafeId: ${cafeId}`);
+      cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for Employee.cartId
+      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - has direct cafeId (User model): ${cartId}`);
     } else {
-      // Fallback: find Employee record by email to get cafeId
+      // Fallback: find Employee record by email to get cartId (Employee model now uses cartId)
       const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cafeId) {
-        cafeId = employee.cafeId;
-        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - found cafeId from employee record: ${cafeId}`);
+      if (employee && employee.cartId) {
+        cartId = employee.cartId;
+        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - found cartId from employee record: ${cartId}`);
       } else {
-        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cafeId found`);
+        console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cartId found`);
       }
     }
     
-    if (cafeId) {
-      query.cafeId = cafeId;
+    if (cartId) {
+      query.cartId = cartId;
     } else {
-      // If no cafeId found, return empty query (will return no employees)
+      // If no cartId found, return empty query (will return no employees)
       // This ensures managers only see employees from their cart
-      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cafeId, returning empty query`);
-      query.cafeId = null; // This will match nothing
+      console.log(`[EMPLOYEE_QUERY] Mobile user ${user._id} (${user.role}) - no cartId, returning empty query`);
+      query.cartId = null; // This will match nothing
     }
   }
   // For super_admin, no filter (see all employees)
@@ -88,14 +89,14 @@ exports.getAllEmployees = async (req, res) => {
     // buildHierarchyQuery is now async, so we need to await it
     const query = await buildHierarchyQuery(req.user);
     
-    // If query has cafeId: null, return empty array (no employees found for this user)
-    if (query.cafeId === null && Object.keys(query).length === 1) {
-      console.log(`[EMPLOYEE_QUERY] No cafeId found for user ${req.user._id}, returning empty array`);
+    // If query has cartId: null, return empty array (no employees found for this user)
+    if (query.cartId === null && Object.keys(query).length === 1) {
+      console.log(`[EMPLOYEE_QUERY] No cartId found for user ${req.user._id}, returning empty array`);
       return res.json({ success: true, data: [] });
     }
     
     const employees = await Employee.find(query)
-      .populate("cafeId", "name cafeName email")
+      .populate("cartId", "name cafeName email") // Changed from cafeId to cartId
       .populate("franchiseId", "name email")
       .populate("userId", "email")
       .sort({ createdAt: -1 })
@@ -160,13 +161,13 @@ exports.getEmployee = async (req, res) => {
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = { _id: id, ...hierarchyQuery };
     
-    // If hierarchy query has cafeId: null, employee not accessible
-    if (hierarchyQuery.cafeId === null && Object.keys(hierarchyQuery).length === 1) {
-      return res.status(403).json({ success: false, message: "Access denied: No cafe associated with this user" });
+    // If hierarchy query has cartId: null, employee not accessible
+    if (hierarchyQuery.cartId === null && Object.keys(hierarchyQuery).length === 1) {
+      return res.status(403).json({ success: false, message: "Access denied: No cart associated with this user" });
     }
     
     const employee = await Employee.findOne(query)
-      .populate("cafeId", "name cafeName email")
+      .populate("cartId", "name cafeName email") // Changed from cafeId to cartId
       .populate("franchiseId", "name email")
       .populate("userId", "email") // Populate userId to get email from User model
       .lean();
@@ -259,17 +260,17 @@ exports.createEmployee = async (req, res) => {
     
     // Set hierarchy relationships based on user role
     if (req.user.role === "admin") {
-      employeeData.cafeId = req.user._id;
+      employeeData.cartId = req.user._id; // Changed from cafeId to cartId
       if (req.user.franchiseId) {
         employeeData.franchiseId = req.user.franchiseId;
       }
     } else if (req.user.role === "franchise_admin") {
       employeeData.franchiseId = req.user._id;
-      // If cafeId is provided, validate it belongs to this franchise
-      if (employeeData.cafeId) {
-        const cafe = await User.findById(employeeData.cafeId);
-        if (!cafe || cafe.franchiseId?.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Invalid cafe selection" });
+      // If cartId is provided, validate it belongs to this franchise
+      if (employeeData.cartId) { // Changed from cafeId to cartId
+        const cart = await User.findById(employeeData.cartId);
+        if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Invalid cart selection" });
         }
       }
     }
@@ -298,8 +299,8 @@ exports.createEmployee = async (req, res) => {
           if (!mobileRoles.includes(existingUser.role)) {
             existingUser.role = employee.employeeRole;
           }
-          // Link userId to employee and cafeId to user
-          existingUser.cafeId = employee.cafeId;
+          // Link userId to employee and cafeId to user (User.cafeId is for mobile users linking to cart admin)
+          existingUser.cafeId = employee.cartId; // Employee.cartId -> User.cafeId (User model field for mobile users)
           existingUser.employeeId = employee._id;
           existingUser.franchiseId = employee.franchiseId || existingUser.franchiseId;
           await existingUser.save();
@@ -316,7 +317,7 @@ exports.createEmployee = async (req, res) => {
             email: employeeData.email,
             password: password,
             role: employee.employeeRole, // Set role to match employee role (waiter, cook, captain, manager)
-            cafeId: employee.cafeId, // Link to cart/kiosk
+            cafeId: employee.cartId, // Employee.cartId -> User.cafeId (User model field for mobile users)
             employeeId: employee._id, // Link to employee
           };
           
@@ -343,7 +344,7 @@ exports.createEmployee = async (req, res) => {
     }
     
     // Populate relationships before returning
-    await employee.populate("cafeId", "name cafeName email");
+    await employee.populate("cartId", "name cafeName email"); // Changed from cafeId to cartId
     await employee.populate("franchiseId", "name email");
     await employee.populate("userId", "email"); // Populate userId to include email
     
@@ -386,24 +387,24 @@ exports.updateEmployee = async (req, res) => {
     // Handle hierarchy changes based on role
     if (req.user.role === "franchise_admin") {
       // Franchise admin can assign employees to cafes within their franchise
-      if (req.body.cafeId !== undefined) {
-        if (req.body.cafeId) {
-          // Validate cafe belongs to this franchise
-          const cafe = await User.findById(req.body.cafeId);
-          if (!cafe || cafe.franchiseId?.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ message: "Invalid cafe selection" });
+      if (req.body.cartId !== undefined) { // Changed from cafeId to cartId
+        if (req.body.cartId) {
+          // Validate cart belongs to this franchise
+          const cart = await User.findById(req.body.cartId);
+          if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
+            return res.status(403).json({ message: "Invalid cart selection" });
           }
-          employee.cafeId = req.body.cafeId;
+          employee.cartId = req.body.cartId; // Changed from cafeId to cartId
         } else {
-          // Remove cafe assignment (franchise level employee)
-          employee.cafeId = null;
+          // Remove cart assignment (franchise level employee)
+          employee.cartId = null; // Changed from cafeId to cartId
         }
       }
       // Prevent changing franchiseId
       delete req.body.franchiseId;
     } else if (req.user.role === "admin") {
-      // Cafe admin cannot change cafeId or franchiseId
-      delete req.body.cafeId;
+      // Cart admin cannot change cartId or franchiseId
+      delete req.body.cartId; // Changed from cafeId to cartId
       delete req.body.franchiseId;
     } else if (req.user.role !== "super_admin") {
       // Other roles cannot change hierarchy
@@ -450,7 +451,7 @@ exports.updateEmployee = async (req, res) => {
             email: employee.email,
             password: password,
             role: employee.employeeRole,
-            cafeId: employee.cafeId,
+            cartId: employee.cartId, // Changed from cafeId to cartId
             employeeId: employee._id,
           };
           
@@ -474,7 +475,7 @@ exports.updateEmployee = async (req, res) => {
       }
     }
     
-    await employee.populate("cafeId", "name cafeName email");
+    await employee.populate("cartId", "name cafeName email"); // Changed from cafeId to cartId
     await employee.populate("franchiseId", "name email");
     await employee.populate("userId", "email"); // Populate userId to include email
     
@@ -702,10 +703,10 @@ exports.getHierarchy = async (req, res) => {
         return res.status(404).json({ message: "Cafe not found" });
       }
 
-      // IMPORTANT: Cart admin only sees employees assigned to their cart (cafeId = userId)
-      // They should NOT see franchise-level employees (employees with franchiseId but no cafeId)
-      employees = await Employee.find({ cafeId: userId })
-        .populate("cafeId", "name cafeName email")
+      // IMPORTANT: Cart admin only sees employees assigned to their cart (cartId = userId)
+      // They should NOT see franchise-level employees (employees with franchiseId but no cartId)
+      employees = await Employee.find({ cartId: userId }) // Changed from cafeId to cartId
+        .populate("cartId", "name cafeName email") // Changed from cafeId to cartId
         .populate("franchiseId", "name email")
         .populate("userId", "email")
         .sort({ createdAt: -1 })

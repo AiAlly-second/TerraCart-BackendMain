@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   getNearbyCarts,
+  getAvailableCarts,
   getCartById,
   updateCartSettings,
   getMyCartSettings,
@@ -11,6 +12,7 @@ const router = express.Router();
 
 // Public routes for customer frontend
 router.get("/nearby", optionalProtect, getNearbyCarts);
+router.get("/available", optionalProtect, getAvailableCarts);
 
 // Protected routes for cart admins - MUST come before /:id route
 router.get("/my-settings", protect, authorize(["admin", "cart_admin"]), getMyCartSettings);

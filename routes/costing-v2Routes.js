@@ -18,6 +18,7 @@ const {
   receivePurchase,
   // Inventory
   consumeInventory,
+  returnToInventory,
   getInventoryTransactions,
   getCostingInventory,
   getLowStock,
@@ -155,6 +156,11 @@ router.post(
   "/inventory/consume",
   authorize(["super_admin", "franchise_admin", "admin"]),
   consumeInventory
+);
+router.post(
+  "/inventory/return",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  returnToInventory
 );
 router.get(
   "/inventory/transactions",

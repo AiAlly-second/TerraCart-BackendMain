@@ -2,7 +2,8 @@ const mongoose = require("mongoose");
 
 /**
  * Ingredient Model - v2
- * Supports FIFO layers, unit conversions, and reorder management
+ * Supports weighted average costing, unit conversions, and reorder management
+ * Base units: g (for weight), ml (for volume), pcs (for count)
  */
 const ingredientSchema = new mongoose.Schema(
   {
@@ -60,9 +61,13 @@ const ingredientSchema = new mongoose.Schema(
     baseUnit: {
       type: String,
       required: true,
-      enum: ["kg", "g", "l", "ml", "pcs", "pack", "box", "bottle", "dozen"],
+      enum: ["g", "ml", "pcs"], // Only lowest level units allowed
       default: function() {
-        return this.uom;
+        // Auto-determine base unit from uom
+        if (['kg', 'g'].includes(this.uom)) return 'g';
+        if (['l', 'ml'].includes(this.uom)) return 'ml';
+        if (['pcs', 'pack', 'box', 'bottle', 'dozen'].includes(this.uom)) return 'pcs';
+        return 'pcs'; // Default fallback
       },
     },
     // Conversion factors: { "kg": 1, "g": 1000, "l": 0.001 }
@@ -91,19 +96,24 @@ const ingredientSchema = new mongoose.Schema(
       ref: "Supplier",
       default: null,
     },
+    // Weighted Average Cost (in base unit)
     currentCostPerBaseUnit: {
       type: Number,
       required: true,
       min: 0,
       default: 0,
+      // This is the weighted average cost per base unit (g, ml, or pcs)
     },
+    // Quantity on hand in base unit
     qtyOnHand: {
       type: Number,
       required: true,
       min: 0,
       default: 0,
+      // Always stored in base unit (g, ml, or pcs)
     },
-    // FIFO layers for cost tracking
+    // Legacy FIFO layers - kept for backward compatibility during migration
+    // Will be deprecated in favor of weighted average
     fifoLayers: [
       {
         qty: { type: Number, required: true, min: 0 },
@@ -141,14 +151,39 @@ const ingredientSchema = new mongoose.Schema(
 ingredientSchema.index({ preferredSupplierId: 1 });
 ingredientSchema.index({ isActive: 1 });
 
-// Pre-save: ensure baseUnit matches uom if not set
+// Pre-save: ensure baseUnit is set to lowest level and conversion factors are initialized
 ingredientSchema.pre("save", function (next) {
-  if (!this.baseUnit) {
-    this.baseUnit = this.uom;
+  // Auto-determine base unit if not set or if it's not a base unit
+  if (!this.baseUnit || !['g', 'ml', 'pcs'].includes(this.baseUnit)) {
+    if (['kg', 'g'].includes(this.uom)) {
+      this.baseUnit = 'g';
+    } else if (['l', 'ml'].includes(this.uom)) {
+      this.baseUnit = 'ml';
+    } else {
+      this.baseUnit = 'pcs';
+    }
   }
+  
+  // Initialize conversion factors with standard conversions
   if (!this.conversionFactors || this.conversionFactors.size === 0) {
     const factors = new Map();
     factors.set(this.baseUnit, 1);
+    
+    // Add standard conversion factors based on base unit
+    if (this.baseUnit === 'g') {
+      factors.set('kg', 1000); // 1 kg = 1000 g
+      factors.set('g', 1);
+    } else if (this.baseUnit === 'ml') {
+      factors.set('l', 1000); // 1 l = 1000 ml
+      factors.set('ml', 1);
+    } else if (this.baseUnit === 'pcs') {
+      factors.set('pcs', 1);
+      factors.set('dozen', 12); // 1 dozen = 12 pcs
+      factors.set('pack', 1); // Default 1:1, can be customized
+      factors.set('box', 1); // Default 1:1, can be customized
+      factors.set('bottle', 1); // Default 1:1, can be customized
+    }
+    
     this.conversionFactors = factors;
   }
   next();
@@ -163,27 +198,25 @@ function getStandardConversionFactor(fromUom, toUom) {
   if (fromUom === toUom) return 1;
   
   // Standard weight conversions (kg <-> g)
-  // To convert from g to kg: multiply by 0.001 (1 g = 0.001 kg)
-  // To convert from kg to g: multiply by 1000 (1 kg = 1000 g)
+  // Base unit is always g, so kg -> g: multiply by 1000
   if (fromUom === 'kg' && toUom === 'g') return 1000;
   if (fromUom === 'g' && toUom === 'kg') return 0.001;
   
   // Standard volume conversions (l <-> ml)
-  // To convert from ml to l: multiply by 0.001 (1 ml = 0.001 l)
-  // To convert from l to ml: multiply by 1000 (1 l = 1000 ml)
+  // Base unit is always ml, so l -> ml: multiply by 1000
   if (fromUom === 'l' && toUom === 'ml') return 1000;
   if (fromUom === 'ml' && toUom === 'l') return 0.001;
   
-  // Count-based units - treat as 1:1 for same category
-  // (pack, box, bottle are typically 1:1 with pcs, but can be customized)
+  // Count-based units - base unit is always pcs
+  // Dozen to pieces: 1 dozen = 12 pieces
+  if (fromUom === 'dozen' && toUom === 'pcs') return 12;
+  if (fromUom === 'pcs' && toUom === 'dozen') return 1/12;
+  
+  // Pack, box, bottle default to 1:1 with pcs (can be customized per ingredient)
   const countUnits = ['pcs', 'pack', 'box', 'bottle'];
   if (countUnits.includes(fromUom) && countUnits.includes(toUom)) {
     return 1; // Default 1:1, should be customized per ingredient if needed
   }
-  
-  // Dozen to pieces: 1 dozen = 12 pieces
-  if (fromUom === 'dozen' && toUom === 'pcs') return 12;
-  if (fromUom === 'pcs' && toUom === 'dozen') return 1/12;
   
   return null; // No standard conversion available
 }

@@ -20,7 +20,7 @@ exports.getPublicMenu = async (req, res) => {
     const categoryQuery = { isActive: true };
     const itemQuery = { isAvailable: true };
 
-    let targetCafeId = null;
+    let targetCartId = null;
 
     // Priority 1: Use cartId from query parameter (for public access)
     if (cartId) {
@@ -36,18 +36,29 @@ exports.getPublicMenu = async (req, res) => {
       
       if (cart && cart.cartAdminId) {
         // It's a Cart document ID - use the cartAdminId
-        targetCafeId = cart.cartAdminId;
+        targetCartId = cart.cartAdminId;
         console.log("[MENU] getPublicMenu - Found Cart document, using cartAdminId:", {
           cartId: cartId,
-          cartAdminId: targetCafeId
+          cartAdminId: targetCartId,
+          cartAdminIdType: typeof targetCartId
         });
       } else {
         // Assume it's already a cartAdminId (user ID) - backward compatibility
-        targetCafeId = cartId;
-        console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (backward compatibility):", targetCafeId);
+        // But also check if it's a table's cartId that might be a Cart document ID
+        // Try one more time to see if it's a Cart document (in case of race condition)
+        const cartCheck = await Cart.findOne({ cartAdminId: cartId }).lean();
+        if (cartCheck) {
+          // The cartId is actually a cartAdminId, use it directly
+          targetCartId = cartId;
+          console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (verified):", targetCartId);
+        } else {
+          // Assume it's a cartAdminId (user ID) - backward compatibility
+          targetCartId = cartId;
+          console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (backward compatibility):", targetCartId);
+        }
       }
     }
-    // Priority 2: For authenticated mobile users, get cafeId from their Employee record
+    // Priority 2: For authenticated mobile users, get cartId from their Employee record
     else if (
       req.user &&
       ["waiter", "cook", "captain", "manager"].includes(req.user.role)
@@ -56,28 +67,46 @@ exports.getPublicMenu = async (req, res) => {
       const employee = await Employee.findOne({
         email: req.user.email?.toLowerCase(),
       }).lean();
-      if (employee && employee.cafeId) {
-        targetCafeId = employee.cafeId;
-        console.log("[MENU] getPublicMenu - Mobile user cafeId:", {
+      // Employee model now uses cartId (changed from cafeId)
+      if (employee && employee.cartId) {
+        targetCartId = employee.cartId;
+        console.log("[MENU] getPublicMenu - Mobile user cartId:", {
           userId: req.user._id,
           email: req.user.email,
-          cafeId: targetCafeId,
+          cartId: targetCartId,
         });
       }
     }
-    // Priority 3: For admin users, use their _id as cafeId
+    // Priority 3: For admin users, use their _id as cartId
     else if (req.user && req.user.role === "admin") {
-      targetCafeId = req.user._id;
+      targetCartId = req.user._id;
     }
 
-    if (targetCafeId) {
-      categoryQuery.cafeId = targetCafeId;
-      itemQuery.cafeId = targetCafeId;
-      console.log("[MENU] getPublicMenu - Filtering by cafeId:", targetCafeId);
+    if (targetCartId) {
+      // Ensure targetCartId is ObjectId for proper matching
+      const targetCartIdObj = mongoose.Types.ObjectId.isValid(targetCartId)
+        ? (typeof targetCartId === "string" ? new mongoose.Types.ObjectId(targetCartId) : targetCartId)
+        : targetCartId;
+      
+      // Support both cartId (new) and cafeId (old) during migration transition
+      // This ensures backward compatibility with existing data
+      categoryQuery.$or = [
+        { cartId: targetCartIdObj },
+        { cafeId: targetCartIdObj } // Support old cafeId field during migration
+      ];
+      itemQuery.$or = [
+        { cartId: targetCartIdObj },
+        { cafeId: targetCartIdObj } // Support old cafeId field during migration
+      ];
+      console.log("[MENU] getPublicMenu - Filtering by cartId (with cafeId fallback):", {
+        targetCartId: targetCartId.toString(),
+        targetCartIdObj: targetCartIdObj.toString(),
+        query: categoryQuery
+      });
     } else {
-      // Return empty menu if no cafeId - prevents showing all carts' menus
+      // Return empty menu if no cartId - prevents showing all carts' menus
       console.log(
-        "[MENU] getPublicMenu - No cafeId found, returning empty menu"
+        "[MENU] getPublicMenu - No cartId found, returning empty menu"
       );
       return res.json([]);
     }
@@ -86,18 +115,47 @@ exports.getPublicMenu = async (req, res) => {
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
+    console.log("[MENU] getPublicMenu - Categories found:", {
+      count: categories.length,
+      categoryIds: categories.map(c => c._id.toString()),
+      sampleCategory: categories[0] ? {
+        _id: categories[0]._id.toString(),
+        name: categories[0].name,
+        cartId: categories[0].cartId?.toString(),
+        cafeId: categories[0].cafeId?.toString()
+      } : null
+    });
+
     const categoryIds = categories.map((cat) => cat._id);
 
     if (categoryIds.length > 0) {
-      itemQuery.category = { $in: categoryIds };
+      // Combine category filter with cartId/cafeId filter using $and
+      // This ensures both filters are applied together
+      itemQuery.$and = [
+        { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
+        { category: { $in: categoryIds } } // Add category filter
+      ];
+      delete itemQuery.$or; // Remove $or from root level since it's now in $and
     } else {
       // No categories found for this cart
+      console.log("[MENU] getPublicMenu - No categories found, query was:", JSON.stringify(categoryQuery, null, 2));
       return res.json([]);
     }
 
     const items = await MenuItem.find(itemQuery)
       .sort({ sortOrder: 1, name: 1 })
       .lean();
+
+    console.log("[MENU] getPublicMenu - Items found:", {
+      count: items.length,
+      itemQuery: JSON.stringify(itemQuery, null, 2),
+      sampleItem: items[0] ? {
+        _id: items[0]._id.toString(),
+        name: items[0].name,
+        cartId: items[0].cartId?.toString(),
+        cafeId: items[0].cafeId?.toString()
+      } : null
+    });
 
     // Helper function to decode HTML entities in image URLs
     const decodeImageUrl = (imageUrl) => {
@@ -135,14 +193,21 @@ exports.getPublicMenu = async (req, res) => {
 
 exports.listMenu = async (req, res) => {
   try {
-    // Filter by cafeId if user is cafe admin
-    const cafeId = req.user && req.user.role === "admin" ? req.user._id : null;
+    // Filter by cartId if user is cart admin (changed from cafeId to cartId)
+    const cartId = req.user && req.user.role === "admin" ? req.user._id : null;
     const categoryQuery = {};
     const itemQuery = {};
 
-    if (cafeId) {
-      categoryQuery.cafeId = cafeId;
-      itemQuery.cafeId = cafeId;
+    if (cartId) {
+      // Support both cartId (new) and cafeId (old) during migration transition
+      categoryQuery.$or = [
+        { cartId: cartId },
+        { cafeId: cartId } // Support old cafeId field during migration
+      ];
+      itemQuery.$or = [
+        { cartId: cartId },
+        { cafeId: cartId } // Support old cafeId field during migration
+      ];
     }
 
     const categories = await MenuCategory.find(categoryQuery)
@@ -151,7 +216,12 @@ exports.listMenu = async (req, res) => {
     const categoryIds = categories.map((cat) => cat._id);
 
     if (categoryIds.length > 0) {
-      itemQuery.category = { $in: categoryIds };
+      // Combine category filter with cartId/cafeId filter using $and
+      itemQuery.$and = [
+        { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
+        { category: { $in: categoryIds } } // Add category filter
+      ];
+      delete itemQuery.$or; // Remove $or from root level since it's now in $and
     } else {
       itemQuery.category = { $in: [] }; // No categories, so no items
     }

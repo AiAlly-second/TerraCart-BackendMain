@@ -10,13 +10,71 @@ const { isWithinDeliveryRange, calculateDistance } = require("../utils/distanceC
  */
 exports.getNearbyCarts = async (req, res) => {
   try {
-    const { latitude, longitude, orderType } = req.query;
+    const { latitude, longitude, orderType, pinCode } = req.query;
 
-    // Validate coordinates
+    // For DELIVERY, allow pin code as alternative to coordinates
+    if (orderType === "DELIVERY" && pinCode) {
+      // Filter carts by pin code match
+      const trimmedPinCode = pinCode.trim();
+      const carts = await Cart.find({
+        $and: [
+          {
+            $or: [
+              { isActive: true },
+              { isActive: { $exists: false } }
+            ]
+          },
+          {
+            $or: [
+              { pinCode: trimmedPinCode },
+              { "address.zipCode": trimmedPinCode }
+            ]
+          }
+        ]
+      })
+        .populate("cartAdminId", "name cafeName email")
+        .populate("franchiseId", "name")
+        .lean();
+
+      console.log(`[CART] Found ${carts.length} carts matching pin code: ${pinCode}`);
+
+      const nearbyCarts = [];
+
+      for (const cart of carts) {
+        const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
+        const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
+
+        // Only include carts with delivery enabled
+        if (deliveryEnabled) {
+          nearbyCarts.push({
+            ...cart,
+            distance: null, // Distance not calculated for pin code match
+            canDeliver: true, // Assume can deliver if pin code matches
+            canPickup: pickupEnabled,
+            deliveryInfo: {
+              distance: null,
+              deliveryCharge: cart.deliveryCharge || 0,
+              estimatedTime: null,
+            },
+            pickupEnabled: pickupEnabled,
+            deliveryEnabled: deliveryEnabled,
+            pinCodeMatch: true, // Flag to indicate this was matched by pin code
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        data: nearbyCarts,
+        count: nearbyCarts.length,
+      });
+    }
+
+    // Validate coordinates for coordinate-based search
     if (!latitude || !longitude) {
       return res.status(400).json({
         success: false,
-        message: "Latitude and longitude are required",
+        message: "Latitude and longitude are required, or provide pin code for delivery",
       });
     }
 
@@ -241,6 +299,7 @@ exports.updateCartSettings = async (req, res) => {
       deliveryEnabled,
       deliveryRadius,
       deliveryCharge,
+      pinCode,
       address,
       coordinates,
     } = req.body;
@@ -285,6 +344,7 @@ exports.updateCartSettings = async (req, res) => {
     if (deliveryEnabled !== undefined) updateData.deliveryEnabled = deliveryEnabled;
     if (deliveryRadius !== undefined) updateData.deliveryRadius = deliveryRadius;
     if (deliveryCharge !== undefined) updateData.deliveryCharge = deliveryCharge;
+    if (pinCode !== undefined) updateData.pinCode = pinCode;
     if (address !== undefined) updateData.address = address;
     if (coordinates !== undefined) updateData.coordinates = coordinates;
 
@@ -305,6 +365,69 @@ exports.updateCartSettings = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to update cart settings",
+    });
+  }
+};
+
+/**
+ * Get all available carts (without location requirement)
+ * @route GET /api/carts/available
+ * @access Public (for customer frontend)
+ */
+exports.getAvailableCarts = async (req, res) => {
+  try {
+    const { orderType } = req.query;
+
+    // Get all active carts
+    const carts = await Cart.find({
+      $or: [
+        { isActive: true },
+        { isActive: { $exists: false } } // Include carts without isActive field
+      ]
+    })
+      .populate("cartAdminId", "name cafeName email")
+      .populate("franchiseId", "name")
+      .lean();
+
+    console.log(`[CART] Found ${carts.length} active carts`);
+
+    const availableCarts = [];
+
+    for (const cart of carts) {
+      // Handle existing carts that don't have new fields - use defaults
+      const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
+      const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
+
+      // Include cart if:
+      // - Pickup is requested and pickup is enabled
+      // - Delivery is requested and delivery is enabled
+      if (
+        (orderType === "PICKUP" && pickupEnabled) ||
+        (orderType === "DELIVERY" && deliveryEnabled) ||
+        !orderType // If no orderType specified, include all
+      ) {
+        availableCarts.push({
+          ...cart,
+          distance: null, // Will be calculated when location is available
+          canDeliver: deliveryEnabled,
+          canPickup: pickupEnabled,
+          deliveryInfo: null, // Will be calculated when location is available
+          pickupEnabled: pickupEnabled,
+          deliveryEnabled: deliveryEnabled,
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: availableCarts,
+      count: availableCarts.length,
+    });
+  } catch (error) {
+    console.error("[CART] Error getting available carts:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get available carts",
     });
   }
 };
