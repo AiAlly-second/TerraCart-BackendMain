@@ -82,9 +82,10 @@ exports.getPublicMenu = async (req, res) => {
       targetCartId = req.user._id;
     }
 
+    let targetCartIdObj = null;
     if (targetCartId) {
       // Ensure targetCartId is ObjectId for proper matching
-      const targetCartIdObj = mongoose.Types.ObjectId.isValid(targetCartId)
+      targetCartIdObj = mongoose.Types.ObjectId.isValid(targetCartId)
         ? (typeof targetCartId === "string" ? new mongoose.Types.ObjectId(targetCartId) : targetCartId)
         : targetCartId;
       
@@ -146,6 +147,45 @@ exports.getPublicMenu = async (req, res) => {
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
+    // Calculate order counts for each menu item (most selling items)
+    const Order = require("../models/orderModel");
+    const itemOrderCounts = {};
+    
+    // Aggregate order counts from all completed/paid orders
+    // Count items from kotLines where status is not Cancelled
+    const orderQuery = {
+      status: { $nin: ["Cancelled"] }
+    };
+    
+    // Add cartId filter if targetCartIdObj exists
+    if (targetCartIdObj) {
+      orderQuery.cartId = targetCartIdObj;
+    }
+    
+    const orders = await Order.find(orderQuery).select("kotLines").lean();
+    
+    // Count occurrences of each item name across all orders
+    orders.forEach((order) => {
+      if (order.kotLines && Array.isArray(order.kotLines)) {
+        order.kotLines.forEach((kotLine) => {
+          if (kotLine.items && Array.isArray(kotLine.items)) {
+            kotLine.items.forEach((item) => {
+              if (item.name && !item.returned) {
+                // Count quantity, not just occurrences
+                itemOrderCounts[item.name] = (itemOrderCounts[item.name] || 0) + (item.quantity || 1);
+              }
+            });
+          }
+        });
+      }
+    });
+    
+    // Add orderCount to each item
+    const itemsWithOrderCount = items.map((item) => ({
+      ...item,
+      orderCount: itemOrderCounts[item.name] || 0,
+    }));
+
     console.log("[MENU] getPublicMenu - Items found:", {
       count: items.length,
       itemQuery: JSON.stringify(itemQuery, null, 2),
@@ -172,13 +212,13 @@ exports.getPublicMenu = async (req, res) => {
     };
 
     // Decode image URLs in items
-    items.forEach((item) => {
+    itemsWithOrderCount.forEach((item) => {
       if (item.image) {
         item.image = decodeImageUrl(item.image);
       }
     });
 
-    const itemsByCategory = items.reduce((acc, item) => {
+    const itemsByCategory = itemsWithOrderCount.reduce((acc, item) => {
       const key = item.category.toString();
       if (!acc[key]) acc[key] = [];
       acc[key].push(item);
