@@ -1306,26 +1306,32 @@ exports.getCostingInventory = async (req, res) => {
   try {
     const Employee = require("../../models/employeeModel");
 
-    // Get cafeId for mobile users (waiter, cook, captain, manager)
+    // Get cartId for mobile users (waiter, cook, captain, manager)
+    // Prioritize cartId, fallback to cafeId for backward compatibility
     let outletId = null;
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cafeId from user or employee record
-      if (req.user.cafeId) {
-        outletId = req.user.cafeId;
+      // Mobile users - prioritize cartId, fallback to cafeId
+      if (req.user.cartId) {
+        outletId = req.user.cartId;
+      } else if (req.user.cafeId) {
+        outletId = req.user.cafeId; // Fallback for backward compatibility
       } else {
-        // Fallback: find employee by email
+        // Fallback: find employee by email or userId
         const employee = await Employee.findOne({
-          email: req.user.email?.toLowerCase(),
+          $or: [
+            { email: req.user.email?.toLowerCase() },
+            { userId: req.user._id }
+          ]
         }).lean();
-        if (employee && employee.cafeId) {
-          outletId = employee.cafeId;
+        if (employee) {
+          outletId = employee.cartId || employee.cafeId; // Prioritize cartId
         }
       }
 
       if (!outletId) {
         return res.status(403).json({
           success: false,
-          message: "No cafe associated with this user",
+          message: "No cart associated with this user",
         });
       }
     } else if (req.user.role === "admin") {
