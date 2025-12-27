@@ -32,7 +32,7 @@ router.delete("/:id", protect, authorize(["admin"]), deleteTable);
 router.post("/:id/regenerate-qr", protect, authorize(["admin"]), regenerateQrSlug);
 router.post("/:id/reset-qr", protect, authorize(["admin"]), regenerateQrSlug);
 router.post("/merge", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]), mergeTables);
-router.post("/:id/unmerge", protect, authorize(["admin", "franchise_admin", "super_admin"]), unmergeTables);
+router.post("/:id/unmerge", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]), unmergeTables);
 router.get("/dashboard/occupancy", protect, authorize(["admin", "franchise_admin", "super_admin", "manager"]), getTableOccupancyDashboard);
 
 module.exports = router;

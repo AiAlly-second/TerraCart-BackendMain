@@ -178,7 +178,8 @@ exports.loginUser = async (req, res) => {
           actualRole = employee.employeeRole;
         }
 
-        cafeId = employee.cafeId;
+        // Employee model uses cartId, but User model uses cafeId for backward compatibility
+        cafeId = employee.cartId || employee.cafeId; // Support both for backward compatibility
         franchiseId = employee.franchiseId;
 
         // Ensure bidirectional linking: userId in Employee, cafeId/employeeId in User
