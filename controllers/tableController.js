@@ -123,11 +123,18 @@ const getWaitlistPosition = async (entry) => {
 };
 
 const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
+  // CRITICAL: Validate table parameter to prevent "Cannot access 'table' before initialization" errors
+  if (!table) {
+    console.error("[buildPublicTableResponse] Table parameter is null or undefined");
+    throw new Error("Table parameter is required");
+  }
+  
   const payload = {
     id: table._id,
     number: table.number,
     name: table.name,
     capacity: table.capacity,
+    originalCapacity: table.originalCapacity || null, // Include originalCapacity for merged tables
     status: table.status,
     qrSlug: table.qrSlug,
     currentOrder: table.currentOrder || null,
@@ -324,7 +331,7 @@ exports.listTables = async (req, res) => {
     // Convert cartId to string for comparison if needed
     if (query.cartId) {
       // Ensure cartId is properly formatted (ObjectId or string)
-      const mongoose = require("mongoose");
+      // mongoose is already imported at the top of the file (line 2), no need to require again
       if (mongoose.Types.ObjectId.isValid(query.cartId)) {
         query.cartId = new mongoose.Types.ObjectId(query.cartId);
       }
@@ -387,56 +394,64 @@ exports.listTables = async (req, res) => {
     });
 
     const enriched = await Promise.all(
-      uniqueTables.map(async (table) => {
+      uniqueTables.map(async (tableItem) => {
+        // CRITICAL: Use tableItem instead of table to avoid variable shadowing issues
+        // This prevents "Cannot access 'table' before initialization" errors
+        if (!tableItem) {
+          console.warn("[Table] listTables: tableItem is null or undefined");
+          return null;
+        }
+        
         // Ensure table status is correct - if no current order, it should be AVAILABLE
-        if (!table.currentOrder && table.status === "OCCUPIED") {
+        if (!tableItem.currentOrder && tableItem.status === "OCCUPIED") {
           // Auto-fix: Update table status if it's incorrectly marked as OCCUPIED
           try {
-            await Table.findByIdAndUpdate(table._id, {
+            // CRITICAL: Use Table model (imported at top) instead of any local variable
+            await Table.findByIdAndUpdate(tableItem._id, {
               status: "AVAILABLE",
               currentOrder: null,
               sessionToken: undefined,
               lastAssignedAt: null,
             });
-            table.status = "AVAILABLE";
-            table.currentOrder = null;
+            tableItem.status = "AVAILABLE";
+            tableItem.currentOrder = null;
           } catch (err) {
             console.error(
-              `[TABLE] Failed to auto-fix table ${table._id}:`,
+              `[TABLE] Failed to auto-fix table ${tableItem._id}:`,
               err
             );
           }
         }
 
         // Get table with merged data
-        const tableWithMerged = tableMap.get(table._id.toString()) || table;
+        const tableWithMerged = tableMap.get(tableItem._id.toString()) || tableItem;
 
         // Calculate capacity display (same logic as dashboard)
-        let originalCapacity = table.capacity || 0;
-        let totalCapacity = table.capacity || 0;
+        let originalCapacity = tableItem.capacity || 0;
+        let totalCapacity = tableItem.capacity || 0;
 
         if (
           tableWithMerged.mergedTables &&
           tableWithMerged.mergedTables.length > 0
         ) {
           // Primary table with merged tables
-          // table.capacity already includes merged tables' capacities
+          // tableItem.capacity already includes merged tables' capacities
           originalCapacity =
-            tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
-          totalCapacity = table.capacity || 0; // Current capacity (includes merged)
+            tableWithMerged.originalCapacity || tableItem.capacity || 0; // Original before merge
+          totalCapacity = tableItem.capacity || 0; // Current capacity (includes merged)
         } else if (tableWithMerged.mergedWith) {
           // Secondary table merged into another
           originalCapacity =
-            tableWithMerged.originalCapacity || table.capacity || 0; // Original before merge
+            tableWithMerged.originalCapacity || tableItem.capacity || 0; // Original before merge
           totalCapacity = originalCapacity; // Secondary tables don't have merged capacity themselves
         } else {
           // Regular table (not merged)
-          originalCapacity = table.capacity || 0;
-          totalCapacity = table.capacity || 0;
+          originalCapacity = tableItem.capacity || 0;
+          totalCapacity = tableItem.capacity || 0;
         }
 
         return {
-          ...table,
+          ...tableItem,
           capacity: originalCapacity, // Original/base capacity for display
           totalCapacity, // Total capacity including merged tables (for primary tables)
           mergedWith: tableWithMerged.mergedWith
@@ -445,17 +460,37 @@ exports.listTables = async (req, res) => {
               : tableWithMerged.mergedWith
             : null, // Include mergedWith field
           mergedTables: tableWithMerged.mergedTables || [], // Include mergedTables field
-          waitlistLength: await countActiveWaitlist(table._id),
+          waitlistLength: await countActiveWaitlist(tableItem._id),
         };
       })
-    );
+    ).then(results => results.filter(item => item !== null)); // Filter out any null results
 
     return res.json({
       success: true,
       data: enriched,
     });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error("Error in listTables:", err);
+    // CRITICAL: Check if error is related to table variable initialization
+    if (err.message && err.message.includes("Cannot access 'table' before initialization")) {
+      console.error("[Table] CRITICAL: Table variable initialization error detected in listTables");
+      console.error("[Table] Error details:", {
+        message: err.message,
+        stack: err.stack,
+        userId: req.user?._id,
+        userRole: req.user?.role,
+      });
+      // Return a more helpful error message
+      return res.status(500).json({
+        message: "Internal server error: Table initialization issue. Please try again.",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+      });
+    }
+    return res.status(500).json({ 
+      message: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
   }
 };
 
@@ -575,7 +610,8 @@ exports.lookupTableBySlug = async (req, res) => {
     }
 
     const waitlistLength = await countActiveWaitlist(table._id);
-    const { notifyNextWaitlist } = require("./waitlistController");
+    // notifyNextWaitlist is already imported at the top of the file (line 7)
+    // No need to require it again here - this was causing potential circular dependency issues
 
     // CRITICAL: Get user's waitlist entry if provided
     // This is the PRIMARY way to identify the same customer
@@ -624,7 +660,7 @@ exports.lookupTableBySlug = async (req, res) => {
     let hasActiveUnpaidOrder = false;
     let activeOrder = null;
     if (table.currentOrder) {
-      const Order = require("../models/orderModel");
+      // Order is already imported at the top of the file (line 4), no need to require again
       try {
         activeOrder = await Order.findById(table.currentOrder).lean();
         if (activeOrder) {
@@ -693,20 +729,30 @@ exports.lookupTableBySlug = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
 
+    // CRITICAL: Capture table reference to avoid closure issues
+    // This prevents "Cannot access 'table' before initialization" errors
+    const currentTable = table;
+    
     const emitTableStatus = async () => {
+      // Use captured table reference to ensure it's always available
+      if (!currentTable) {
+        console.warn("[Table] emitTableStatus called but table is not available");
+        return;
+      }
+      
       const tableStatusPayload = {
-        id: table._id,
-        number: table.number,
-        status: table.status,
-        currentOrder: table.currentOrder || null,
-        sessionToken: table.sessionToken || null,
+        id: currentTable._id,
+        number: currentTable.number,
+        status: currentTable.status,
+        currentOrder: currentTable.currentOrder || null,
+        sessionToken: currentTable.sessionToken || null,
       };
 
       // Emit to cafe room (for admin panel)
-      if (io && emitToCafe && table.cartId) {
+      if (io && emitToCafe && currentTable.cartId) {
         emitToCafe(
           io,
-          table.cartId.toString(),
+          currentTable.cartId.toString(),
           "table:status:updated",
           tableStatusPayload
         );
@@ -765,7 +811,8 @@ exports.lookupTableBySlug = async (req, res) => {
         // Mark as RESERVED once a sessionToken is issued so admin sees not available
         if (!table.sessionToken) {
           // Clean up any old orders before starting new session
-          const oldSessionToken = table.sessionToken; // Save old token if exists
+          // Note: table.sessionToken is null/undefined here, so oldSessionToken will be null
+          const oldSessionToken = table.sessionToken || null; // Save old token if exists
           await cleanupOldSessionOrders(table._id, oldSessionToken);
           table.sessionToken = generateToken();
           table.status = "RESERVED";
@@ -893,7 +940,8 @@ exports.lookupTableBySlug = async (req, res) => {
             // Mark as RESERVED once a sessionToken is issued so admin sees not available
             if (!table.sessionToken) {
               // Clean up any old orders before starting new session
-              const oldSessionToken = table.sessionToken; // Save old token if exists
+              // Note: table.sessionToken is null/undefined here, so oldSessionToken will be null
+              const oldSessionToken = table.sessionToken || null; // Save old token if exists
               await cleanupOldSessionOrders(table._id, oldSessionToken);
               table.sessionToken = generateToken();
               table.status = "RESERVED";
@@ -1081,7 +1129,7 @@ exports.lookupTableBySlug = async (req, res) => {
 
         // If user has active order, return it
         if (hasActiveUnpaidOrder && table.currentOrder) {
-          const Order = require("../models/orderModel");
+          // Order is already imported at the top of the file (line 4), no need to require again
           try {
             const activeOrder = await Order.findById(table.currentOrder).lean();
             if (activeOrder) {
@@ -1180,6 +1228,21 @@ exports.lookupTableBySlug = async (req, res) => {
     return res.status(500).json({ message: "Unexpected table status" });
   } catch (err) {
     console.error("Error in lookupTableBySlug:", err);
+    // CRITICAL: Check if error is related to table variable initialization
+    if (err.message && err.message.includes("Cannot access 'table' before initialization")) {
+      console.error("[Table] CRITICAL: Table variable initialization error detected");
+      console.error("[Table] Error details:", {
+        message: err.message,
+        stack: err.stack,
+        slug: req.params?.slug,
+      });
+      // Return a more helpful error message
+      return res.status(500).json({
+        message: "Internal server error: Table initialization issue. Please try again.",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+      });
+    }
     return res.status(500).json({
       message: err.message,
       stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
@@ -1380,6 +1443,13 @@ exports.updateTable = async (req, res) => {
 
     await ensureSessionTokenIndex();
 
+    // CRITICAL: Fetch table FIRST before using it in any conditionals
+    // This prevents "Cannot access 'table' before initialization" errors
+    const table = await Table.findById(id);
+    if (!table) {
+      return res.status(404).json({ message: "Table not found" });
+    }
+
     const updates = {};
     const allowedFields = ["number", "name", "capacity", "status", "notes"];
     for (const field of allowedFields) {
@@ -1409,11 +1479,6 @@ exports.updateTable = async (req, res) => {
 
     if (updates.status && !TABLE_STATUSES.includes(updates.status)) {
       return res.status(400).json({ message: "Invalid table status" });
-    }
-
-    const table = await Table.findById(id);
-    if (!table) {
-      return res.status(404).json({ message: "Table not found" });
     }
 
     // Save original status before any updates
@@ -1565,7 +1630,83 @@ exports.updateTable = async (req, res) => {
       waitlistLength,
     });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    console.error("Error in updateTable:", err);
+    // CRITICAL: Check if error is related to table variable initialization
+    if (err.message && err.message.includes("Cannot access 'table' before initialization")) {
+      console.error("[Table] CRITICAL: Table variable initialization error detected in updateTable");
+      console.error("[Table] Error details:", {
+        message: err.message,
+        stack: err.stack,
+        tableId: req.params?.id,
+        userId: req.user?._id,
+        userRole: req.user?.role,
+      });
+      // Return a more helpful error message
+      return res.status(500).json({
+        message: "Internal server error: Table initialization issue. Please try again.",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+      });
+    }
+    return res.status(500).json({ 
+      message: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
+  }
+};
+
+// Get single table by ID
+exports.getTable = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid table id" });
+    }
+
+    // Build query based on user role
+    const query = await buildHierarchyQuery(req.user);
+    query._id = id;
+
+    const table = await Table.findOne(query)
+      .populate("mergedWith", "number")
+      .populate("mergedTables", "number capacity originalCapacity")
+      .lean();
+
+    if (!table) {
+      return res.status(404).json({ message: "Table not found" });
+    }
+
+    const waitlistLength = await countActiveWaitlist(table._id);
+
+    return res.json({
+      success: true,
+      table: buildPublicTableResponse(table, waitlistLength, {
+        includeSessionToken: false,
+      }),
+    });
+  } catch (err) {
+    console.error("Error in getTable:", err);
+    // CRITICAL: Check if error is related to table variable initialization
+    if (err.message && err.message.includes("Cannot access 'table' before initialization")) {
+      console.error("[Table] CRITICAL: Table variable initialization error detected in getTable");
+      console.error("[Table] Error details:", {
+        message: err.message,
+        stack: err.stack,
+        tableId: req.params?.id,
+        userId: req.user?._id,
+        userRole: req.user?.role,
+      });
+      // Return a more helpful error message
+      return res.status(500).json({
+        message: "Internal server error: Table initialization issue. Please try again.",
+        error: process.env.NODE_ENV === "development" ? err.message : undefined,
+        stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+      });
+    }
+    return res.status(500).json({ 
+      message: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
   }
 };
 

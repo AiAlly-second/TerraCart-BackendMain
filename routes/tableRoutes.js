@@ -6,6 +6,7 @@ const {
   getAvailableTables,
   lookupTableBySlug,
   createTable,
+  getTable,
   updateTable,
   deleteTable,
   regenerateQrSlug,
@@ -23,6 +24,7 @@ router.post("/:id/occupy", occupyTable); // Public endpoint to mark table as occ
 
 // Admin-protected endpoints
 router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), listTables);
+router.get("/:id", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTable);
 router.post("/", protect, authorize(["admin"]), createTable);
 router.put("/:id", protect, authorize(["admin"]), updateTable);
 router.patch("/:id", protect, authorize(["admin"]), updateTable);
