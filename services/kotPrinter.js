@@ -83,16 +83,47 @@ async function printKOT(order, kot, kotIndex = 0) {
     return { success: false, message: "Printer disabled" };
   }
 
+  // Validate printer configuration
+  if (!PRINTER_IP || !PRINTER_PORT) {
+    console.error("[PRINTER] Printer IP or Port not configured");
+    return { success: false, error: "Printer configuration missing" };
+  }
+
+  console.log(`[PRINTER] Attempting to print KOT for order ${order._id} to ${PRINTER_IP}:${PRINTER_PORT}`);
+
   try {
     // Create network printer connection
     const device = new escposNetwork(PRINTER_IP, PRINTER_PORT);
     const printer = new escpos.Printer(device);
 
-    return new Promise((resolve, reject) => {
+    // Add timeout to prevent hanging
+    const timeout = 10000; // 10 seconds timeout
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`Printer connection timeout after ${timeout}ms`));
+      }, timeout);
+    });
+
+    const printPromise = new Promise((resolve, reject) => {
+      let isResolved = false;
+      
+      const handleError = (error, context) => {
+        if (isResolved) return;
+        isResolved = true;
+        console.error(`[PRINTER] ${context}:`, error);
+        reject({ success: false, error: error.message || error.toString(), context });
+      };
+
+      const handleSuccess = (message) => {
+        if (isResolved) return;
+        isResolved = true;
+        console.log(`[PRINTER] ${message}`);
+        resolve({ success: true, message: "KOT printed successfully" });
+      };
+
       device.open((error) => {
         if (error) {
-          console.error("[PRINTER] Connection error:", error);
-          reject({ success: false, error: error.message });
+          handleError(error, "Connection error");
           return;
         }
 
@@ -100,29 +131,37 @@ async function printKOT(order, kot, kotIndex = 0) {
 
         // Format KOT content
         const kotContent = formatKOT(order, kot, kotIndex);
+        console.log(`[PRINTER] KOT content length: ${kotContent.length} characters`);
 
-        // Print KOT
-        printer
-          .font("a")
-          .align("ct")
-          .text(kotContent)
-          .cut()
-          .close((err) => {
-            if (err) {
-              console.error("[PRINTER] Print error:", err);
-              reject({ success: false, error: err.message });
-            } else {
-              console.log(
-                `[PRINTER] KOT printed successfully for order ${order._id}`
-              );
-              resolve({ success: true, message: "KOT printed successfully" });
-            }
-          });
+        // Print KOT with error handling
+        try {
+          printer
+            .font("a")
+            .align("ct")
+            .text(kotContent)
+            .cut()
+            .close((err) => {
+              if (err) {
+                handleError(err, "Print error");
+              } else {
+                handleSuccess(`KOT printed successfully for order ${order._id}`);
+              }
+            });
+        } catch (printErr) {
+          handleError(printErr, "Print command error");
+        }
       });
     });
+
+    // Race between print promise and timeout
+    return await Promise.race([printPromise, timeoutPromise]);
   } catch (error) {
-    console.error("[PRINTER] Error:", error);
-    return { success: false, error: error.message };
+    console.error("[PRINTER] Unexpected error:", error);
+    return { 
+      success: false, 
+      error: error.message || error.toString(),
+      details: error.stack 
+    };
   }
 }
 

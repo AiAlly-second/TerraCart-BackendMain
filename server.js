@@ -273,8 +273,13 @@ const startServer = async () => {
     await connectDB();
 
     const PORT = process.env.PORT || 5001;
-    server.listen(PORT, () => {
-      // Server started
+    // CRITICAL: Bind to 0.0.0.0 for EC2 compatibility (allows external connections)
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+      console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
+      if (process.env.NODE_ENV === 'production') {
+        console.log(`🌐 Server accessible at: http://0.0.0.0:${PORT}`);
+      }
     });
   } catch (error) {
     process.exit(1);
