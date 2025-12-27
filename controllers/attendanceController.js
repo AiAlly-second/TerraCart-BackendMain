@@ -394,7 +394,7 @@ exports.checkIn = async (req, res) => {
     }
 
     // Check hierarchy access
-    if (user.role === "admin" && employee.cafeId?.toString() !== user._id.toString()) {
+    if (user.role === "admin" && employee.cartId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
@@ -476,7 +476,7 @@ exports.checkIn = async (req, res) => {
           notes: notes || "",
         },
         status: status,
-        cafeId: employee.cafeId,
+        cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
         franchiseId: employee.franchiseId,
       });
     }
@@ -486,9 +486,10 @@ exports.checkIn = async (req, res) => {
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && attendance.cafeId) {
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_in", attendance);
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
+    if (io && emitToCafe && attendanceCartId) {
+      emitToCafe(io, attendanceCartId.toString(), "attendance:checked_in", attendance);
+      emitToCafe(io, attendanceCartId.toString(), "attendance:updated", attendance);
     }
 
     return res.json({
@@ -531,7 +532,7 @@ exports.checkOut = async (req, res) => {
     }
 
     // Check hierarchy access
-    if (user.role === "admin" && employee.cafeId?.toString() !== user._id.toString()) {
+    if (user.role === "admin" && employee.cartId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
@@ -616,9 +617,10 @@ exports.checkOut = async (req, res) => {
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && attendance.cafeId) {
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_out", attendance);
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
+    if (io && emitToCafe && attendanceCartId) {
+      emitToCafe(io, attendanceCartId.toString(), "attendance:checked_out", attendance);
+      emitToCafe(io, attendanceCartId.toString(), "attendance:updated", attendance);
     }
 
     return res.json({
