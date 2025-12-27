@@ -2452,7 +2452,8 @@ const updateOrderStatus = async (req, res) => {
     });
 
     // Return immediately - don't wait for background tasks
-    return res.json(updatedOrder);
+    // Return order in consistent format for mobile app
+    return res.json({ success: true, data: updatedOrder });
   } catch (err) {
     console.error("Status update error:", err);
     return res.status(500).json({ message: err.message });

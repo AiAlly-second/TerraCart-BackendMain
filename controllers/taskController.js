@@ -328,16 +328,21 @@ exports.getTodayTasks = async (req, res) => {
 
     // Filter tasks that should be shown today
     const todayTasks = allTasks.filter((task) => {
-      // Check if task is due today or is a recurring task that should show today
-      const taskDueDate = new Date(task.dueDate);
-      const isDueToday = taskDueDate >= today && taskDueDate < tomorrow;
-      
       // If it's a recurring task, check frequency and work schedule
-      if (task.frequency && task.frequency.length > 0) {
+      if (task.frequency && Array.isArray(task.frequency) && task.frequency.length > 0) {
         return shouldShowTaskToday(task, employeeSchedule, today);
       }
       
-      return isDueToday;
+      // For non-recurring tasks, check if task is due today
+      if (task.dueDate) {
+        const taskDueDate = new Date(task.dueDate);
+        taskDueDate.setHours(0, 0, 0, 0); // Normalize to start of day
+        const isDueToday = taskDueDate.getTime() === today.getTime();
+        return isDueToday;
+      }
+      
+      // If no dueDate, don't show the task
+      return false;
     });
 
     const now = new Date();
@@ -348,6 +353,7 @@ exports.getTodayTasks = async (req, res) => {
       return { ...task, status: calculatedStatus };
     });
 
+    // Return array directly for mobile app compatibility
     return res.json(tasksWithStatus);
   } catch (err) {
     return res.status(500).json({ message: err.message });
