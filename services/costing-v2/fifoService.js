@@ -128,6 +128,7 @@ class FIFOService {
 
     let remainingToConsume = qtyToConsume;
     let totalCostAllocated = 0;
+    let cartSpecificQtyConsumed = 0;
 
     console.log(
       `[FIFO] Consuming ${qtyToConsume} ${ingredient.baseUnit} of ${
@@ -135,8 +136,8 @@ class FIFOService {
       }${cartId ? ` for cart ${cartId}` : " (global)"}`
     );
 
-    // Consume from oldest layers first (FIFO)
-    // If cartId is provided, only consume from layers belonging to that cart
+    // First pass: Try to consume from cart-specific layers first (if cartId provided)
+    // If cartId is provided, prioritize cart-specific layers first, then fall back to global layers
     // cartId matches outletId in purchases/ingredients
     for (
       let i = 0;
@@ -147,28 +148,33 @@ class FIFOService {
 
       if (layer.remainingQty <= 0) continue; // Skip empty layers
 
-      // If cartId is specified, verify this layer belongs to that cart
-      // For cart-specific ingredients, all layers belong to that cart
+      // If cartId is specified, prioritize cart-specific layers first
+      let shouldConsumeFromLayer = false;
       if (cartId) {
         if (
           ingredient.outletId &&
           ingredient.outletId.toString() === cartId.toString()
         ) {
           // Cart-specific ingredient - all layers belong to this cart
+          shouldConsumeFromLayer = true;
         } else if (layer.purchaseId) {
           // Shared ingredient - check if purchase belongs to this cart (outletId = cartId)
           const purchase = await Purchase.findById(layer.purchaseId);
           if (
-            !purchase ||
-            !purchase.outletId ||
-            purchase.outletId.toString() !== cartId.toString()
+            purchase &&
+            purchase.outletId &&
+            purchase.outletId.toString() === cartId.toString()
           ) {
-            continue; // Skip layers from other carts
+            shouldConsumeFromLayer = true;
           }
-        } else {
-          // Layer has no purchaseId - skip it for cart-specific consumption
-          continue;
         }
+      } else {
+        // No cartId - consume from any layer (global consumption)
+        shouldConsumeFromLayer = true;
+      }
+
+      if (!shouldConsumeFromLayer) {
+        continue; // Skip layers that don't belong to this cart (for now)
       }
 
       const consumeFromLayer = Math.min(remainingToConsume, layer.remainingQty);
@@ -177,6 +183,32 @@ class FIFOService {
       layer.remainingQty -= consumeFromLayer;
       remainingToConsume -= consumeFromLayer;
       totalCostAllocated += costFromLayer;
+      cartSpecificQtyConsumed += consumeFromLayer;
+    }
+
+    // Second pass: If still remaining and we have global stock, consume from any available layers
+    // This handles the case where cart-specific stock is insufficient but global stock exists
+    if (remainingToConsume > 0 && cartId && ingredient.qtyOnHand >= remainingToConsume) {
+      console.log(
+        `[FIFO] Cart-specific stock insufficient (consumed ${cartSpecificQtyConsumed}), consuming remaining ${remainingToConsume} from global stock for ${ingredient.name}`
+      );
+      // Consume from any available layers (global fallback)
+      // Go through all layers again, consuming from any that have remaining quantity
+      for (
+        let i = 0;
+        i < ingredient.fifoLayers.length && remainingToConsume > 0;
+        i++
+      ) {
+        const layer = ingredient.fifoLayers[i];
+        if (layer.remainingQty <= 0) continue;
+
+        const consumeFromLayer = Math.min(remainingToConsume, layer.remainingQty);
+        const costFromLayer = consumeFromLayer * layer.unitCost;
+
+        layer.remainingQty -= consumeFromLayer;
+        remainingToConsume -= consumeFromLayer;
+        totalCostAllocated += costFromLayer;
+      }
     }
 
     if (remainingToConsume > 0) {
