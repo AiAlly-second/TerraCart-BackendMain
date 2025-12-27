@@ -2,23 +2,37 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
-// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB)
-const getISTDate = () => {
-  const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds (UTC+5:30)
-  const istNow = new Date(now.getTime() + istOffset);
-  
-  // Get start of day in IST
-  const istDate = new Date(istNow);
-  istDate.setUTCHours(0, 0, 0, 0);
-  
-  // Convert back to UTC for MongoDB storage
-  istDate.setTime(istDate.getTime() - istOffset);
-  
-  return istDate;
+// IST offset constant (UTC+5:30)
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+
+// Helper function to get current IST time
+const getISTNow = () => {
+  const now = new Date(); // Current UTC time
+  return new Date(now.getTime() + IST_OFFSET_MS); // Convert to IST
 };
 
-// Helper function to get IST date range (today start and tomorrow start in UTC)
+// Helper function to convert IST time to UTC for MongoDB storage
+const istToUTC = (istDate) => {
+  return new Date(istDate.getTime() - IST_OFFSET_MS);
+};
+
+// Helper function to convert UTC time to IST
+const utcToIST = (utcDate) => {
+  return new Date(utcDate.getTime() + IST_OFFSET_MS);
+};
+
+// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB storage)
+const getISTDate = () => {
+  const istNow = getISTNow();
+  // Get start of day in IST
+  const istDate = new Date(istNow);
+  istDate.setHours(0, 0, 0, 0); // Set to start of day in IST
+  
+  // Convert to UTC for MongoDB storage
+  return istToUTC(istDate);
+};
+
+// Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
 const getISTDateRange = () => {
   const today = getISTDate();
   const tomorrow = new Date(today);
@@ -26,18 +40,11 @@ const getISTDateRange = () => {
   return { today, tomorrow };
 };
 
-// Helper function to get current IST time
-const getISTNow = () => {
-  const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  return new Date(now.getTime() + istOffset);
-};
-
 // Helper function to get day name in IST
 const getISTDayName = () => {
   const istNow = getISTNow();
   const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[istNow.getUTCDay()];
+  return dayNames[istNow.getDay()]; // Use getDay() for IST day
 };
 
 // Helper function to build query based on user role
@@ -151,15 +158,14 @@ exports.getAllAttendance = async (req, res) => {
           
           if (todaySchedule && todaySchedule.isWorking) {
           const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-          const istOffset = 5.5 * 60 * 60 * 1000;
+          // Create scheduled start time in IST
           const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
-          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset);
+          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
           
-          // Add 30 minute buffer
-          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+          // Add 30 minute buffer in IST
+          const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
             
-            if (now >= bufferTime) {
+            if (istNow >= bufferTimeIST) {
               try {
                 await EmployeeAttendance.create({
                   employeeId: employee._id,
@@ -262,15 +268,14 @@ exports.getTodayAttendance = async (req, res) => {
         if (todaySchedule && todaySchedule.isWorking) {
           // Check if it's past the scheduled start time (with 30 minute buffer)
           const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-          const istOffset = 5.5 * 60 * 60 * 1000;
+          // Create scheduled start time in IST
           const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
-          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset); // Convert to UTC
+          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
           
-          // Add 30 minute buffer - only mark absent if it's 30 minutes past scheduled start time
-          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+          // Add 30 minute buffer in IST - only mark absent if it's 30 minutes past scheduled start time
+          const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
           
-          if (now >= bufferTime) {
+            if (istNow >= bufferTimeIST) {
             // Create absent attendance record
             try {
               const absentAttendance = await EmployeeAttendance.create({
@@ -477,9 +482,11 @@ exports.checkIn = async (req, res) => {
       });
     }
 
-    const checkInTime = new Date(); // Store in UTC (MongoDB default)
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkInTimeIST = getISTNow();
+    const checkInTime = istToUTC(checkInTimeIST); // Store in UTC (MongoDB default)
 
-    // Get employee schedule to check if late
+    // Get employee schedule to check if late (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
     let status = "present";
     let isLate = false;
@@ -491,15 +498,13 @@ exports.checkIn = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.startTime) {
         const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-        // Create scheduled time in IST, then convert to UTC for comparison
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled time in IST for today
         const scheduledTimeIST = new Date(istNow);
-        scheduledTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledTimeIST.setTime(scheduledTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        // Compare checkInTime (UTC) with scheduledTime (UTC)
-        if (checkInTime > scheduledTimeIST) {
-          const lateMinutes = Math.floor((checkInTime - scheduledTimeIST) / (1000 * 60));
+        // Compare checkInTime (IST) with scheduledTime (IST)
+        if (checkInTimeIST > scheduledTimeIST) {
+          const lateMinutes = Math.floor((checkInTimeIST - scheduledTimeIST) / (1000 * 60));
           if (lateMinutes > 15) {
             // Late if more than 15 minutes
             status = "late";
@@ -629,14 +634,17 @@ exports.checkOut = async (req, res) => {
       return res.status(400).json({ message: "Employee already checked out today" });
     }
 
-    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkOutTimeIST = getISTNow();
+    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
 
-    // Calculate working hours
-    const checkInTime = new Date(attendance.checkIn.time);
-    const workingMinutes = Math.floor((checkOutTime - checkInTime) / (1000 * 60));
+    // Calculate working hours (convert stored UTC times to IST for calculation)
+    const checkInTimeUTC = new Date(attendance.checkIn.time);
+    const checkInTimeIST = utcToIST(checkInTimeUTC);
+    const workingMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
     const workingHours = workingMinutes - (attendance.breakDuration || 0);
 
-    // Get schedule to calculate overtime
+    // Get schedule to calculate overtime (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
     let overtime = 0;
 
@@ -647,15 +655,13 @@ exports.checkOut = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        // Create scheduled end time in IST, then convert to UTC for comparison
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled end time in IST for today
         const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        // Compare checkOutTime (UTC) with scheduledEndTime (UTC)
-        if (checkOutTime > scheduledEndTimeIST) {
-          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
+        // Compare checkOutTime (IST) with scheduledEndTime (IST)
+        if (checkOutTimeIST > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTimeIST - scheduledEndTimeIST) / (1000 * 60));
         }
       }
     }
@@ -739,15 +745,18 @@ exports.checkOutById = async (req, res) => {
       return res.status(400).json({ success: false, message: "Cannot checkout while on break. Please end break first." });
     }
 
-    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkOutTimeIST = getISTNow();
+    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
 
-    // Calculate working hours
-    const checkInTime = new Date(attendance.checkIn.time);
-    const totalDurationMinutes = Math.floor((checkOutTime - checkInTime) / (1000 * 60));
+    // Calculate working hours (convert stored UTC times to IST for calculation)
+    const checkInTimeUTC = new Date(attendance.checkIn.time);
+    const checkInTimeIST = utcToIST(checkInTimeUTC);
+    const totalDurationMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
     const breakMinutes = attendance.breakDuration || 0;
     const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
 
-    // Get schedule to calculate overtime
+    // Get schedule to calculate overtime (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: attendance.employeeId });
     let overtime = 0;
 
@@ -758,13 +767,13 @@ exports.checkOutById = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled end time in IST for today
         const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        if (checkOutTime > scheduledEndTimeIST) {
-          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
+        // Compare checkOutTime (IST) with scheduledEndTime (IST)
+        if (checkOutTimeIST > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTimeIST - scheduledEndTimeIST) / (1000 * 60));
         }
       }
     }
