@@ -165,7 +165,7 @@ exports.getAllAttendance = async (req, res) => {
                   employeeId: employee._id,
                   date: today,
                   status: "absent",
-                  cafeId: employee.cafeId,
+                  cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
                   franchiseId: employee.franchiseId,
                 });
               } catch (err) {
@@ -222,10 +222,13 @@ exports.getTodayAttendance = async (req, res) => {
     };
 
     // Get existing attendance records
+    // For mobile users, query should already filter by employeeId
+    console.log('[ATTENDANCE] getTodayAttendance query:', JSON.stringify(query, null, 2));
     let attendance = await EmployeeAttendance.find(query)
       .populate("employeeId", "name mobile employeeRole")
       .sort({ "checkIn.time": -1 })
       .lean();
+    console.log('[ATTENDANCE] getTodayAttendance found records:', attendance.length);
 
     // Get all employees in the hierarchy to check for absent employees
     const employeeQuery = await buildHierarchyQuery(req.user);
