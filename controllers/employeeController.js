@@ -258,6 +258,12 @@ exports.createEmployee = async (req, res) => {
       });
     }
     
+    // Map cafeId to cartId for backward compatibility (frontend may send cafeId)
+    if (employeeData.cafeId && !employeeData.cartId) {
+      employeeData.cartId = employeeData.cafeId;
+      delete employeeData.cafeId;
+    }
+    
     // Set hierarchy relationships based on user role
     if (req.user.role === "admin") {
       employeeData.cartId = req.user._id; // Changed from cafeId to cartId
@@ -384,6 +390,12 @@ exports.updateEmployee = async (req, res) => {
       }
     }
     
+    // Map cafeId to cartId for backward compatibility (frontend may send cafeId)
+    if (req.body.cafeId && !req.body.cartId) {
+      req.body.cartId = req.body.cafeId;
+      delete req.body.cafeId;
+    }
+    
     // Handle hierarchy changes based on role
     if (req.user.role === "franchise_admin") {
       // Franchise admin can assign employees to cafes within their franchise
@@ -436,6 +448,11 @@ exports.updateEmployee = async (req, res) => {
           if (!mobileRoles.includes(user.role)) {
             user.role = employee.employeeRole;
           }
+          // Update cafeId from employee.cartId (User model uses cafeId, Employee model uses cartId)
+          if (employee.cartId && user.cafeId?.toString() !== employee.cartId.toString()) {
+            user.cafeId = employee.cartId;
+            console.log(`[UPDATE_EMPLOYEE] Updated User cafeId to ${employee.cartId}`);
+          }
           // Ensure userId is linked in employee
           if (!employee.userId || employee.userId.toString() !== user._id.toString()) {
             employee.userId = user._id;
@@ -451,7 +468,7 @@ exports.updateEmployee = async (req, res) => {
             email: employee.email,
             password: password,
             role: employee.employeeRole,
-            cartId: employee.cartId, // Changed from cafeId to cartId
+            cafeId: employee.cartId, // Employee.cartId -> User.cafeId (User model field for mobile users)
             employeeId: employee._id,
           };
           
