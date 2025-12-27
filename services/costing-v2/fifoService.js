@@ -97,10 +97,24 @@ class FIFOService {
           }
         }
 
-        if (availableQty < qtyToConsume) {
-          throw new Error(
-            `Insufficient stock for this cart. Available: ${availableQty}, Required: ${qtyToConsume}`
+        // If no cart-specific stock found, fall back to global stock for shared ingredients
+        // This allows cart admins to use shared ingredients that haven't been purchased cart-specifically yet
+        if (availableQty === 0 && ingredient.qtyOnHand > 0) {
+          // No cart-specific stock, but global stock exists - allow consumption from global stock
+          availableQty = ingredient.qtyOnHand || 0;
+          console.log(
+            `[FIFO] No cart-specific stock for ${ingredient.name}, falling back to global stock: ${availableQty}`
           );
+        }
+
+        if (availableQty < qtyToConsume) {
+          let errorMessage = `Insufficient stock for this cart. Available: ${availableQty}, Required: ${qtyToConsume}`;
+          if (availableQty === 0 && ingredient.qtyOnHand === 0) {
+            errorMessage += `. Please make a purchase for ${ingredient.name} first.`;
+          } else if (availableQty === 0 && ingredient.qtyOnHand > 0) {
+            errorMessage += `. Note: This is a shared ingredient. You may need to make a purchase for your cart first, or the ingredient may need to be assigned to your cart.`;
+          }
+          throw new Error(errorMessage);
         }
       }
     } else {
