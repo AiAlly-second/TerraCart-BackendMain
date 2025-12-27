@@ -128,8 +128,8 @@ const ingredientSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    // Kiosk/Outlet association (null = shared/global ingredient)
-    outletId: {
+    // Cart association (null = shared/global ingredient)
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,

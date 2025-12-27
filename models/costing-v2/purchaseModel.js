@@ -62,10 +62,10 @@ const purchaseSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true, // Required - purchases are always for a specific kiosk
+      required: true, // Required - purchases are always for a specific cart
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -82,7 +82,7 @@ const purchaseSchema = new mongoose.Schema(
 purchaseSchema.index({ supplierId: 1, date: -1 });
 purchaseSchema.index({ status: 1 });
 purchaseSchema.index({ date: -1 });
-purchaseSchema.index({ outletId: 1 });
+purchaseSchema.index({ cartId: 1 });
 
 // Auto-generate PO number
 purchaseSchema.pre("save", async function (next) {

@@ -49,10 +49,10 @@ const overheadSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true, // Required - overheads are kiosk-specific
+      required: true, // Required - overheads are cart-specific
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -72,7 +72,7 @@ const overheadSchema = new mongoose.Schema(
 
 // Indexes
 overheadSchema.index({ periodFrom: 1, periodTo: 1 });
-overheadSchema.index({ outletId: 1 });
+overheadSchema.index({ cartId: 1 });
 overheadSchema.index({ category: 1 });
 
 module.exports = mongoose.model("Overhead", overheadSchema);

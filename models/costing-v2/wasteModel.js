@@ -53,7 +53,7 @@ const wasteSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
@@ -67,7 +67,7 @@ const wasteSchema = new mongoose.Schema(
 // Indexes
 wasteSchema.index({ ingredientId: 1, date: -1 });
 wasteSchema.index({ date: -1 });
-wasteSchema.index({ outletId: 1 });
+wasteSchema.index({ cartId: 1 });
 
 module.exports = mongoose.model("Waste", wasteSchema);
 

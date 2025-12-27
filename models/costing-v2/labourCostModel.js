@@ -36,10 +36,10 @@ const labourCostSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true, // Required - labour costs are kiosk-specific
+      required: true, // Required - labour costs are cart-specific
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -59,7 +59,7 @@ const labourCostSchema = new mongoose.Schema(
 
 // Indexes
 labourCostSchema.index({ periodFrom: 1, periodTo: 1 });
-labourCostSchema.index({ outletId: 1 });
+labourCostSchema.index({ cartId: 1 });
 
 module.exports = mongoose.model("LabourCost", labourCostSchema);
 

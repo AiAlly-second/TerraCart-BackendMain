@@ -15,14 +15,14 @@ class WeightedAverageService {
    * @param {String} ingredientId - Ingredient ID
    * @param {Number} newPurchaseQty - New purchase quantity in base unit
    * @param {Number} newPurchaseCostPerBaseUnit - New purchase cost per base unit
-   * @param {String} outletId - Optional outlet ID for cart-specific calculations
+   * @param {String} cartId - Optional outlet ID for cart-specific calculations
    * @returns {Promise<Object>} { newAverageCost, updatedQtyOnHand }
    */
   static async updateWeightedAverage(
     ingredientId,
     newPurchaseQty,
     newPurchaseCostPerBaseUnit,
-    outletId = null
+    cartId = null
   ) {
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -49,54 +49,73 @@ class WeightedAverageService {
     }
 
     // Get existing stock quantity and average cost
-    // For cart-specific ingredients, use outlet-specific values
+    // IMPORTANT LOGIC:
+    // 1. For cart-specific ingredients: Use ingredient.qtyOnHand directly
+    // 2. For shared ingredients:
+    //    - If purchase has NO cartId: Use global qtyOnHand (global purchase)
+    //    - If purchase HAS cartId: Calculate from outlet-specific transactions (outlet-specific purchase)
+    //    This ensures that outlet-specific purchases don't affect global stock
     let existingQty = 0;
     let existingAvgCost = 0;
 
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
-      // Cart-specific ingredient - use values directly
-      existingQty = ingredient.qtyOnHand || 0;
-      existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
-    } else if (outletId) {
-      // Shared ingredient - calculate outlet-specific values from transactions
-      // Need to recalculate weighted average by processing transactions chronologically
-      const outletTransactions = await InventoryTransaction.find({
-        ingredientId: ingredientId,
-        outletId: outletId,
-      }).sort({ date: 1 }); // Sort ascending to process chronologically
-
-      // Calculate outlet-specific quantity and weighted average from transactions
-      let totalQty = 0;
-      let weightedAvgCost = 0;
-
-      for (const txn of outletTransactions) {
-        const txnQty = txn.qtyInBaseUnit || txn.qty;
-        if (txn.type === "IN" || txn.type === "RETURN") {
-          // Add to inventory - recalculate weighted average
-          const txnCost = txn.costAllocated || 0;
-          if (totalQty > 0 && txnQty > 0) {
-            // Weighted average: (existing total value + new value) / (existing qty + new qty)
-            const existingTotalValue = totalQty * weightedAvgCost;
-            weightedAvgCost = (existingTotalValue + txnCost) / (totalQty + txnQty);
-          } else if (txnQty > 0) {
-            // First purchase
-            weightedAvgCost = txnCost / txnQty;
-          }
-          totalQty += txnQty;
-        } else if (txn.type === "OUT" || txn.type === "WASTE") {
-          // Remove from inventory (cost already allocated, just reduce quantity)
-          totalQty -= txnQty;
-          if (totalQty < 0) totalQty = 0;
-          // Weighted average cost doesn't change on consumption
-        }
+    if (ingredient.cartId) {
+      // Cart-specific ingredient
+      if (cartId && ingredient.cartId.toString() === cartId.toString()) {
+        // Same outlet - use ingredient values directly
+        existingQty = ingredient.qtyOnHand || 0;
+        existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
+      } else {
+        // Different outlet - don't update this ingredient's stock
+        // Return existing values without updating
+        return {
+          newAverageCost: ingredient.currentCostPerBaseUnit || 0,
+          updatedQtyOnHand: ingredient.qtyOnHand || 0,
+          previousQty: ingredient.qtyOnHand || 0,
+          previousAvgCost: ingredient.currentCostPerBaseUnit || 0,
+        };
       }
-
-      existingQty = Math.max(0, totalQty);
-      existingAvgCost = weightedAvgCost > 0 ? weightedAvgCost : ingredient.currentCostPerBaseUnit || 0;
     } else {
-      // Global/shared ingredient - use ingredient values directly
-      existingQty = ingredient.qtyOnHand || 0;
-      existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
+      // Shared ingredient
+      if (!cartId) {
+        // Global purchase (no cartId) - use global qtyOnHand
+        existingQty = ingredient.qtyOnHand || 0;
+        existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
+      } else {
+        // Outlet-specific purchase - calculate existing stock from outlet-specific transactions
+        // This ensures we don't mix global stock with outlet-specific purchases
+        const outletTransactions = await InventoryTransaction.find({
+          ingredientId: ingredientId,
+          cartId: cartId,
+        }).sort({ date: 1 }); // Sort ascending to process chronologically
+
+        let totalQty = 0;
+        let weightedAvgCost = 0;
+
+        for (const txn of outletTransactions) {
+          const txnQty = txn.qtyInBaseUnit || txn.qty;
+          if (txn.type === "IN" || txn.type === "RETURN") {
+            // Add to inventory - recalculate weighted average
+            const txnCost = txn.costAllocated || 0;
+            if (totalQty > 0 && txnQty > 0 && txnCost > 0) {
+              // Weighted average: (existing total value + new value) / (existing qty + new qty)
+              const existingTotalValue = totalQty * weightedAvgCost;
+              weightedAvgCost = (existingTotalValue + txnCost) / (totalQty + txnQty);
+            } else if (txnQty > 0 && txnCost > 0) {
+              // First purchase
+              weightedAvgCost = txnCost / txnQty;
+            }
+            totalQty += txnQty;
+          } else if (txn.type === "OUT" || txn.type === "WASTE") {
+            // Remove from inventory (cost already allocated, just reduce quantity)
+            totalQty -= txnQty;
+            if (totalQty < 0) totalQty = 0;
+            // Weighted average cost doesn't change on consumption
+          }
+        }
+
+        existingQty = Math.max(0, totalQty);
+        existingAvgCost = weightedAvgCost > 0 ? weightedAvgCost : ingredient.currentCostPerBaseUnit || 0;
+      }
     }
 
     // Calculate new weighted average cost
@@ -113,24 +132,76 @@ class WeightedAverageService {
       newAverageCost = newPurchaseCostPerBaseUnit;
     }
 
-    // Update ingredient
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
-      // Cart-specific ingredient - update directly
-      ingredient.qtyOnHand = totalQty;
-      ingredient.currentCostPerBaseUnit = newAverageCost;
-    } else if (!outletId || !ingredient.outletId) {
-      // Global/shared ingredient - update directly
-      ingredient.qtyOnHand = totalQty;
-      ingredient.currentCostPerBaseUnit = newAverageCost;
+    // Update ingredient stock
+    // IMPORTANT LOGIC:
+    // 1. For cart-specific ingredients: Only update if cartId matches
+    // 2. For shared ingredients:
+    //    - If purchase has NO cartId: Update global stock (global purchase)
+    //    - If purchase HAS cartId: DON'T update global stock (outlet-specific purchase, stock tracked via transactions)
+    //    This ensures that:
+    //    - Global stock only reflects global purchases
+    //    - Outlet-specific purchases are tracked via transactions only
+    //    - Cart admins see stock calculated from their outlet's transactions
+    if (ingredient.cartId) {
+      // Cart-specific ingredient - only update if cartId matches
+      if (cartId && ingredient.cartId.toString() === cartId.toString()) {
+        ingredient.qtyOnHand = totalQty;
+        ingredient.currentCostPerBaseUnit = newAverageCost;
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[Stock Update] Cart-specific ingredient ${ingredient.name}: ${existingQty} → ${totalQty} ${ingredient.baseUnit}`);
+        }
+      } else {
+        // Different cart's ingredient - don't update
+        // But we should still save the ingredient in case baseUnit was fixed
+        await ingredient.save();
+        return {
+          newAverageCost,
+          updatedQtyOnHand: existingQty, // Return existing qty since we didn't update
+          previousQty: existingQty,
+          previousAvgCost: existingAvgCost,
+        };
+      }
+    } else {
+      // Shared ingredient
+      if (!cartId) {
+        // Global purchase (no cartId) - update global stock
+        ingredient.qtyOnHand = totalQty;
+        ingredient.currentCostPerBaseUnit = newAverageCost;
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[Stock Update] Shared ingredient ${ingredient.name}: Global purchase - ${existingQty} → ${totalQty} ${ingredient.baseUnit}`);
+        }
+      } else {
+        // Outlet-specific purchase for shared ingredient - DON'T update global stock
+        // Stock will be calculated from transactions for each outlet
+        // Only update the cost if it's better (higher) than current, but don't update qtyOnHand
+        // This ensures global stock reflects only global purchases
+        if (newAverageCost > 0 && (!ingredient.currentCostPerBaseUnit || newAverageCost > ingredient.currentCostPerBaseUnit)) {
+          ingredient.currentCostPerBaseUnit = newAverageCost;
+        }
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[Stock Update] Shared ingredient ${ingredient.name}: Outlet-specific purchase (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions. Existing: ${existingQty}, New purchase: ${newPurchaseQty}, Total: ${totalQty}`);
+        }
+        // Save ingredient (for cost update if applicable)
+        await ingredient.save();
+        // Return the calculated totalQty (existingQty + newPurchaseQty) for this outlet
+        // This represents the outlet-specific stock after this purchase
+        // NOTE: For shared ingredients with cartId, stock is NOT stored in ingredient.qtyOnHand
+        // It's calculated from transactions when viewing inventory
+        return {
+          newAverageCost,
+          updatedQtyOnHand: totalQty, // Outlet-specific stock after purchase (calculated, not stored)
+          previousQty: existingQty, // Outlet-specific stock before purchase
+          previousAvgCost: existingAvgCost,
+        };
+      }
     }
-    // For shared ingredients with outletId, we don't update the global values
-    // The outlet-specific values are calculated from transactions
 
+    // For cart-specific ingredients or global purchases, update and save ingredient
     await ingredient.save();
 
     return {
       newAverageCost,
-      updatedQtyOnHand: totalQty,
+      updatedQtyOnHand: totalQty, // This is the actual updated qtyOnHand in the database
       previousQty: existingQty,
       previousAvgCost: existingAvgCost,
     };
@@ -143,7 +214,7 @@ class WeightedAverageService {
    * @param {String} refType - Reference type (recipe, waste, order, etc.)
    * @param {String} refId - Reference ID
    * @param {String} userId - User recording the transaction
-   * @param {String} outletId - Optional outlet ID for cart-specific consumption
+   * @param {String} cartId - Optional outlet ID for cart-specific consumption
    * @returns {Promise<Object>} { costAllocated, remainingQty }
    */
   static async consume(
@@ -152,7 +223,7 @@ class WeightedAverageService {
     refType,
     refId,
     userId,
-    outletId = null
+    cartId = null
   ) {
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -178,15 +249,15 @@ class WeightedAverageService {
     let availableQty = 0;
     let avgCost = 0;
 
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
+    if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - use values directly
       availableQty = ingredient.qtyOnHand || 0;
       avgCost = ingredient.currentCostPerBaseUnit || 0;
-    } else if (outletId) {
+    } else if (cartId) {
       // Shared ingredient - calculate outlet-specific values from transactions
       const outletTransactions = await InventoryTransaction.find({
         ingredientId: ingredientId,
-        outletId: outletId,
+        cartId: cartId,
       }).sort({ date: 1 }); // Sort ascending to process chronologically
 
       let totalQty = 0;
@@ -225,7 +296,7 @@ class WeightedAverageService {
         avgCost = ingredient.currentCostPerBaseUnit || 0;
       }
     } else {
-      // Global/shared ingredient - no outletId specified
+      // Global/shared ingredient - no cartId specified
       availableQty = ingredient.qtyOnHand || 0;
       avgCost = ingredient.currentCostPerBaseUnit || 0;
     }
@@ -234,9 +305,9 @@ class WeightedAverageService {
     if (availableQty < qtyToConsume) {
       let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableQty} ${ingredient.baseUnit}, Required: ${qtyToConsume} ${ingredient.baseUnit}`;
       
-      if (outletId && availableQty === 0) {
+      if (cartId && availableQty === 0) {
         // Check if ingredient has global stock but no outlet-specific stock
-        if (ingredient.qtyOnHand > 0 && (!ingredient.outletId || ingredient.outletId.toString() !== outletId.toString())) {
+        if (ingredient.qtyOnHand > 0 && (!ingredient.cartId || ingredient.cartId.toString() !== cartId.toString())) {
           errorMessage += `. Note: This is a shared ingredient. You need to make a purchase for your outlet first, or the ingredient may need to be assigned to your outlet.`;
         } else {
           errorMessage += `. Please make a purchase for this ingredient first.`;
@@ -259,14 +330,24 @@ class WeightedAverageService {
       );
     }
 
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
+    // IMPORTANT: Only update ingredient.qtyOnHand for:
+    // 1. Cart-specific ingredients (when cartId matches)
+    // 2. Shared ingredients with NO cartId (global consumption)
+    // For shared ingredients with cartId, stock is tracked via transactions only
+    if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - update directly
       ingredient.qtyOnHand = newQty;
-    } else if (!outletId || !ingredient.outletId) {
-      // Global/shared ingredient - update directly
+    } else if (!ingredient.cartId && !cartId) {
+      // Shared ingredient with NO cartId - global consumption, update global stock
       ingredient.qtyOnHand = newQty;
+    } else if (!ingredient.cartId && cartId) {
+      // Shared ingredient with cartId - outlet-specific consumption
+      // DON'T update global stock, stock is tracked via transactions
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[Consume] Shared ingredient ${ingredient.name}: Outlet-specific consumption (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions.`);
+      }
     }
-    // For shared ingredients with outletId, stock is tracked via transactions
+    // For shared ingredients with cartId, stock is tracked via transactions only
 
     await ingredient.save();
 
@@ -285,7 +366,7 @@ class WeightedAverageService {
    * @param {String} refType - Reference type (recipe, order, etc.)
    * @param {String} refId - Reference ID (transaction ID being returned)
    * @param {String} userId - User recording the return
-   * @param {String} outletId - Optional outlet ID
+   * @param {String} cartId - Optional outlet ID
    * @returns {Promise<Object>} { costAllocated, updatedQtyOnHand }
    */
   static async returnToInventory(
@@ -294,7 +375,7 @@ class WeightedAverageService {
     refType,
     refId,
     userId,
-    outletId = null
+    cartId = null
   ) {
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -319,14 +400,14 @@ class WeightedAverageService {
     // Get current weighted average cost (don't recalculate)
     let avgCost = 0;
 
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
+    if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient
       avgCost = ingredient.currentCostPerBaseUnit || 0;
-    } else if (outletId) {
+    } else if (cartId) {
       // Shared ingredient - calculate outlet-specific average from transactions
       const outletTransactions = await InventoryTransaction.find({
         ingredientId: ingredientId,
-        outletId: outletId,
+        cartId: cartId,
       }).sort({ date: 1 }); // Sort ascending to process chronologically
 
       let totalQty = 0;
@@ -372,16 +453,51 @@ class WeightedAverageService {
     const costAllocated = qtyToReturn * avgCost;
 
     // Update ingredient stock
-    // Always update qtyOnHand for the ingredient, regardless of outletId
-    // For shared ingredients, this represents the total available stock across all outlets
-    // For outlet-specific ingredients, this represents the outlet's stock
-    ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+    // IMPORTANT: Only update ingredient.qtyOnHand for:
+    // 1. Cart-specific ingredients (when cartId matches)
+    // 2. Shared ingredients with NO cartId (global return)
+    // For shared ingredients with cartId, stock is tracked via transactions only
+    if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
+      // Cart-specific ingredient - update directly
+      ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+    } else if (!ingredient.cartId && !cartId) {
+      // Shared ingredient with NO cartId - global return, update global stock
+      ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+    } else if (!ingredient.cartId && cartId) {
+      // Shared ingredient with cartId - outlet-specific return
+      // DON'T update global stock, stock is tracked via transactions
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[Return] Shared ingredient ${ingredient.name}: Outlet-specific return (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions.`);
+      }
+    }
 
     await ingredient.save();
 
+    // Calculate updated stock for return value
+    let updatedQtyOnHand = ingredient.qtyOnHand;
+    if (!ingredient.cartId && cartId) {
+      // For shared ingredients with cartId, calculate from transactions
+      const outletTransactions = await InventoryTransaction.find({
+        ingredientId: ingredientId,
+        cartId: cartId,
+      }).sort({ date: 1 });
+
+      let totalQty = 0;
+      for (const txn of outletTransactions) {
+        const txnQty = txn.qtyInBaseUnit || txn.qty;
+        if (txn.type === "IN" || txn.type === "RETURN") {
+          totalQty += txnQty;
+        } else if (txn.type === "OUT" || txn.type === "WASTE") {
+          totalQty -= txnQty;
+          if (totalQty < 0) totalQty = 0;
+        }
+      }
+      updatedQtyOnHand = Math.max(0, totalQty);
+    }
+
     return {
       costAllocated,
-      updatedQtyOnHand: ingredient.qtyOnHand,
+      updatedQtyOnHand: updatedQtyOnHand,
       avgCostUsed: avgCost,
     };
   }

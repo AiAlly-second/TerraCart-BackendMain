@@ -105,10 +105,10 @@ async function consumeIngredientsForOrder(order, userId) {
           const normalizedItemName = itemName.trim();
 
           // Find menu item by name - try multiple strategies
-          // Use cartId to match against outletId in menu items (cartId = outletId for cart admin)
+          // Use cartId to match against cartId in menu items (cartId = cartId for cart admin)
           let menuItem = await MenuItemV2.findOne({
             $or: [
-              { name: normalizedItemName, outletId: cartId, isActive: true },
+              { name: normalizedItemName, cartId: cartId, isActive: true },
               {
                 name: {
                   $regex: new RegExp(
@@ -119,13 +119,13 @@ async function consumeIngredientsForOrder(order, userId) {
                     "i"
                   ),
                 },
-                outletId: cartId,
+                cartId: cartId,
                 isActive: true,
               },
             ],
           });
 
-          // If not found, try without outletId filter (for shared menu items)
+          // If not found, try without cartId filter (for shared menu items)
           if (!menuItem) {
             menuItem = await MenuItemV2.findOne({
               $or: [
@@ -166,7 +166,7 @@ async function consumeIngredientsForOrder(order, userId) {
             console.warn(`[COSTING] Searched for: "${normalizedItemName}"`);
             console.warn(
               `[COSTING] Available menu items in costing:`,
-              await MenuItemV2.find({ outletId: cartId, isActive: true })
+              await MenuItemV2.find({ cartId: cartId, isActive: true })
                 .select("name")
                 .limit(10)
                 .lean()
@@ -277,14 +277,14 @@ async function consumeIngredientsForOrder(order, userId) {
                 continue;
               }
 
-              // Consume using weighted average - pass cartId (which matches outletId in purchases/ingredients)
+              // Consume using weighted average - pass cartId (which matches cartId in purchases/ingredients)
               const consumeResult = await WeightedAverageService.consume(
                 recipeIngredient.ingredientId,
                 qtyInBaseUnit,
                 "order",
                 order._id,
                 userId,
-                cartId // cartId from order matches outletId in database
+                cartId // cartId from order matches cartId in database
               );
 
               // Create inventory transaction for order consumption
@@ -299,7 +299,7 @@ async function consumeIngredientsForOrder(order, userId) {
                 date: new Date(),
                 costAllocated: consumeResult.costAllocated,
                 recordedBy: userId,
-                outletId: cartId || null,
+                cartId: cartId || null,
               });
               await transaction.save();
 

@@ -50,10 +50,10 @@ const expenseCategorySchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      default: null, // null = global category, specific ID = outlet-specific
+      default: null, // null = global category, specific ID = cart-specific
     },
     franchiseId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -74,7 +74,7 @@ const expenseCategorySchema = new mongoose.Schema(
 // Indexes
 // Note: code index is automatically created by unique: true
 expenseCategorySchema.index({ parentCategory: 1 });
-expenseCategorySchema.index({ outletId: 1 });
+expenseCategorySchema.index({ cartId: 1 });
 expenseCategorySchema.index({ isActive: 1 });
 
 module.exports = mongoose.model("CostingExpenseCategory", expenseCategorySchema);

@@ -111,7 +111,7 @@ const preparationSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
@@ -130,10 +130,11 @@ const preparationSchema = new mongoose.Schema(
 );
 
 // Indexes
-preparationSchema.index({ outletId: 1, status: 1 });
+preparationSchema.index({ cartId: 1, status: 1 });
 preparationSchema.index({ createdBy: 1 });
 preparationSchema.index({ startedAt: -1 });
 
 module.exports = mongoose.model("Preparation", preparationSchema);
+
 
 

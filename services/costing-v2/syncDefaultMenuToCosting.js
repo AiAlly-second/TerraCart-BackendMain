@@ -12,10 +12,10 @@ const User = require("../../models/userModel");
 /**
  * Sync cart admin menu items (from MenuItem collection) to costing menu items
  * @param {String} cartId - Cart admin user ID (cafeId)
- * @param {String} outletId - Optional outlet ID to filter costing items
+ * @param {String} filterCartId - Optional cart ID to filter costing items
  * @returns {Promise<Object>} Sync summary
  */
-async function syncCartMenuToCosting(cartId, outletId = null) {
+async function syncCartMenuToCosting(cartId, filterCartId = null) {
   try {
     console.log(`[COSTING SYNC] Starting cart menu sync for cart: ${cartId}`);
 
@@ -67,7 +67,7 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
           categoryMap[cartItem.category?.toString()] || "Unknown";
         const itemName = cartItem.name.trim();
 
-        // Find costing menu items by name (and optionally outletId)
+        // Find costing menu items by name (and optionally cartId)
         const query = {
           $or: [
             { name: itemName },
@@ -91,9 +91,9 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
           ],
         };
 
-        // If outletId is provided, filter by it
-        if (outletId) {
-          query.outletId = outletId;
+        // If filterCartId is provided, filter by it
+        if (filterCartId) {
+          query.cartId = filterCartId;
         }
 
         const costingMenuItems = await MenuItemV2.find(query);
@@ -118,14 +118,14 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
             continue;
           }
 
-          const outletObjectId = outletId || cartId;
+          const outletObjectId = cartId || cartId;
 
           try {
             const newCostingItem = new MenuItemV2({
               name: itemName,
               category: categoryName,
               sellingPrice: newPrice,
-              outletId: outletObjectId,
+              cartId: outletObjectId,
               franchiseId: cartUser.franchiseId,
               defaultMenuItemName: itemName,
               defaultMenuCategoryName: categoryName,
@@ -171,7 +171,7 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
                 `[COSTING SYNC] Updated ${
                   costingItem.name
                 }: Price ${oldPrice} → ${newPrice} (Outlet: ${
-                  costingItem.outletId || "N/A"
+                  costingItem.cartId || "N/A"
                 })`
               );
             } else if (newPrice === 0) {
@@ -186,7 +186,7 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
             );
             syncSummary.errors.push({
               item: cartItem.name,
-              outletId: costingItem.outletId,
+              cartId: costingItem.cartId,
               error: updateError.message,
             });
           }
@@ -227,19 +227,18 @@ async function syncCartMenuToCosting(cartId, outletId = null) {
 /**
  * Sync default menu item updates to costing menu items
  * @param {String} franchiseId - Franchise ID (null for global menu)
- * @param {String} cartId - Optional cart ID for cart admin sync
- * @param {String} outletId - Optional outlet ID to filter costing items
+ * @param {String} franchiseId - Optional franchise ID to filter
+ * @param {String} cartId - Optional cart ID to filter costing items
  * @returns {Promise<Object>} Sync summary
  */
 async function syncDefaultMenuToCosting(
   franchiseId = null,
-  cartId = null,
-  outletId = null
+  cartId = null
 ) {
   try {
     // If cartId is provided, sync from cart menu (MenuItem collection)
     if (cartId) {
-      return await syncCartMenuToCosting(cartId, outletId);
+      return await syncCartMenuToCosting(cartId, cartId);
     }
 
     console.log(
@@ -294,9 +293,9 @@ async function syncDefaultMenuToCosting(
             ],
           };
 
-          // If outletId is provided, filter by it
-          if (outletId) {
-            query.outletId = outletId;
+          // If cartId is provided, filter by it
+          if (cartId) {
+            query.cartId = cartId;
           }
 
           const costingMenuItems = await MenuItemV2.find(query);
@@ -326,7 +325,7 @@ async function syncDefaultMenuToCosting(
                   `[COSTING SYNC] Updated ${
                     costingItem.name
                   }: Price ${oldPrice} → ${newPrice} (Outlet: ${
-                    costingItem.outletId || "N/A"
+                    costingItem.cartId || "N/A"
                   })`
                 );
               } else if (newPrice === 0) {
@@ -341,7 +340,7 @@ async function syncDefaultMenuToCosting(
               );
               syncSummary.errors.push({
                 item: defaultItem.name,
-                outletId: costingItem.outletId,
+                cartId: costingItem.cartId,
                 error: updateError.message,
               });
             }

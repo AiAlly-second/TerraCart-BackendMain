@@ -45,41 +45,41 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
           { franchiseId: { $exists: false } },
         ];
       }
-      // For outletId, allow null (global/franchise-level) or their own outlet
+      // For cartId, allow null (global/franchise-level) or their own cart
       if (!skipOutletFilter) {
-        if (!filter.outletId) {
-          // Build $and condition: (franchiseId conditions) AND (outletId conditions)
+        if (!filter.cartId) {
+          // Build $and condition: (franchiseId conditions) AND (cartId conditions)
           const franchiseConditions = filter.$or;
-          const outletConditions = [
-            { outletId: user._id },
-            { outletId: null },
-            { outletId: { $exists: false } },
+          const cartConditions = [
+            { cartId: user._id },
+            { cartId: null },
+            { cartId: { $exists: false } },
           ];
           filter.$and = [
             { $or: franchiseConditions },
-            { $or: outletConditions },
+            { $or: cartConditions },
           ];
           delete filter.$or;
         }
       }
     } else {
-      // Normal behavior: only see their own kiosk's data
+      // Normal behavior: only see their own cart's data
       if (!skipOutletFilter) {
-        if (!filter.outletId) {
-          // No outletId specified - auto-set to their own kiosk
-          filter.outletId = user._id;
+        if (!filter.cartId) {
+          // No cartId specified - auto-set to their own cart
+          filter.cartId = user._id;
         } else {
-          // outletId is specified - validate it's their own
-          const providedOutletId = filter.outletId.toString();
-          const userOutletId = user._id.toString();
-          if (providedOutletId !== userOutletId) {
-            // If outletId is specified and it's not their own, deny access
+          // cartId is specified - validate it's their own
+          const providedCartId = filter.cartId.toString();
+          const userCartId = user._id.toString();
+          if (providedCartId !== userCartId) {
+            // If cartId is specified and it's not their own, deny access
             throw new Error(
-              "Access denied: You can only access your own kiosk's data"
+              "Access denied: You can only access your own cart's data"
             );
           }
           // It's their own, so keep it
-          filter.outletId = user._id;
+          filter.cartId = user._id;
         }
       }
       // Also filter by franchiseId for safety (for models that have it)
@@ -101,12 +101,12 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
     } else {
       filter.franchiseId = user._id;
     }
-    // If outletId is specified in query, validate it belongs to their franchise
-    if (additionalFilter.outletId) {
-      const outlet = await User.findById(additionalFilter.outletId);
-      if (!outlet || outlet.franchiseId?.toString() !== user._id.toString()) {
+    // If cartId is specified in query, validate it belongs to their franchise
+    if (additionalFilter.cartId) {
+      const cart = await User.findById(additionalFilter.cartId);
+      if (!cart || cart.franchiseId?.toString() !== user._id.toString()) {
         throw new Error(
-          "Access denied: Kiosk does not belong to your franchise"
+          "Access denied: Cart does not belong to your franchise"
         );
       }
     }
@@ -165,48 +165,48 @@ const validateOutletAccess = async (user, outletId) => {
 };
 
 /**
- * Auto-set outletId and franchiseId based on user role
+ * Auto-set cartId and franchiseId based on user role
  * @param {Object} user - Authenticated user
  * @param {Object} data - Data object to update
- * @param {Boolean} outletRequired - Whether outletId is required (default: true)
- * @returns {Promise<Object>} Updated data with outletId and franchiseId
+ * @param {Boolean} outletRequired - Whether cartId is required (default: true)
+ * @returns {Promise<Object>} Updated data with cartId and franchiseId
  */
 const setOutletContext = async (user, data = {}, outletRequired = true) => {
   if (user.role === "admin") {
-    // Cart admin - always use their own kiosk
-    data.outletId = user._id;
+    // Cart admin - always use their own cart
+    data.cartId = user._id;
     if (user.franchiseId) {
       data.franchiseId = user.franchiseId;
     }
   } else if (user.role === "franchise_admin") {
-    // Franchise admin - must specify outletId (unless outletRequired is false)
-    if (outletRequired && !data.outletId) {
-      throw new Error("outletId is required");
+    // Franchise admin - must specify cartId (unless outletRequired is false)
+    if (outletRequired && !data.cartId) {
+      throw new Error("cartId is required");
     }
-    if (data.outletId) {
-      const hasAccess = await validateOutletAccess(user, data.outletId);
+    if (data.cartId) {
+      const hasAccess = await validateOutletAccess(user, data.cartId);
       if (!hasAccess) {
-        throw new Error("Access denied: Invalid kiosk selection");
+        throw new Error("Access denied: Invalid cart selection");
       }
-      const outlet = await User.findById(data.outletId);
-      if (outlet && outlet.franchiseId) {
-        data.franchiseId = outlet.franchiseId;
+      const cart = await User.findById(data.cartId);
+      if (cart && cart.franchiseId) {
+        data.franchiseId = cart.franchiseId;
       } else {
         data.franchiseId = user._id;
       }
     } else {
-      // Optional outlet - set franchiseId from user
+      // Optional cart - set franchiseId from user
       data.franchiseId = user._id;
     }
   } else if (user.role === "super_admin") {
-    // Super admin - outletId is optional unless required
-    if (outletRequired && !data.outletId) {
-      throw new Error("outletId is required");
+    // Super admin - cartId is optional unless required
+    if (outletRequired && !data.cartId) {
+      throw new Error("cartId is required");
     }
-    if (data.outletId) {
-      const outlet = await User.findById(data.outletId);
-      if (outlet && outlet.franchiseId) {
-        data.franchiseId = outlet.franchiseId;
+    if (data.cartId) {
+      const cart = await User.findById(data.cartId);
+      if (cart && cart.franchiseId) {
+        data.franchiseId = cart.franchiseId;
       }
     }
   }

@@ -295,6 +295,7 @@ exports.updateCartSettings = async (req, res) => {
     }
 
     const {
+      name,
       pickupEnabled,
       deliveryEnabled,
       deliveryRadius,
@@ -340,6 +341,9 @@ exports.updateCartSettings = async (req, res) => {
 
     // Update settings
     const updateData = {};
+    if (name !== undefined && name !== null && name.trim() !== '') {
+      updateData.name = name.trim();
+    }
     if (pickupEnabled !== undefined) updateData.pickupEnabled = pickupEnabled;
     if (deliveryEnabled !== undefined) updateData.deliveryEnabled = deliveryEnabled;
     if (deliveryRadius !== undefined) updateData.deliveryRadius = deliveryRadius;

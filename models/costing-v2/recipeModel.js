@@ -82,8 +82,8 @@ const recipeSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
-    // Kiosk/Outlet association (null = shared/global recipe)
-    outletId: {
+    // Cart association (null = shared/global recipe)
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
@@ -105,11 +105,11 @@ const recipeSchema = new mongoose.Schema(
 recipeSchema.index({ name: 1 });
 recipeSchema.index({ isActive: 1 });
 // Unique index: prevent duplicate BOM names for the same outlet
-recipeSchema.index({ name: 1, outletId: 1 }, { unique: true });
+recipeSchema.index({ name: 1, cartId: 1 }, { unique: true });
 
 // Method to calculate recipe cost
-// @param {String} outletId - Optional outlet ID to check for outlet-specific purchases
-recipeSchema.methods.calculateCost = async function (outletId = null) {
+// @param {String} cartId - Optional cart ID to check for cart-specific purchases
+recipeSchema.methods.calculateCost = async function (cartId = null) {
   // #region agent log
   logDebug(
     "recipeModel.js:89",
@@ -117,7 +117,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
     {
       recipeId: this._id,
       recipeName: this.name,
-      outletId: outletId,
+      cartId: cartId,
       ingredientCount: this.ingredients.length,
     },
     "C"
@@ -138,57 +138,57 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
       continue;
     }
 
-    // Check if ingredient has actual purchases for this outlet (or any outlet if outletId not specified)
-    // For Cart Admin, we need to check outlet-specific purchases
+    // Check if ingredient has actual purchases for this cart (or any cart if cartId not specified)
+    // For Cart Admin, we need to check cart-specific purchases
     let hasPurchases = false;
-    if (outletId) {
-      // Check for outlet-specific purchase transactions
-      // CRITICAL: Only count purchases that belong to THIS outlet, not other carts
+    if (cartId) {
+      // Check for cart-specific purchase transactions
+      // CRITICAL: Only count purchases that belong to THIS cart, not other carts
       const purchaseTransaction = await InventoryTransactionV2.findOne({
         ingredientId: item.ingredientId,
-        outletId: outletId,
+        cartId: cartId,
         type: "IN",
         refType: "purchase",
       });
 
-      // Check if ingredient has FIFO layers with purchaseId that belong to THIS outlet
-      // IMPORTANT: We must verify each FIFO layer's purchase belongs to this outlet
-      let hasFifoLayersForThisOutlet = false;
+      // Check if ingredient has FIFO layers with purchaseId that belong to THIS cart
+      // IMPORTANT: We must verify each FIFO layer's purchase belongs to this cart
+      let hasFifoLayersForThisCart = false;
       if (
         ingredient.fifoLayers &&
         Array.isArray(ingredient.fifoLayers) &&
         ingredient.fifoLayers.length > 0
       ) {
-        // Check each FIFO layer to see if its purchase belongs to this outlet
+        // Check each FIFO layer to see if its purchase belongs to this cart
         for (const layer of ingredient.fifoLayers) {
           if (layer.purchaseId) {
             const purchase = await Purchase.findById(layer.purchaseId);
             if (
               purchase &&
-              purchase.outletId &&
-              purchase.outletId.toString() === outletId.toString()
+              purchase.cartId &&
+              purchase.cartId.toString() === cartId.toString()
             ) {
-              hasFifoLayersForThisOutlet = true;
-              break; // Found at least one purchase for this outlet
+              hasFifoLayersForThisCart = true;
+              break; // Found at least one purchase for this cart
             }
           }
         }
       }
 
-      // Only consider purchases if they belong to THIS outlet
-      hasPurchases = purchaseTransaction != null || hasFifoLayersForThisOutlet;
+      // Only consider purchases if they belong to THIS cart
+      hasPurchases = purchaseTransaction != null || hasFifoLayersForThisCart;
 
       // #region agent log
       logDebug(
         "recipeModel.js:110",
-        "Checking outlet purchases (outlet-specific)",
+        "Checking cart purchases (cart-specific)",
         {
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          outletId: outletId,
+          cartId: cartId,
           hasPurchases: hasPurchases,
           hasTransaction: purchaseTransaction != null,
-          hasFifoLayersForThisOutlet: hasFifoLayersForThisOutlet,
+          hasFifoLayersForThisCart: hasFifoLayersForThisCart,
         },
         "C"
       );
@@ -227,7 +227,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
         {
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          outletId: outletId,
+          cartId: cartId,
         },
         "C"
       );
@@ -235,50 +235,50 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
       continue; // Skip this ingredient in cost calculation
     }
 
-    // Check if ingredient has available inventory for this outlet
+    // Check if ingredient has available inventory for this cart
     // BOM cost should only show if ingredient is actually available in inventory
-    // IMPORTANT: For cart-wise management, each outlet should only see their own inventory
+    // IMPORTANT: For cart-wise management, each cart should only see their own inventory
     let hasAvailableInventory = false;
-    let outletSpecificQty = 0;
+    let cartSpecificQty = 0;
 
-    if (outletId) {
-      // For outlet-specific ingredients, check qtyOnHand directly
+    if (cartId) {
+      // For cart-specific ingredients, check qtyOnHand directly
       if (
-        ingredient.outletId &&
-        ingredient.outletId.toString() === outletId.toString()
+        ingredient.cartId &&
+        ingredient.cartId.toString() === cartId.toString()
       ) {
-        // Ingredient belongs to this outlet - use qtyOnHand directly
-        outletSpecificQty = ingredient.qtyOnHand || 0;
-        hasAvailableInventory = outletSpecificQty > 0;
+        // Ingredient belongs to this cart - use qtyOnHand directly
+        cartSpecificQty = ingredient.qtyOnHand || 0;
+        hasAvailableInventory = cartSpecificQty > 0;
       } else {
-        // For shared ingredients, calculate outlet-specific quantity from FIFO layers
-        // Sum up remainingQty from FIFO layers that came from this outlet's purchases
+        // For shared ingredients, calculate cart-specific quantity from FIFO layers
+        // Sum up remainingQty from FIFO layers that came from this cart's purchases
         // This ensures cart-wise inventory isolation
         if (ingredient.fifoLayers && Array.isArray(ingredient.fifoLayers)) {
           for (const layer of ingredient.fifoLayers) {
             if (layer.purchaseId && layer.remainingQty > 0) {
-              // Check if this purchase belongs to this outlet
+              // Check if this purchase belongs to this cart
               const purchase = await Purchase.findById(layer.purchaseId);
               if (
                 purchase &&
-                purchase.outletId &&
-                purchase.outletId.toString() === outletId.toString()
+                purchase.cartId &&
+                purchase.cartId.toString() === cartId.toString()
               ) {
-                outletSpecificQty += layer.remainingQty || 0;
+                cartSpecificQty += layer.remainingQty || 0;
               }
             }
           }
         }
-        hasAvailableInventory = outletSpecificQty > 0;
+        hasAvailableInventory = cartSpecificQty > 0;
         // #region agent log
         logDebug(
           "recipeModel.js:220",
-          "Checking shared ingredient inventory (outlet-specific)",
+          "Checking shared ingredient inventory (cart-specific)",
           {
             ingredientId: item.ingredientId,
             ingredientName: ingredient.name,
-            outletId: outletId,
-            outletSpecificQty: outletSpecificQty,
+            cartId: cartId,
+            cartSpecificQty: cartSpecificQty,
             hasAvailableInventory: hasAvailableInventory,
             globalQtyOnHand: ingredient.qtyOnHand,
           },
@@ -293,9 +293,9 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
         {
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          outletId: outletId,
-          ingredientOutletId: ingredient.outletId,
-          outletSpecificQty: outletSpecificQty,
+          cartId: cartId,
+          ingredientCartId: ingredient.cartId,
+          cartSpecificQty: cartSpecificQty,
           globalQtyOnHand: ingredient.qtyOnHand,
           hasAvailableInventory: hasAvailableInventory,
         },
@@ -304,9 +304,9 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
       // #endregion
     } else {
       // For global/franchise-level, check qtyOnHand or FIFO layers
-      outletSpecificQty = ingredient.qtyOnHand || 0;
+      cartSpecificQty = ingredient.qtyOnHand || 0;
       hasAvailableInventory =
-        outletSpecificQty > 0 ||
+        cartSpecificQty > 0 ||
         (ingredient.fifoLayers &&
           Array.isArray(ingredient.fifoLayers) &&
           ingredient.fifoLayers.some((layer) => (layer.remainingQty || 0) > 0));
@@ -324,7 +324,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
         {
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          outletId: outletId,
+          cartId: cartId,
           qtyOnHand: ingredient.qtyOnHand,
         },
         "C"
@@ -334,25 +334,25 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
     }
 
     // Get weighted average cost per base unit
-    // For outlet-specific ingredients, use the ingredient's weighted average (already calculated)
-    // For shared ingredients with outletId, calculate outlet-specific weighted average from transactions
+    // For cart-specific ingredients, use the ingredient's weighted average (already calculated)
+    // For shared ingredients with cartId, calculate cart-specific weighted average from transactions
     let ingredientCost = 0;
     
-    if (outletId && ingredient.outletId && ingredient.outletId.toString() === outletId.toString()) {
+    if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - use weighted average directly
       ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-    } else if (outletId) {
-      // Shared ingredient with outletId - calculate outlet-specific weighted average from transactions
-      // But if no outlet-specific transactions exist, use global cost
-      const outletTransactions = await InventoryTransactionV2.find({
+    } else if (cartId) {
+      // Shared ingredient with cartId - calculate cart-specific weighted average from transactions
+      // But if no cart-specific transactions exist, use global cost
+      const cartTransactions = await InventoryTransactionV2.find({
         ingredientId: item.ingredientId,
-        outletId: outletId,
+        cartId: cartId,
       }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
 
       let totalQty = 0;
       let weightedAvgCost = 0;
 
-      for (const txn of outletTransactions) {
+      for (const txn of cartTransactions) {
         const txnQty = txn.qtyInBaseUnit || txn.qty;
         if (txn.type === "IN" || txn.type === "RETURN") {
           // Add to inventory - recalculate weighted average
@@ -374,13 +374,13 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
         }
       }
 
-      // Use calculated weighted average cost if we have outlet-specific transactions
-      // Otherwise, use global cost (which includes purchases from all outlets for shared ingredients)
-      if (outletTransactions.length > 0 && totalQty > 0 && weightedAvgCost > 0) {
+      // Use calculated weighted average cost if we have cart-specific transactions
+      // Otherwise, use global cost (which includes purchases from all carts for shared ingredients)
+      if (cartTransactions.length > 0 && totalQty > 0 && weightedAvgCost > 0) {
         ingredientCost = weightedAvgCost;
       } else {
-        // No outlet-specific transactions or stock - use global cost
-        // This ensures shared ingredients reflect purchases from all outlets
+        // No cart-specific transactions or stock - use global cost
+        // This ensures shared ingredients reflect purchases from all carts
         ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
       }
     } else {
@@ -425,7 +425,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
       {
         recipeId: this._id,
         recipeName: this.name,
-        outletId: outletId,
+        cartId: cartId,
         totalCost: 0,
         hasAnyValidCosts: false,
         ingredientsWithoutPurchases: ingredientsWithoutPurchases,
@@ -452,7 +452,7 @@ recipeSchema.methods.calculateCost = async function (outletId = null) {
     {
       recipeId: this._id,
       recipeName: this.name,
-      outletId: outletId,
+      cartId: cartId,
       totalCost: adjustedCost,
       costPerPortion: this.costPerPortion,
       hasAnyValidCosts: true,

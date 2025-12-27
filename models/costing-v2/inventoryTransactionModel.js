@@ -68,7 +68,7 @@ const inventoryTransactionSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
@@ -84,7 +84,7 @@ inventoryTransactionSchema.index({ ingredientId: 1, date: -1 });
 inventoryTransactionSchema.index({ type: 1 });
 inventoryTransactionSchema.index({ date: -1 });
 inventoryTransactionSchema.index({ refType: 1, refId: 1 });
-inventoryTransactionSchema.index({ outletId: 1 });
+inventoryTransactionSchema.index({ cartId: 1 });
 inventoryTransactionSchema.index({ originalTransactionId: 1 }); // For tracking returns
 
 module.exports = mongoose.model("InventoryTransactionV2", inventoryTransactionSchema);

@@ -10,7 +10,7 @@ const { validateOutletAccess, setOutletContext } = require("../../utils/costing-
  */
 exports.getPreparations = async (req, res) => {
   try {
-    const { status, outletId } = req.query;
+    const { status, cartId } = req.query;
     const filter = {};
 
     if (status) filter.status = status;
@@ -18,17 +18,17 @@ exports.getPreparations = async (req, res) => {
     // Apply role-based filtering
     if (req.user.role === "admin") {
       // Cart admin - only their own preparations
-      filter.outletId = req.user._id;
+      filter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      if (outletId) {
+      if (cartId) {
         // Validate outlet belongs to franchise
-        if (!(await validateOutletAccess(req.user, outletId))) {
+        if (!(await validateOutletAccess(req.user, cartId))) {
           return res.status(403).json({
             success: false,
             message: "Access denied to this outlet",
           });
         }
-        filter.outletId = outletId;
+        filter.cartId = cartId;
       } else {
         // Get all outlets in franchise
         const User = require("../../models/userModel");
@@ -37,11 +37,11 @@ exports.getPreparations = async (req, res) => {
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        filter.outletId = { $in: outlets.map((o) => o._id) };
+        filter.cartId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
-      if (outletId) {
-        filter.outletId = outletId;
+      if (cartId) {
+        filter.cartId = cartId;
       }
     }
 
@@ -117,7 +117,7 @@ exports.issueIngredient = async (req, res) => {
     }
 
     // Validate access
-    if (req.user.role === "admin" && preparation.outletId.toString() !== req.user._id.toString()) {
+    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: "Access denied to this preparation",
@@ -164,7 +164,7 @@ exports.issueIngredient = async (req, res) => {
       "preparation",
       preparationId,
       req.user._id,
-      preparation.outletId
+      preparation.cartId
     );
 
     // Create inventory transaction
@@ -180,7 +180,7 @@ exports.issueIngredient = async (req, res) => {
       costAllocated: consumeResult.costAllocated,
       notes: notes || `Issued for preparation: ${preparation.name}`,
       recordedBy: req.user._id,
-      outletId: preparation.outletId,
+      cartId: preparation.cartId,
     });
     await transaction.save();
 
@@ -234,7 +234,7 @@ exports.returnIngredient = async (req, res) => {
     }
 
     // Validate access
-    if (req.user.role === "admin" && preparation.outletId.toString() !== req.user._id.toString()) {
+    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: "Access denied to this preparation",
@@ -305,7 +305,7 @@ exports.returnIngredient = async (req, res) => {
       "preparation",
       preparationId,
       req.user._id,
-      preparation.outletId
+      preparation.cartId
     );
 
     // Create inventory transaction
@@ -322,7 +322,7 @@ exports.returnIngredient = async (req, res) => {
       costAllocated: returnResult.costAllocated,
       notes: notes || `Returned unused from preparation: ${preparation.name}`,
       recordedBy: req.user._id,
-      outletId: preparation.outletId,
+      cartId: preparation.cartId,
     });
     await returnTransaction.save();
 
@@ -370,7 +370,7 @@ exports.updatePreparation = async (req, res) => {
     }
 
     // Validate access
-    if (req.user.role === "admin" && preparation.outletId.toString() !== req.user._id.toString()) {
+    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: "Access denied to this preparation",
@@ -414,7 +414,7 @@ exports.deletePreparation = async (req, res) => {
     }
 
     // Validate access
-    if (req.user.role === "admin" && preparation.outletId.toString() !== req.user._id.toString()) {
+    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
         message: "Access denied to this preparation",
@@ -436,5 +436,6 @@ exports.deletePreparation = async (req, res) => {
     res.status(400).json({ success: false, message: error.message });
   }
 };
+
 
 

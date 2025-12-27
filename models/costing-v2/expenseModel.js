@@ -71,10 +71,10 @@ const expenseSchema = new mongoose.Schema(
       type: Number,
       default: null, // Budgeted amount for comparison
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true, // Required - expenses are kiosk-specific
+      required: true, // Required - expenses are cart-specific
       index: true,
     },
     franchiseId: {
@@ -104,7 +104,7 @@ const expenseSchema = new mongoose.Schema(
 
 // Indexes for efficient queries
 expenseSchema.index({ expenseDate: -1 });
-expenseSchema.index({ outletId: 1, expenseDate: -1 });
+expenseSchema.index({ cartId: 1, expenseDate: -1 });
 expenseSchema.index({ franchiseId: 1, expenseDate: -1 });
 expenseSchema.index({ category: 1, expenseDate: -1 });
 expenseSchema.index({ isRecurring: 1 });
