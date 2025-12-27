@@ -561,14 +561,18 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     
     // STEP 1: Find ALL existing categories using ALL possible query formats
     // This ensures we catch everything, regardless of how cartId was stored
-    const categories1 = await MenuCategory.find({ cafeId: cafeObjectId }).lean();
-    const categories2 = await MenuCategory.find({ cafeId: cartIdStr }).lean();
-    const categories3 = await MenuCategory.find({ cafeId: cartId }).lean();
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const categories1 = await MenuCategory.find({ cartId: cafeObjectId }).lean();
+    const categories2 = await MenuCategory.find({ cartId: cartIdStr }).lean();
+    const categories3 = await MenuCategory.find({ cartId: cartId }).lean();
+    const categories4 = await MenuCategory.find({ cafeId: cafeObjectId }).lean(); // Old format
+    const categories5 = await MenuCategory.find({ cafeId: cartIdStr }).lean(); // Old format
+    const categories6 = await MenuCategory.find({ cafeId: cartId }).lean(); // Old format
     
     // Combine and deduplicate
     const allExistingCategories = [];
     const seenCategoryIds = new Set();
-    [...categories1, ...categories2, ...categories3].forEach(cat => {
+    [...categories1, ...categories2, ...categories3, ...categories4, ...categories5, ...categories6].forEach(cat => {
       const catId = cat._id.toString();
       if (!seenCategoryIds.has(catId)) {
         seenCategoryIds.add(catId);
@@ -582,9 +586,13 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     }
     
     // STEP 2: Find ALL existing items using ALL possible query formats
-    const items1 = await MenuItem.find({ cafeId: cafeObjectId }).lean();
-    const items2 = await MenuItem.find({ cafeId: cartIdStr }).lean();
-    const items3 = await MenuItem.find({ cafeId: cartId }).lean();
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const items1 = await MenuItem.find({ cartId: cafeObjectId }).lean();
+    const items2 = await MenuItem.find({ cartId: cartIdStr }).lean();
+    const items3 = await MenuItem.find({ cartId: cartId }).lean();
+    const items4 = await MenuItem.find({ cafeId: cafeObjectId }).lean(); // Old format
+    const items5 = await MenuItem.find({ cafeId: cartIdStr }).lean(); // Old format
+    const items6 = await MenuItem.find({ cafeId: cartId }).lean(); // Old format
     const itemsByCategory = allCategoryIds.length > 0 
       ? await MenuItem.find({ category: { $in: allCategoryIds } }).lean()
       : [];
@@ -592,7 +600,7 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     // Combine and deduplicate
     const allExistingItems = [];
     const seenItemIds = new Set();
-    [...items1, ...items2, ...items3, ...itemsByCategory].forEach(item => {
+    [...items1, ...items2, ...items3, ...items4, ...items5, ...items6, ...itemsByCategory].forEach(item => {
       const itemId = item._id.toString();
       if (!seenItemIds.has(itemId)) {
         seenItemIds.add(itemId);
@@ -609,65 +617,91 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     }
     
     // Delete by cartId using $or query (catches all formats at once)
+    // Support both cartId (new) and cafeId (old) for backward compatibility
     const deletedItemsOr = await MenuItem.deleteMany({ 
       $or: [
-        { cafeId: cafeObjectId },
-        { cafeId: cartIdStr },
-        { cafeId: cartId }
+        { cartId: cafeObjectId },
+        { cartId: cartIdStr },
+        { cartId: cartId },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr }, // Old format
+        { cafeId: cartId } // Old format
       ]
     });
     
     // Also delete individually to be absolutely sure
-    const deletedItems1 = await MenuItem.deleteMany({ cafeId: cafeObjectId });
-    const deletedItems2 = await MenuItem.deleteMany({ cafeId: cartIdStr });
-    const deletedItems3 = await MenuItem.deleteMany({ cafeId: cartId });
+    const deletedItems1 = await MenuItem.deleteMany({ cartId: cafeObjectId });
+    const deletedItems2 = await MenuItem.deleteMany({ cartId: cartIdStr });
+    const deletedItems3 = await MenuItem.deleteMany({ cartId: cartId });
+    const deletedItems4 = await MenuItem.deleteMany({ cafeId: cafeObjectId }); // Old format
+    const deletedItems5 = await MenuItem.deleteMany({ cafeId: cartIdStr }); // Old format
+    const deletedItems6 = await MenuItem.deleteMany({ cafeId: cartId }); // Old format
     
     // STEP 4: Delete ALL categories using multiple strategies
     
     // Delete by cartId using $or query (catches all formats at once)
+    // Support both cartId (new) and cafeId (old) for backward compatibility
     const deletedCatsOr = await MenuCategory.deleteMany({ 
       $or: [
-        { cafeId: cafeObjectId },
-        { cafeId: cartIdStr },
-        { cafeId: cartId }
+        { cartId: cafeObjectId },
+        { cartId: cartIdStr },
+        { cartId: cartId },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr }, // Old format
+        { cafeId: cartId } // Old format
       ]
     });
     
     // Also delete individually to be absolutely sure
-    const deletedCats1 = await MenuCategory.deleteMany({ cafeId: cafeObjectId });
-    const deletedCats2 = await MenuCategory.deleteMany({ cafeId: cartIdStr });
-    const deletedCats3 = await MenuCategory.deleteMany({ cafeId: cartId });
+    const deletedCats1 = await MenuCategory.deleteMany({ cartId: cafeObjectId });
+    const deletedCats2 = await MenuCategory.deleteMany({ cartId: cartIdStr });
+    const deletedCats3 = await MenuCategory.deleteMany({ cartId: cartId });
+    const deletedCats4 = await MenuCategory.deleteMany({ cafeId: cafeObjectId }); // Old format
+    const deletedCats5 = await MenuCategory.deleteMany({ cafeId: cartIdStr }); // Old format
+    const deletedCats6 = await MenuCategory.deleteMany({ cafeId: cartId }); // Old format
     
     // Wait to ensure deletion is committed to database
     await new Promise(resolve => setTimeout(resolve, 500));
     
     // CRITICAL: Verify ALL data is deleted using all possible formats
-    const remainingItems1 = await MenuItem.countDocuments({ cafeId: cafeObjectId });
-    const remainingItems2 = await MenuItem.countDocuments({ cafeId: cartIdStr });
-    const remainingCategories1 = await MenuCategory.countDocuments({ cafeId: cafeObjectId });
-    const remainingCategories2 = await MenuCategory.countDocuments({ cafeId: cartIdStr });
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const remainingItems1 = await MenuItem.countDocuments({ cartId: cafeObjectId });
+    const remainingItems2 = await MenuItem.countDocuments({ cartId: cartIdStr });
+    const remainingItems3 = await MenuItem.countDocuments({ cafeId: cafeObjectId }); // Old format
+    const remainingItems4 = await MenuItem.countDocuments({ cafeId: cartIdStr }); // Old format
+    const remainingCategories1 = await MenuCategory.countDocuments({ cartId: cafeObjectId });
+    const remainingCategories2 = await MenuCategory.countDocuments({ cartId: cartIdStr });
+    const remainingCategories3 = await MenuCategory.countDocuments({ cafeId: cafeObjectId }); // Old format
+    const remainingCategories4 = await MenuCategory.countDocuments({ cafeId: cartIdStr }); // Old format
     
-    const totalRemainingItems = Math.max(remainingItems1, remainingItems2);
-    const totalRemainingCategories = Math.max(remainingCategories1, remainingCategories2);
+    const totalRemainingItems = Math.max(remainingItems1, remainingItems2, remainingItems3, remainingItems4);
+    const totalRemainingCategories = Math.max(remainingCategories1, remainingCategories2, remainingCategories3, remainingCategories4);
     
     if (totalRemainingItems > 0 || totalRemainingCategories > 0) {
       console.error(`[DEFAULT MENU] ❌ ERROR: Still have ${totalRemainingItems} items and ${totalRemainingCategories} categories after cleanup!`);
       console.error(`[DEFAULT MENU] Attempting FORCE DELETE with all query formats...`);
       
       // Force delete everything using all possible formats
+      // Support both cartId (new) and cafeId (old) for backward compatibility
       await MenuItem.deleteMany({ 
         $or: [
-          { cafeId: cafeObjectId },
-          { cafeId: cartIdStr },
-          { cafeId: cartId }
+          { cartId: cafeObjectId },
+          { cartId: cartIdStr },
+          { cartId: cartId },
+          { cafeId: cafeObjectId }, // Old format
+          { cafeId: cartIdStr }, // Old format
+          { cafeId: cartId } // Old format
         ]
       });
       
       await MenuCategory.deleteMany({ 
         $or: [
-          { cafeId: cafeObjectId },
-          { cafeId: cartIdStr },
-          { cafeId: cartId }
+          { cartId: cafeObjectId },
+          { cartId: cartIdStr },
+          { cartId: cartId },
+          { cafeId: cafeObjectId }, // Old format
+          { cafeId: cartIdStr }, // Old format
+          { cafeId: cartId } // Old format
         ]
       });
       
@@ -679,13 +713,18 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
       await new Promise(resolve => setTimeout(resolve, 500));
       
       // Final check with all formats
-      const finalRemainingItems1 = await MenuItem.countDocuments({ cafeId: cafeObjectId });
-      const finalRemainingItems2 = await MenuItem.countDocuments({ cafeId: cartIdStr });
-      const finalRemainingCategories1 = await MenuCategory.countDocuments({ cafeId: cafeObjectId });
-      const finalRemainingCategories2 = await MenuCategory.countDocuments({ cafeId: cartIdStr });
+      // Support both cartId (new) and cafeId (old) for backward compatibility
+      const finalRemainingItems1 = await MenuItem.countDocuments({ cartId: cafeObjectId });
+      const finalRemainingItems2 = await MenuItem.countDocuments({ cartId: cartIdStr });
+      const finalRemainingItems3 = await MenuItem.countDocuments({ cafeId: cafeObjectId }); // Old format
+      const finalRemainingItems4 = await MenuItem.countDocuments({ cafeId: cartIdStr }); // Old format
+      const finalRemainingCategories1 = await MenuCategory.countDocuments({ cartId: cafeObjectId });
+      const finalRemainingCategories2 = await MenuCategory.countDocuments({ cartId: cartIdStr });
+      const finalRemainingCategories3 = await MenuCategory.countDocuments({ cafeId: cafeObjectId }); // Old format
+      const finalRemainingCategories4 = await MenuCategory.countDocuments({ cafeId: cartIdStr }); // Old format
       
-      const finalTotalRemainingItems = Math.max(finalRemainingItems1, finalRemainingItems2);
-      const finalTotalRemainingCategories = Math.max(finalRemainingCategories1, finalRemainingCategories2);
+      const finalTotalRemainingItems = Math.max(finalRemainingItems1, finalRemainingItems2, finalRemainingItems3, finalRemainingItems4);
+      const finalTotalRemainingCategories = Math.max(finalRemainingCategories1, finalRemainingCategories2, finalRemainingCategories3, finalRemainingCategories4);
       
       if (finalTotalRemainingItems > 0 || finalTotalRemainingCategories > 0) {
         console.error(`[DEFAULT MENU] ❌ CRITICAL: Force delete failed!`);
@@ -696,18 +735,33 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
         const MenuItemCollection = MenuItem.collection;
         const MenuCategoryCollection = MenuCategory.collection;
         
-        await MenuItemCollection.deleteMany({ cafeId: cafeObjectId });
-        await MenuItemCollection.deleteMany({ cafeId: cartIdStr });
-        await MenuCategoryCollection.deleteMany({ cafeId: cafeObjectId });
-        await MenuCategoryCollection.deleteMany({ cafeId: cartIdStr });
+        // Support both cartId (new) and cafeId (old) for backward compatibility
+        await MenuItemCollection.deleteMany({ cartId: cafeObjectId });
+        await MenuItemCollection.deleteMany({ cartId: cartIdStr });
+        await MenuItemCollection.deleteMany({ cafeId: cafeObjectId }); // Old format
+        await MenuItemCollection.deleteMany({ cafeId: cartIdStr }); // Old format
+        await MenuCategoryCollection.deleteMany({ cartId: cafeObjectId });
+        await MenuCategoryCollection.deleteMany({ cartId: cartIdStr });
+        await MenuCategoryCollection.deleteMany({ cafeId: cafeObjectId }); // Old format
+        await MenuCategoryCollection.deleteMany({ cafeId: cartIdStr }); // Old format
         
         await new Promise(resolve => setTimeout(resolve, 300));
         
         const ultimateRemainingItems = await MenuItem.countDocuments({ 
-          $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+          $or: [
+            { cartId: cafeObjectId }, 
+            { cartId: cartIdStr },
+            { cafeId: cafeObjectId }, // Old format
+            { cafeId: cartIdStr } // Old format
+          ] 
         });
         const ultimateRemainingCategories = await MenuCategory.countDocuments({ 
-          $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+          $or: [
+            { cartId: cafeObjectId }, 
+            { cartId: cartIdStr },
+            { cafeId: cafeObjectId }, // Old format
+            { cafeId: cartIdStr } // Old format
+          ] 
         });
         
         if (ultimateRemainingItems > 0 || ultimateRemainingCategories > 0) {
@@ -718,11 +772,22 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     
     
     // CRITICAL: Verify cleanup worked - check one more time
+    // Support both cartId (new) and cafeId (old) for backward compatibility
     const finalCleanupCheckItems = await MenuItem.countDocuments({ 
-      $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+      $or: [
+        { cartId: cafeObjectId }, 
+        { cartId: cartIdStr },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr } // Old format
+      ] 
     });
     const finalCleanupCheckCategories = await MenuCategory.countDocuments({ 
-      $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+      $or: [
+        { cartId: cafeObjectId }, 
+        { cartId: cartIdStr },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr } // Old format
+      ] 
     });
     
     if (finalCleanupCheckItems > 0 || finalCleanupCheckCategories > 0) {
@@ -866,11 +931,22 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     
     // Final verification - should be 0 after aggressive cleanup
     // CRITICAL: Use ObjectId format for queries
+    // Support both cartId (new) and cafeId (old) for backward compatibility
     const preSyncItemCount = await MenuItem.countDocuments({ 
-      $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+      $or: [
+        { cartId: cafeObjectId }, 
+        { cartId: cartIdStr },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr } // Old format
+      ] 
     });
     const preSyncCategoryCount = await MenuCategory.countDocuments({ 
-      $or: [{ cafeId: cafeObjectId }, { cafeId: cartIdStr }] 
+      $or: [
+        { cartId: cafeObjectId }, 
+        { cartId: cartIdStr },
+        { cafeId: cafeObjectId }, // Old format
+        { cafeId: cartIdStr } // Old format
+      ] 
     });
     
     if (preSyncItemCount > 0 || preSyncCategoryCount > 0) {
@@ -981,7 +1057,7 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
       
       // Check for existing categories with same name (case-insensitive) using ObjectId format
       const existingCategoryCheck = await MenuCategory.findOne({ 
-        cafeId: cafeObjectId, 
+        cartId: cafeObjectId, // Use cartId instead of cafeId
         name: { $regex: new RegExp(`^${categoryNameTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
       });
       
@@ -1009,8 +1085,12 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
       }
       
       // Also check for any other categories with same name (case-insensitive) - delete ALL duplicates
+      // Support both cartId (new) and cafeId (old) for backward compatibility
       const allDuplicateCategories = await MenuCategory.find({ 
-        cafeId: cafeObjectId,
+        $or: [
+          { cartId: cafeObjectId },
+          { cafeId: cafeObjectId } // Old format
+        ],
         name: { $regex: new RegExp(`^${categoryNameTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
       });
       
@@ -1039,7 +1119,7 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
         icon: (categoryFields.icon || '').trim(),
         sortOrder: categoryFields.sortOrder || 0,
         isActive: categoryFields.isActive !== false, // Default to true
-        cafeId: cafeObjectId, // Link to this cart (use ObjectId format)
+        cartId: cafeObjectId, // Link to this cart (use ObjectId format) - use cartId instead of cafeId
       });
       categoriesCreated++;
 
@@ -1134,7 +1214,7 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
               tags: Array.isArray(plainItem.tags) ? plainItem.tags : [],
               allergens: Array.isArray(plainItem.allergens) ? plainItem.allergens : [],
               category: category._id, // Link to the category we just created
-              cafeId: cafeObjectId, // Link to this cart (use ObjectId format)
+              cartId: cafeObjectId, // Link to this cart (use ObjectId format) - use cartId instead of cafeId
             };
             
             // Only add calories if it's a valid number
@@ -1169,12 +1249,13 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     }
 
     // Final detailed verification - use ObjectId format for queries
-    const finalCategoryCount = await MenuCategory.countDocuments({ cafeId: cafeObjectId });
-    const finalItemCount = await MenuItem.countDocuments({ cafeId: cafeObjectId });
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const finalCategoryCount = await MenuCategory.countDocuments({ cartId: cafeObjectId });
+    const finalItemCount = await MenuItem.countDocuments({ cartId: cafeObjectId });
     
     // Get final categories and items for detailed logging - use ObjectId format
-    const finalCategoriesList = await MenuCategory.find({ cafeId: cafeObjectId }).sort({ createdAt: 1 }).lean();
-    const finalItemsList = await MenuItem.find({ cafeId: cafeObjectId }).lean();
+    const finalCategoriesList = await MenuCategory.find({ cartId: cafeObjectId }).sort({ createdAt: 1 }).lean();
+    const finalItemsList = await MenuItem.find({ cartId: cafeObjectId }).lean();
     
     
     // CRITICAL: Verify we have EXACTLY what franchise admin defined
@@ -1218,13 +1299,14 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
       }
       
       // Re-count after cleanup - use ObjectId format
-      const afterCleanupCategoryCount = await MenuCategory.countDocuments({ cafeId: cafeObjectId });
-      const afterCleanupItemCount = await MenuItem.countDocuments({ cafeId: cafeObjectId });
+      // Support both cartId (new) and cafeId (old) for backward compatibility
+      const afterCleanupCategoryCount = await MenuCategory.countDocuments({ cartId: cafeObjectId });
+      const afterCleanupItemCount = await MenuItem.countDocuments({ cartId: cafeObjectId });
     }
     
     // Log each category and its items - use ObjectId format
-    const cleanedCategoriesList = await MenuCategory.find({ cafeId: cafeObjectId }).sort({ createdAt: 1 }).lean();
-    const cleanedItemsList = await MenuItem.find({ cafeId: cafeObjectId }).lean();
+    const cleanedCategoriesList = await MenuCategory.find({ cartId: cafeObjectId }).sort({ createdAt: 1 }).lean();
+    const cleanedItemsList = await MenuItem.find({ cartId: cafeObjectId }).lean();
     
     if (cleanedCategoriesList.length > 0) {
       cleanedCategoriesList.forEach((cat, idx) => {
@@ -1239,8 +1321,9 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
     }
     
     // Final count verification - use ObjectId format
-    const finalCategoryCountAfterCleanup = await MenuCategory.countDocuments({ cafeId: cafeObjectId });
-    const finalItemCountAfterCleanup = await MenuItem.countDocuments({ cafeId: cafeObjectId });
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const finalCategoryCountAfterCleanup = await MenuCategory.countDocuments({ cartId: cafeObjectId });
+    const finalItemCountAfterCleanup = await MenuItem.countDocuments({ cartId: cafeObjectId });
     
     
     // CRITICAL: Verify we have EXACTLY what franchise admin defined

@@ -13,13 +13,13 @@ const syncCustomersFromOrders = async (user) => {
     if (!user) return 0;
 
     if (user.role === "admin") {
-      // Cart admin – use their _id as cartId / cafeId
+      // Cart admin – use their _id as cartId
       const userId = user._id?._id || user._id;
-      const cafeId = mongoose.Types.ObjectId.isValid(userId)
+      const cartId = mongoose.Types.ObjectId.isValid(userId)
         ? new mongoose.Types.ObjectId(userId)
         : userId;
-      orderQuery.cartId = cafeId;
-      hierarchyQuery.cafeId = cafeId;
+      orderQuery.cartId = cartId;
+      hierarchyQuery.cartId = cartId; // Customer model uses cartId, not cafeId
     } else if (user.role === "franchise_admin") {
       // Franchise admin – use their _id as franchiseId
       const userId = user._id?._id || user._id;
@@ -76,7 +76,7 @@ const syncCustomersFromOrders = async (user) => {
           : null;
       const orderTotal = latestKot?.totalAmount || 0;
 
-      const cafeIdVal = order.cartId ? order.cartId._id || order.cartId : null;
+      const cartIdVal = order.cartId ? order.cartId._id || order.cartId : null;
       const franchiseIdVal = order.franchiseId
         ? order.franchiseId._id || order.franchiseId
         : null;
@@ -88,7 +88,7 @@ const syncCustomersFromOrders = async (user) => {
             : "Guest",
           email: email || null,
           phone: phone || (email ? `email-${Date.now()}` : null),
-          cafeId: cafeIdVal,
+          cartId: cartIdVal, // Customer model uses cartId, not cafeId
           franchiseId: franchiseIdVal,
           visitCount: 1,
           firstVisitAt: order.createdAt || new Date(),
@@ -116,11 +116,12 @@ const syncCustomersFromOrders = async (user) => {
     const customersToInsert = Array.from(customerMap.values()).map((c) => {
       const doc = { ...c };
       // Ensure ObjectId types where appropriate
-      if (doc.cafeId && mongoose.Types.ObjectId.isValid(doc.cafeId)) {
-        doc.cafeId =
-          typeof doc.cafeId === "string"
-            ? new mongoose.Types.ObjectId(doc.cafeId)
-            : doc.cafeId;
+      // Customer model uses cartId, not cafeId
+      if (doc.cartId && mongoose.Types.ObjectId.isValid(doc.cartId)) {
+        doc.cartId =
+          typeof doc.cartId === "string"
+            ? new mongoose.Types.ObjectId(doc.cartId)
+            : doc.cartId;
       }
       if (doc.franchiseId && mongoose.Types.ObjectId.isValid(doc.franchiseId)) {
         doc.franchiseId =
@@ -157,15 +158,15 @@ const syncCustomersFromOrders = async (user) => {
 };
 
 // Helper function to build query based on user role
-// CRITICAL: Cart admins must only see their own data (filtered by cafeId)
+// CRITICAL: Cart admins must only see their own data (filtered by cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
-    // CRITICAL: Customer model uses cafeId (not cartId)
-    // Cart admin's _id should match the cafeId in customer records
+    // CRITICAL: Customer model uses cartId (not cafeId)
+    // Cart admin's _id should match the cartId in customer records
     // Convert user._id to ObjectId for proper matching
     const userId = user._id._id || user._id;
-    query.cafeId = mongoose.Types.ObjectId.isValid(userId)
+    query.cartId = mongoose.Types.ObjectId.isValid(userId)
       ? new mongoose.Types.ObjectId(userId)
       : userId;
   } else if (user.role === "franchise_admin") {
@@ -187,7 +188,7 @@ exports.getAllCustomers = async (req, res) => {
     // Build the final query
     let query = {};
 
-    // Start with hierarchy query (cafeId or franchiseId filter)
+    // Start with hierarchy query (cartId or franchiseId filter)
     if (Object.keys(hierarchyQuery).length > 0) {
       query = { ...hierarchyQuery };
     }
@@ -227,7 +228,12 @@ exports.getAllCustomers = async (req, res) => {
       return value;
     };
 
-    // Convert cafeId and franchiseId in query
+    // Convert cartId and franchiseId in query
+    // Customer model uses cartId, not cafeId
+    if (aggregationQuery.cartId) {
+      aggregationQuery.cartId = convertToObjectId(aggregationQuery.cartId);
+    }
+    // Support old cafeId field for backward compatibility
     if (aggregationQuery.cafeId) {
       aggregationQuery.cafeId = convertToObjectId(aggregationQuery.cafeId);
     }
@@ -241,6 +247,10 @@ exports.getAllCustomers = async (req, res) => {
     if (aggregationQuery.$and) {
       aggregationQuery.$and = aggregationQuery.$and.map((condition) => {
         const newCondition = { ...condition };
+        // Support both cartId (new) and cafeId (old) for backward compatibility
+        if (condition.cartId) {
+          newCondition.cartId = convertToObjectId(condition.cartId);
+        }
         if (condition.cafeId) {
           newCondition.cafeId = convertToObjectId(condition.cafeId);
         }
@@ -276,19 +286,24 @@ exports.getAllCustomers = async (req, res) => {
       req.user?._id
     );
 
-    // First, let's check if ANY customers exist with this cafeId (for debugging)
+    // First, let's check if ANY customers exist with this cartId (for debugging)
     const userIdForTest = req.user?._id?._id || req.user?._id;
-    const testCafeId = mongoose.Types.ObjectId.isValid(userIdForTest)
+    const testCartId = mongoose.Types.ObjectId.isValid(userIdForTest)
       ? new mongoose.Types.ObjectId(userIdForTest)
       : userIdForTest;
 
-    // Test 1: Count all customers with this cafeId
-    const testCount = await Customer.countDocuments({ cafeId: testCafeId });
+    // Test 1: Count all customers with this cartId (support both cartId and cafeId for backward compatibility)
+    const testCount = await Customer.countDocuments({ 
+      $or: [
+        { cartId: testCartId },
+        { cafeId: testCartId } // Old format
+      ]
+    });
     console.log(
-      "[CUSTOMER] DEBUG - Total customers with cafeId matching user._id:",
+      "[CUSTOMER] DEBUG - Total customers with cartId matching user._id:",
       testCount
     );
-    console.log("[CUSTOMER] DEBUG - testCafeId:", testCafeId?.toString());
+    console.log("[CUSTOMER] DEBUG - testCartId:", testCartId?.toString());
 
     // Test 2: Count all customers (no filter)
     const totalCustomers = await Customer.countDocuments({});
@@ -297,9 +312,14 @@ exports.getAllCustomers = async (req, res) => {
       totalCustomers
     );
 
-    // Test 3: Get sample customers with this cafeId
+    // Test 3: Get sample customers with this cartId
     if (testCount > 0) {
-      const sampleCustomers = await Customer.find({ cafeId: testCafeId })
+      const sampleCustomers = await Customer.find({ 
+        $or: [
+          { cartId: testCartId },
+          { cafeId: testCartId } // Old format
+        ]
+      })
         .limit(3)
         .lean();
       console.log(
@@ -309,8 +329,9 @@ exports.getAllCustomers = async (req, res) => {
           name: c.name,
           phone: c.phone,
           email: c.email,
-          cafeId: c.cafeId ? c.cafeId.toString() : null,
-          cafeIdType: c.cafeId ? typeof c.cafeId : "null",
+          cartId: c.cartId ? c.cartId.toString() : null,
+          cafeId: c.cafeId ? c.cafeId.toString() : null, // Old format
+          cartIdType: c.cartId ? typeof c.cartId : "null",
           ratingsCount: c.ratings?.length || 0,
           averageRating: c.averageRating,
         }))
@@ -409,7 +430,7 @@ exports.getAllCustomers = async (req, res) => {
         name: customersWithRatingsCount[0].name,
         phone: customersWithRatingsCount[0].phone,
         email: customersWithRatingsCount[0].email,
-        cafeId: customersWithRatingsCount[0].cafeId,
+        cartId: customersWithRatingsCount[0].cartId || customersWithRatingsCount[0].cafeId, // Support both cartId and cafeId
         totalRatings: customersWithRatingsCount[0].totalRatings,
         averageRating: customersWithRatingsCount[0].averageRating,
       });
@@ -419,7 +440,8 @@ exports.getAllCustomers = async (req, res) => {
     const customersWithStats = customersWithRatingsCount.map((customer) => ({
       ...customer,
       _id: customer._id.toString(),
-      cafeId: customer.cafeId ? customer.cafeId.toString() : null,
+      cartId: customer.cartId ? customer.cartId.toString() : null,
+      cafeId: customer.cafeId ? customer.cafeId.toString() : null, // Old format for backward compatibility
       franchiseId: customer.franchiseId
         ? customer.franchiseId.toString()
         : null,

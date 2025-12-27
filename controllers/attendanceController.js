@@ -44,19 +44,19 @@ const getISTDayName = () => {
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cafeId = user._id;
+    query.cartId = user._id; // EmployeeAttendance model uses cartId, not cafeId
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
     // Mobile users (waiter, cook, captain, manager) - only show their own attendance
-    // Get their employee record to find cafeId and employeeId
+    // Get their employee record to find cartId and employeeId
     let employee = await Employee.findOne({ userId: user._id }).lean();
     if (!employee && user.email) {
       // Fallback: find by email
       employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
     }
     if (employee) {
-      query.cafeId = employee.cafeId;
+      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
       // For individual mobile users, only show their own attendance
       query.employeeId = employee._id;
     } else {
@@ -67,7 +67,7 @@ const buildHierarchyQuery = async (user) => {
     // Legacy employee role - look up Employee
     const employee = await Employee.findOne({ userId: user._id }).lean();
     if (employee) {
-      query.cafeId = employee.cafeId;
+      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
       query.employeeId = employee._id;
     } else {
       // If no employee record found, use a query that will return no results
@@ -80,13 +80,13 @@ const buildHierarchyQuery = async (user) => {
     if (!employee && user.email) {
       const employeeByEmail = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
       if (employeeByEmail) {
-        query.cafeId = employeeByEmail.cafeId;
+        query.cartId = employeeByEmail.cartId; // EmployeeAttendance model uses cartId, not cafeId
         query.employeeId = employeeByEmail._id;
       } else {
         query.employeeId = { $exists: false }; // No employee record found, return no results
       }
     } else if (employee) {
-      query.cafeId = employee.cafeId;
+      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
       query.employeeId = employee._id;
     } else {
       query.employeeId = { $exists: false }; // No employee record found, return no results
@@ -462,7 +462,7 @@ exports.checkIn = async (req, res) => {
         notes: notes || "",
       };
       attendance.status = status;
-      attendance.cafeId = employee.cafeId;
+      attendance.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
       attendance.franchiseId = employee.franchiseId;
       await attendance.save();
     } else {

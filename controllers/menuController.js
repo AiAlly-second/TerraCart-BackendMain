@@ -296,8 +296,8 @@ exports.createCategory = async (req, res) => {
       return res.status(400).json({ message: "Category name is required" });
     }
 
-    // Set cafeId if user is cafe admin
-    const cafeId = req.user && req.user.role === "admin" ? req.user._id : null;
+    // Set cartId if user is cart admin
+    const cartId = req.user && req.user.role === "admin" ? req.user._id : null;
 
     const category = await MenuCategory.create({
       name,
@@ -305,14 +305,14 @@ exports.createCategory = async (req, res) => {
       icon,
       sortOrder,
       isActive,
-      cafeId: cafeId,
+      cartId: cartId, // Use cartId instead of cafeId
     });
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (cafeId) {
-      emitToCafe(io, cafeId.toString(), "menu:updated", {
+    if (cartId) {
+      emitToCafe(io, cartId.toString(), "menu:updated", {
         type: "category_created",
         category,
       });
@@ -345,11 +345,12 @@ exports.updateCategory = async (req, res) => {
       return res.status(404).json({ message: "Category not found" });
     }
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (category.cafeId) {
-      emitToCafe(io, category.cafeId.toString(), "menu:updated", {
+    const categoryCartId = category.cartId || category.cafeId; // Support old cafeId field
+    if (categoryCartId) {
+      emitToCafe(io, categoryCartId.toString(), "menu:updated", {
         type: "category_updated",
         category,
       });
@@ -368,7 +369,7 @@ exports.deleteCategory = async (req, res) => {
       return res.status(400).json({ message: "Invalid category id" });
     }
 
-    // Find the category first to get cafeId for socket events
+    // Find the category first to get cartId for socket events
     const category = await MenuCategory.findById(id);
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
@@ -383,11 +384,12 @@ exports.deleteCategory = async (req, res) => {
     // Now delete the category
     await MenuCategory.findByIdAndDelete(id);
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (category.cafeId) {
-      emitToCafe(io, category.cafeId.toString(), "menu:updated", {
+    const categoryCartId = category.cartId || category.cafeId; // Support old cafeId field
+    if (categoryCartId) {
+      emitToCafe(io, categoryCartId.toString(), "menu:updated", {
         type: "category_deleted",
         categoryId: id,
         itemsDeleted: itemsDeleted.deletedCount,
@@ -442,18 +444,21 @@ exports.createItem = async (req, res) => {
       return res.status(404).json({ message: "Parent category not found" });
     }
 
-    // Set cafeId if user is cafe admin, and verify category belongs to same cafe
-    const cafeId = req.user && req.user.role === "admin" ? req.user._id : null;
+    // Set cartId if user is cart admin, and verify category belongs to same cart
+    // Support both cartId (new) and cafeId (old) for backward compatibility
+    const cartId = req.user && req.user.role === "admin" ? req.user._id : null;
+    const categoryCartId = category.cartId || category.cafeId; // Support old cafeId field
+    
     if (
-      cafeId &&
-      category.cafeId &&
-      category.cafeId.toString() !== cafeId.toString()
+      cartId &&
+      categoryCartId &&
+      categoryCartId.toString() !== cartId.toString()
     ) {
       return res
         .status(403)
-        .json({ message: "Category does not belong to your cafe" });
+        .json({ message: "Category does not belong to your cart" });
     }
-    const finalCafeId = cafeId || category.cafeId || null;
+    const finalCartId = cartId || categoryCartId || null;
 
     const item = await MenuItem.create({
       category: categoryId,
@@ -468,14 +473,14 @@ exports.createItem = async (req, res) => {
       tags,
       allergens,
       calories,
-      cafeId: finalCafeId,
+      cartId: finalCartId, // Use cartId instead of cafeId
     });
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (finalCafeId) {
-      emitToCafe(io, finalCafeId.toString(), "menu:updated", {
+    if (finalCartId) {
+      emitToCafe(io, finalCartId.toString(), "menu:updated", {
         type: "item_created",
         item,
       });
@@ -545,10 +550,11 @@ exports.updateItem = async (req, res) => {
     }
 
     // Auto-sync to costing if price was updated and user is cart admin
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field
     if (
       updates.price !== undefined &&
       req.user.role === "admin" &&
-      item.cafeId
+      itemCartId
     ) {
       try {
         const {
@@ -557,11 +563,11 @@ exports.updateItem = async (req, res) => {
         // Sync only this specific cart's menu to costing
         await syncDefaultMenuToCosting(
           null,
-          item.cafeId.toString(),
-          item.cafeId.toString()
+          itemCartId.toString(),
+          itemCartId.toString()
         );
         console.log(
-          `[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${item.cafeId}`
+          `[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${itemCartId}`
         );
       } catch (syncError) {
         // Don't fail the request if sync fails - just log it
@@ -572,11 +578,11 @@ exports.updateItem = async (req, res) => {
       }
     }
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "menu:updated", {
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "menu:updated", {
         type: "item_updated",
         item,
       });
@@ -617,11 +623,12 @@ exports.updateItemAvailability = async (req, res) => {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "menu:updated", {
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "menu:updated", {
         type: "item_availability_updated",
         item,
       });
@@ -645,15 +652,15 @@ exports.deleteItem = async (req, res) => {
       return res.status(404).json({ message: "Menu item not found" });
     }
 
-    const cafeId = item.cafeId;
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field
 
     await MenuItem.findByIdAndDelete(id);
 
-    // Emit socket event to cafe room
+    // Emit socket event to cart room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (cafeId) {
-      emitToCafe(io, cafeId.toString(), "menu:updated", {
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "menu:updated", {
         type: "item_deleted",
         itemId: id,
       });
