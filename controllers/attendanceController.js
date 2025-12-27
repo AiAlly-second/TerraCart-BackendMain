@@ -415,13 +415,66 @@ exports.checkIn = async (req, res) => {
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
 
-    let attendance = await EmployeeAttendance.findOne({
+    // Build query with cartId to ensure consistency with getTodayAttendance
+    // This ensures we only find attendance records that match both employeeId AND cartId
+    const attendanceQuery = {
       employeeId: targetEmployeeId,
       date: { $gte: today, $lt: tomorrow },
-    });
+    };
+    
+    // Add cartId filter if employee has cartId (should always have it)
+    if (employee.cartId) {
+      attendanceQuery.cartId = employee.cartId;
+    }
+    
+    console.log('[ATTENDANCE] checkIn query:', JSON.stringify(attendanceQuery, null, 2));
+    let attendance = await EmployeeAttendance.findOne(attendanceQuery);
+    console.log('[ATTENDANCE] checkIn found record:', attendance ? 'YES' : 'NO');
+    
+    // If no record found with cartId, check for old records without cartId (migration fix)
+    if (!attendance && employee.cartId) {
+      const fallbackQuery = {
+        employeeId: targetEmployeeId,
+        date: { $gte: today, $lt: tomorrow },
+        $or: [
+          { cartId: { $exists: false } },
+          { cartId: null },
+        ],
+      };
+      console.log('[ATTENDANCE] checkIn fallback query (no cartId):', JSON.stringify(fallbackQuery, null, 2));
+      attendance = await EmployeeAttendance.findOne(fallbackQuery);
+      if (attendance) {
+        console.log('[ATTENDANCE] checkIn - Found old record without cartId, updating...');
+        attendance.cartId = employee.cartId;
+        await attendance.save();
+        console.log('[ATTENDANCE] checkIn - Updated cartId on old record');
+      }
+    }
+    
+    if (attendance) {
+      console.log('[ATTENDANCE] checkIn record details:', {
+        _id: attendance._id,
+        employeeId: attendance.employeeId?.toString(),
+        cartId: attendance.cartId?.toString(),
+        date: attendance.date,
+        hasCheckIn: !!attendance.checkIn?.time,
+      });
+    }
 
-    if (attendance && attendance.checkIn.time) {
-      return res.status(400).json({ message: "Employee already checked in today" });
+    if (attendance && attendance.checkIn && attendance.checkIn.time) {
+      console.log('[ATTENDANCE] checkIn - Employee already checked in');
+      // Update cartId if missing (migration fix)
+      if (!attendance.cartId && employee.cartId) {
+        attendance.cartId = employee.cartId;
+        await attendance.save();
+        console.log('[ATTENDANCE] checkIn - Updated cartId on existing record');
+      }
+      await attendance.populate("employeeId", "name mobile employeeRole");
+      return res.json({
+        message: "Already checked in today",
+        attendance,
+        isLate: false,
+      });
     }
 
     const checkInTime = new Date(); // Store in UTC (MongoDB default)
@@ -553,12 +606,22 @@ exports.checkOut = async (req, res) => {
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
 
-    const attendance = await EmployeeAttendance.findOne({
+    // Build query with cartId to ensure consistency with getTodayAttendance
+    const attendanceQuery = {
       employeeId: targetEmployeeId,
       date: { $gte: today, $lt: tomorrow },
-    });
+    };
+    
+    // Add cartId filter if employee has cartId
+    if (employee.cartId) {
+      attendanceQuery.cartId = employee.cartId;
+    }
+    
+    console.log('[ATTENDANCE] checkOut query:', JSON.stringify(attendanceQuery, null, 2));
+    const attendance = await EmployeeAttendance.findOne(attendanceQuery);
+    console.log('[ATTENDANCE] checkOut found record:', attendance ? 'YES' : 'NO');
 
-    if (!attendance || !attendance.checkIn.time) {
+    if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
       return res.status(400).json({ message: "Employee has not checked in today" });
     }
 
