@@ -5,22 +5,38 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 
-// Helper to get cafeId based on user role
+// Helper to get cartId based on user role (returns cartId, not cafeId)
 const getCafeId = async (user) => {
   if (user.role === "admin") {
-    return user._id;
+    return user._id; // Cart admin's _id is the cartId
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - these are direct User records
-    // Look up Employee record by email (since Employee doesn't have userId)
-    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    if (employee && employee.cafeId) {
-      console.log('[DASHBOARD] getCafeId - Found employee by email:', {
-        userId: user._id,
-        email: user.email,
-        employeeId: employee._id,
-        cafeId: employee.cafeId
-      });
-      return employee.cafeId;
+    // Mobile users - prioritize cartId, fallback to cafeId for backward compatibility
+    if (user.cartId) {
+      return user.cartId;
+    }
+    if (user.cafeId) {
+      // Fallback for backward compatibility
+      return user.cafeId;
+    }
+    // Fallback: try to find Employee record by email or userId
+    const employee = await Employee.findOne({
+      $or: [
+        { email: user.email?.toLowerCase() },
+        { userId: user._id }
+      ]
+    }).lean();
+    if (employee) {
+      // Prioritize cartId, fallback to cafeId
+      const cartId = employee.cartId || employee.cafeId;
+      if (cartId) {
+        console.log('[DASHBOARD] getCafeId - Found employee by email/userId:', {
+          userId: user._id,
+          email: user.email,
+          employeeId: employee._id,
+          cartId: cartId
+        });
+        return cartId;
+      }
     }
     console.log('[DASHBOARD] getCafeId - No employee found for mobile user:', {
       userId: user._id,
@@ -31,7 +47,7 @@ const getCafeId = async (user) => {
   } else if (user.role === "employee") {
     // Legacy employee role - look up Employee by email
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    return employee?.cafeId;
+    return employee?.cartId || employee?.cafeId; // Prioritize cartId, fallback to cafeId
   }
   return null;
 };
@@ -109,17 +125,31 @@ exports.getDashboardStats = async (req, res) => {
       }),
 
       // Low stock items (threshold can be configured)
+      // InventoryItem model uses cartId, support cafeId for backward compatibility
       InventoryItem.countDocuments({
-        cafeId: cafeId,
-        $or: [
-          { stockQuantity: { $lt: 10 } },
-          { stockQuantity: { $exists: false } },
-        ],
+        $and: [
+          {
+            $or: [
+              { cartId: cafeId },
+              { cafeId: cafeId } // Fallback for backward compatibility
+            ]
+          },
+          {
+            $or: [
+              { quantity: { $lt: 10 } }, // Use 'quantity' field, not 'stockQuantity'
+              { quantity: { $exists: false } },
+            ]
+          }
+        ]
       }),
 
       // Today's attendance count
+      // EmployeeAttendance model uses cartId, support cafeId for backward compatibility
       EmployeeAttendance.countDocuments({
-        cafeId: cafeId,
+        $or: [
+          { cartId: cafeId },
+          { cafeId: cafeId } // Fallback for backward compatibility
+        ],
         date: { $gte: today, $lt: tomorrow },
         "checkIn.time": { $exists: true },
       }),
@@ -193,8 +223,12 @@ exports.getRecentActivity = async (req, res) => {
     });
 
     // Recent attendance check-ins
+    // EmployeeAttendance model uses cartId, support cafeId for backward compatibility
     const recentAttendance = await EmployeeAttendance.find({
-      cafeId: cafeId,
+      $or: [
+        { cartId: cafeId },
+        { cafeId: cafeId } // Fallback for backward compatibility
+      ],
       "checkIn.time": { $exists: true },
     })
       .populate("employeeId", "name employeeRole")
