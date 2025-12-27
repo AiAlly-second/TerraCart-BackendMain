@@ -7,30 +7,30 @@ const Order = require("../models/orderModel");
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cafeId = user._id;
+    query.cartId = user._id; // CustomerRequest model uses cartId, not cafeId
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their cafeId from user or employee record
+    // Mobile users - get their cartId from user or employee record
     if (user.cafeId) {
-      query.cafeId = user.cafeId;
+      query.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for CustomerRequest.cartId
     } else if (user.employeeId) {
       const employee = await Employee.findById(user.employeeId).lean();
-      if (employee && employee.cafeId) {
-        query.cafeId = employee.cafeId;
+      if (employee && employee.cartId) {
+        query.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
       }
     } else {
       // Fallback: find by email
       const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cafeId) {
-        query.cafeId = employee.cafeId;
+      if (employee && employee.cartId) {
+        query.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
       }
     }
   } else if (user.role === "employee") {
     // Legacy employee role
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    if (employee && employee.cafeId) {
-      query.cafeId = employee.cafeId;
+    if (employee && employee.cartId) {
+      query.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
     }
   }
   return query;
@@ -125,7 +125,7 @@ exports.createRequest = async (req, res) => {
     // If user is authenticated, set hierarchy relationships
     if (user) {
       if (user.role === "admin") {
-        requestData.cafeId = user._id;
+        requestData.cartId = user._id; // CustomerRequest model uses cartId, not cafeId
         if (user.franchiseId) {
           requestData.franchiseId = user.franchiseId;
         }
@@ -133,11 +133,11 @@ exports.createRequest = async (req, res) => {
         requestData.franchiseId = user._id;
       } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
         if (user.cafeId) {
-          requestData.cafeId = user.cafeId;
+          requestData.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for CustomerRequest.cartId
         } else if (user.employeeId) {
           const employee = await Employee.findById(user.employeeId).lean();
-          if (employee && employee.cafeId) {
-            requestData.cafeId = employee.cafeId;
+          if (employee && employee.cartId) {
+            requestData.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
           }
         }
         if (user.franchiseId) {
@@ -145,17 +145,17 @@ exports.createRequest = async (req, res) => {
         }
       }
     } else {
-      // Public request - get cafeId from tableId or orderId
+      // Public request - get cartId from tableId or orderId
       if (requestData.tableId) {
         const table = await Table.findById(requestData.tableId).lean();
         if (table && table.cartId) {
-          requestData.cafeId = table.cartId;
+          requestData.cartId = table.cartId; // CustomerRequest model uses cartId, not cafeId
           requestData.franchiseId = table.franchiseId;
         }
       } else if (requestData.orderId) {
         const order = await Order.findById(requestData.orderId).lean();
         if (order && order.cartId) {
-          requestData.cafeId = order.cartId;
+          requestData.cartId = order.cartId; // CustomerRequest model uses cartId, not cafeId
           requestData.franchiseId = order.franchiseId;
         }
       }
@@ -169,8 +169,9 @@ exports.createRequest = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && request.cafeId) {
-      emitToCafe(io, request.cafeId.toString(), "request:created", request);
+    const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && requestCartId) {
+      emitToCafe(io, requestCartId.toString(), "request:created", request);
     }
 
     return res.status(201).json(request);
@@ -231,9 +232,10 @@ exports.acknowledgeRequest = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && request.cafeId) {
-      emitToCafe(io, request.cafeId.toString(), "request:acknowledged", request);
-      emitToCafe(io, request.cafeId.toString(), "request:updated", request);
+    const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && requestCartId) {
+      emitToCafe(io, requestCartId.toString(), "request:acknowledged", request);
+      emitToCafe(io, requestCartId.toString(), "request:updated", request);
     }
 
     return res.json(request);
@@ -290,9 +292,10 @@ exports.resolveRequest = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && request.cafeId) {
-      emitToCafe(io, request.cafeId.toString(), "request:resolved", request);
-      emitToCafe(io, request.cafeId.toString(), "request:updated", request);
+    const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && requestCartId) {
+      emitToCafe(io, requestCartId.toString(), "request:resolved", request);
+      emitToCafe(io, requestCartId.toString(), "request:updated", request);
     }
 
     return res.json(request);
@@ -316,7 +319,8 @@ exports.updateRequest = async (req, res) => {
 
     // Update fields
     Object.keys(updates).forEach((key) => {
-      if (key !== "_id" && key !== "cafeId" && key !== "franchiseId") {
+      // Don't allow updating cartId or franchiseId directly
+      if (key !== "_id" && key !== "cartId" && key !== "cafeId" && key !== "franchiseId") {
         request[key] = updates[key];
       }
     });
@@ -329,8 +333,9 @@ exports.updateRequest = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && request.cafeId) {
-      emitToCafe(io, request.cafeId.toString(), "request:updated", request);
+    const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && requestCartId) {
+      emitToCafe(io, requestCartId.toString(), "request:updated", request);
     }
 
     return res.json(request);
@@ -351,14 +356,14 @@ exports.deleteRequest = async (req, res) => {
       return res.status(404).json({ message: "Customer request not found" });
     }
 
-    const cafeId = request.cafeId;
+    const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
     await CustomerRequest.deleteOne({ _id: id });
 
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && cafeId) {
-      emitToCafe(io, cafeId.toString(), "request:deleted", { id });
+    if (io && emitToCafe && requestCartId) {
+      emitToCafe(io, requestCartId.toString(), "request:deleted", { id });
     }
 
     return res.json({ message: "Customer request deleted successfully" });

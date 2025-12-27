@@ -4,25 +4,26 @@ const Employee = require("../models/employeeModel");
 const IngredientV2 = require("../models/costing-v2/ingredientModel");
 const { buildCostingQuery } = require("../utils/costing-v2/accessControl");
 
-// Helper to get cafeId based on user role
+// Helper to get cartId based on user role
+// Note: Returns cartId for Inventory model (which uses cartId, not cafeId)
 const getCafeId = async (user) => {
   if (user.role === "admin") {
-    return user._id;
+    return user._id; // Cart admin's _id is the cartId
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
     // Mobile users - these are direct User records with cafeId set during login
-    // First check if User has cafeId directly
+    // User.cafeId links to cart admin, which is what we need for Inventory.cartId
     if (user.cafeId) {
       return user.cafeId;
     }
     // Fallback: try to find Employee record by email (since Employee doesn't have userId)
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    return employee?.cafeId;
+    return employee?.cartId; // Employee model uses cartId, not cafeId
   } else if (user.role === "employee") {
     // Legacy employee role - look up Employee by email
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    return employee?.cafeId;
+    return employee?.cartId; // Employee model uses cartId, not cafeId
   } else if (user.role === "franchise_admin") {
-    return null; // Franchise admin doesn't have a specific cafeId
+    return null; // Franchise admin doesn't have a specific cartId
   }
   return null;
 };
@@ -33,20 +34,21 @@ exports.getAllInventory = async (req, res) => {
     const query = {};
 
     // Filter based on user role
+    // Inventory model uses cartId, not cafeId
     if (req.user && req.user.role === "admin" && req.user._id) {
-      query.cafeId = req.user._id;
+      query.cartId = req.user._id; // Inventory model uses cartId, not cafeId
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cafeId from employee record
-      const cafeId = await getCafeId(req.user);
-      if (cafeId) {
-        query.cafeId = cafeId;
+      // Mobile users - get cartId from employee record
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      if (cartId) {
+        query.cartId = cartId; // Inventory model uses cartId, not cafeId
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (cafeId) {
-        query.cafeId = cafeId;
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      if (cartId) {
+        query.cartId = cartId; // Inventory model uses cartId, not cafeId
       }
     }
 
@@ -76,23 +78,26 @@ exports.getInventoryItem = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!item.cafeId || item.cafeId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!itemCartId || itemCartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - check if item belongs to their cafe
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      // Mobile users - check if item belongs to their cart
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     }
 
@@ -155,7 +160,7 @@ exports.createInventoryItem = async (req, res) => {
       
       // Set outlet context from ingredient
       if (ingredient.outletId) {
-        itemData.cafeId = ingredient.outletId;
+        itemData.cartId = ingredient.outletId; // Inventory model uses cartId, not cafeId
       }
       if (ingredient.franchiseId) {
         itemData.franchiseId = ingredient.franchiseId;
@@ -163,34 +168,35 @@ exports.createInventoryItem = async (req, res) => {
     }
 
     // Set hierarchy relationships (only if not set from ingredient)
-    if (!itemData.cafeId) {
+    // Inventory model uses cartId, not cafeId
+    if (!itemData.cartId) {
       if (req.user && req.user.role === "admin" && req.user._id) {
-        itemData.cafeId = req.user._id;
-        // Get franchiseId from cafe admin
-        const cafeAdmin = await User.findById(req.user._id);
-        if (cafeAdmin && cafeAdmin.franchiseId) {
-          itemData.franchiseId = cafeAdmin.franchiseId;
+        itemData.cartId = req.user._id; // Inventory model uses cartId, not cafeId
+        // Get franchiseId from cart admin
+        const cartAdmin = await User.findById(req.user._id);
+        if (cartAdmin && cartAdmin.franchiseId) {
+          itemData.franchiseId = cartAdmin.franchiseId;
         }
       } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
         itemData.franchiseId = req.user._id;
       } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-        // Mobile users - get cafeId from employee record
-        const cafeId = await getCafeId(req.user);
-        if (!cafeId) {
-          return res.status(403).json({ message: "No cafe associated with this user" });
+        // Mobile users - get cartId from employee record
+        const cartId = await getCafeId(req.user); // Function returns cartId value
+        if (!cartId) {
+          return res.status(403).json({ message: "No cart associated with this user" });
         }
-        itemData.cafeId = cafeId;
+        itemData.cartId = cartId; // Inventory model uses cartId, not cafeId
         // Get franchiseId from employee
         const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
         if (employee && employee.franchiseId) {
           itemData.franchiseId = employee.franchiseId;
         }
       } else if (req.user?.role === "employee") {
-        const cafeId = await getCafeId(req.user);
-        if (!cafeId) {
-          return res.status(403).json({ message: "No cafe associated with this user" });
+        const cartId = await getCafeId(req.user); // Function returns cartId value
+        if (!cartId) {
+          return res.status(403).json({ message: "No cart associated with this user" });
         }
-        itemData.cafeId = cafeId;
+        itemData.cartId = cartId; // Inventory model uses cartId, not cafeId
         const employee = await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
         if (employee && employee.franchiseId) {
           itemData.franchiseId = employee.franchiseId;
@@ -203,9 +209,10 @@ exports.createInventoryItem = async (req, res) => {
     // Emit socket event to cafe room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "inventory:created", item);
-      emitToCafe(io, item.cafeId.toString(), "inventory:updated", item);
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "inventory:created", item);
+      emitToCafe(io, itemCartId.toString(), "inventory:updated", item);
     }
     
     return res.status(201).json(item);
@@ -225,23 +232,26 @@ exports.updateInventoryItem = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!item.cafeId || item.cafeId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!itemCartId || itemCartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - check if item belongs to their cafe
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      // Mobile users - check if item belongs to their cart
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     }
 
@@ -251,8 +261,9 @@ exports.updateInventoryItem = async (req, res) => {
     // Emit socket event to cafe room
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "inventory:updated", item);
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "inventory:updated", item);
     }
     
     return res.json(item);
@@ -272,31 +283,35 @@ exports.deleteInventoryItem = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!item.cafeId || item.cafeId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!itemCartId || itemCartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - check if item belongs to their cafe
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      // Mobile users - check if item belongs to their cart
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     }
 
     // Emit socket event before deletion
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (item.cafeId) {
-      emitToCafe(io, item.cafeId.toString(), "inventory:deleted", { id: req.params.id });
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "inventory:deleted", { id: req.params.id });
     }
     
     await InventoryItem.findByIdAndDelete(req.params.id);
@@ -317,23 +332,26 @@ exports.updateStock = async (req, res) => {
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
-      if (!item.cafeId || item.cafeId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!itemCartId || itemCartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       if (!item.franchiseId || item.franchiseId.toString() !== req.user._id.toString()) {
         return res.status(403).json({ message: "Item does not belong to your franchise" });
       }
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - check if item belongs to their cafe
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      // Mobile users - check if item belongs to their cart
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (!cafeId || !item.cafeId || item.cafeId.toString() !== cafeId.toString()) {
-        return res.status(403).json({ message: "Item does not belong to your cafe" });
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+      if (!cartId || !itemCartId || itemCartId.toString() !== cartId.toString()) {
+        return res.status(403).json({ message: "Item does not belong to your cart" });
       }
     }
 
@@ -453,19 +471,20 @@ exports.getInventoryStats = async (req, res) => {
     const query = {};
 
     // Filter based on user role
+    // Inventory model uses cartId, not cafeId
     if (req.user && req.user.role === "admin" && req.user._id) {
-      query.cafeId = req.user._id;
+      query.cartId = req.user._id; // Inventory model uses cartId, not cafeId
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cafeId from employee record
-      const cafeId = await getCafeId(req.user);
-      if (cafeId) {
-        query.cafeId = cafeId;
-        console.log('[INVENTORY] getInventoryStats - Mobile user cafeId:', cafeId);
+      // Mobile users - get cartId from employee record
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      if (cartId) {
+        query.cartId = cartId; // Inventory model uses cartId, not cafeId
+        console.log('[INVENTORY] getInventoryStats - Mobile user cartId:', cartId);
       } else {
-        console.log('[INVENTORY] getInventoryStats - No cafeId found for mobile user:', req.user._id);
-        // Return empty stats if no cafeId
+        console.log('[INVENTORY] getInventoryStats - No cartId found for mobile user:', req.user._id);
+        // Return empty stats if no cartId
         return res.json({
           success: true,
           data: {
@@ -478,9 +497,9 @@ exports.getInventoryStats = async (req, res) => {
         });
       }
     } else if (req.user?.role === "employee") {
-      const cafeId = await getCafeId(req.user);
-      if (cafeId) {
-        query.cafeId = cafeId;
+      const cartId = await getCafeId(req.user); // Function returns cartId value
+      if (cartId) {
+        query.cartId = cartId; // Inventory model uses cartId, not cafeId
       } else {
         return res.json({
           success: true,

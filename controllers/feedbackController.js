@@ -4,18 +4,18 @@ const Customer = require("../models/customerModel");
 const Order = require("../models/orderModel");
 
 // Helper function to build query based on user role
-// CRITICAL: Cart admins must only see their own data (filtered by cafeId/cartId)
+// CRITICAL: Cart admins must only see their own data (filtered by cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
     // CRITICAL: Cart admin - ONLY see feedback from their own cart
-    // Feedback model uses cafeId (which should match cart admin's _id)
-    query.cafeId = user._id;
+    // Feedback model uses cartId (not cafeId)
+    query.cartId = user._id; // Support both cartId and cafeId for backward compatibility
     console.log(
-      `[FEEDBACK_QUERY] Cart admin ${user._id} - filtering by cafeId: ${user._id}`
+      `[FEEDBACK_QUERY] Cart admin ${user._id} - filtering by cartId: ${user._id}`
     );
   } else if (user.role === "franchise_admin") {
-    // Franchise admin - see feedback from all cafes under their franchise
+    // Franchise admin - see feedback from all carts under their franchise
     query.franchiseId = user._id;
   }
   return query;
@@ -64,14 +64,14 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
     query = { email: normalizedEmail };
   }
 
-  // Also filter by cafe/franchise to avoid cross-cafe matches
-  // Customer model uses cafeId (not cartId)
+  // Also filter by cart/franchise to avoid cross-cart matches
+  // Customer model uses cartId (not cafeId)
   if (cafeId) {
-    const cafeIdValue = cafeId._id || cafeId;
+    const cartIdValue = cafeId._id || cafeId; // cafeId variable contains cartId value
     // Convert to ObjectId if it's a string
-    const cafeIdObj = mongoose.Types.ObjectId.isValid(cafeIdValue) 
-      ? new mongoose.Types.ObjectId(cafeIdValue) 
-      : cafeIdValue;
+    const cartIdObj = mongoose.Types.ObjectId.isValid(cartIdValue) 
+      ? new mongoose.Types.ObjectId(cartIdValue) 
+      : cartIdValue;
     
     // Remove $or from top level if it exists and move to $and
     if (query.$or) {
@@ -79,11 +79,11 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
       delete query.$or;
       query.$and = [
         { $or: orCondition },
-        { cafeId: cafeIdObj }
+        { cartId: cartIdObj } // Customer model uses cartId
       ];
     } else {
-      // No $or condition, just add cafeId filter
-      query.cafeId = cafeIdObj;
+      // No $or condition, just add cartId filter
+      query.cartId = cartIdObj; // Customer model uses cartId
     }
   } else if (franchiseId) {
     const franchiseIdValue = franchiseId._id || franchiseId;
@@ -261,15 +261,15 @@ exports.createFeedback = async (req, res) => {
         // Order._id is a String, not ObjectId, so use findById with the string directly
         const order = await Order.findById(feedbackData.orderId);
         if (order) {
-          // Order model uses cartId (not cafeId), but feedback model uses cafeId
-          // Map cartId to cafeId for feedback
-          feedbackData.cafeId = order.cartId
+          // Order model uses cartId, and feedback model also uses cartId
+          // Map cartId to cartId for feedback
+          feedbackData.cartId = order.cartId
             ? order.cartId._id || order.cartId
             : null;
           feedbackData.franchiseId = order.franchiseId
             ? order.franchiseId._id || order.franchiseId
             : null;
-          cafeId = feedbackData.cafeId;
+          cafeId = feedbackData.cartId; // Keep cafeId variable for customer lookup (Customer model uses cartId)
           franchiseId = feedbackData.franchiseId;
           if (order.table && !feedbackData.tableId) {
             feedbackData.tableId = order.table._id || order.table;
@@ -285,7 +285,7 @@ exports.createFeedback = async (req, res) => {
     }
 
     // Set hierarchy relationships if table is provided (but order wasn't)
-    if (feedbackData.tableId && !feedbackData.cafeId) {
+    if (feedbackData.tableId && !feedbackData.cartId) {
       try {
         const Table = require("../models/tableModel");
         const tableIdObj = mongoose.Types.ObjectId.isValid(feedbackData.tableId)
@@ -294,16 +294,16 @@ exports.createFeedback = async (req, res) => {
 
         const table = await Table.findById(tableIdObj);
         if (table) {
-          const tableCafeId = table.cartId || table.cafeId; // Table model uses cartId
-          feedbackData.cafeId = tableCafeId
-            ? (tableCafeId._id || tableCafeId)
+          const tableCartId = table.cartId || table.cafeId; // Table model uses cartId
+          feedbackData.cartId = tableCartId
+            ? (tableCartId._id || tableCartId)
             : null;
           feedbackData.franchiseId = table.franchiseId
             ? (table.franchiseId._id || table.franchiseId)
             : null;
-          cafeId = feedbackData.cafeId;
+          cafeId = feedbackData.cartId; // Keep cafeId variable for customer lookup (Customer model uses cartId)
           franchiseId = feedbackData.franchiseId;
-          console.log(`✅ Found table ${feedbackData.tableId} - cafeId: ${cafeId}, franchiseId: ${franchiseId}`);
+          console.log(`✅ Found table ${feedbackData.tableId} - cartId: ${feedbackData.cartId}, franchiseId: ${franchiseId}`);
         } else {
           console.warn(`Table not found for tableId: ${feedbackData.tableId}`);
         }
@@ -346,10 +346,10 @@ exports.createFeedback = async (req, res) => {
           currentRatingsCount: customer.ratings?.length || 0,
         });
 
-        // If cafeId was not set from order/table, try to get it from existing customer
-        if (!cafeId && customer && customer.cafeId) {
-          feedbackData.cafeId = customer.cafeId._id || customer.cafeId;
-          cafeId = feedbackData.cafeId;
+        // If cartId was not set from order/table, try to get it from existing customer
+        if (!feedbackData.cartId && customer && customer.cartId) {
+          feedbackData.cartId = customer.cartId._id || customer.cartId;
+          cafeId = feedbackData.cartId; // Keep cafeId variable for customer lookup
           if (customer.franchiseId) {
             feedbackData.franchiseId = customer.franchiseId._id || customer.franchiseId;
             franchiseId = feedbackData.franchiseId;
@@ -395,11 +395,11 @@ exports.createFeedback = async (req, res) => {
       }
     }
 
-    // CRITICAL: Ensure cafeId is set before creating feedback
-    // If still not set, try to get it from customer (if customer exists and has cafeId)
-    if (!feedbackData.cafeId && customer && customer.cafeId) {
-      feedbackData.cafeId = customer.cafeId._id || customer.cafeId;
-      cafeId = feedbackData.cafeId;
+    // CRITICAL: Ensure cartId is set before creating feedback
+    // If still not set, try to get it from customer (if customer exists and has cartId)
+    if (!feedbackData.cartId && customer && customer.cartId) {
+      feedbackData.cartId = customer.cartId._id || customer.cartId;
+      cafeId = feedbackData.cartId; // Keep cafeId variable for customer lookup
       if (customer.franchiseId) {
         feedbackData.franchiseId = customer.franchiseId._id || customer.franchiseId;
         franchiseId = feedbackData.franchiseId;
@@ -407,16 +407,16 @@ exports.createFeedback = async (req, res) => {
       console.log(`✅ Set cafeId from customer record: ${cafeId}`);
     }
     
-    // Warn if cafeId is still not set - feedback won't show in admin panel for specific cafes
-    if (!feedbackData.cafeId) {
+    // Warn if cartId is still not set - feedback won't show in admin panel for specific carts
+    if (!feedbackData.cartId) {
       console.warn(
-        `⚠️ WARNING: Feedback created without cafeId! OrderId: ${feedbackData.orderId || "N/A"}, ` +
+        `⚠️ WARNING: Feedback created without cartId! OrderId: ${feedbackData.orderId || "N/A"}, ` +
         `TableId: ${feedbackData.tableId || "N/A"}, ` +
         `Customer: ${customer ? `${customer.name} (${customer.phone || customer.email})` : "N/A"}. ` +
         `This feedback will only be visible to super admin. Customer ratings may not be linked correctly.`
       );
     } else {
-      console.log(`✅ Feedback will be created with cafeId: ${feedbackData.cafeId}`);
+      console.log(`✅ Feedback will be created with cartId: ${feedbackData.cartId}`);
     }
 
     // Validate required fields before creating feedback

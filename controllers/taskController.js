@@ -384,27 +384,27 @@ exports.createTask = async (req, res) => {
 
     // Set hierarchy relationships
     if (user.role === "admin") {
-      taskData.cafeId = user._id;
+      taskData.cartId = user._id; // Task model uses cartId, not cafeId
       if (user.franchiseId) {
         taskData.franchiseId = user.franchiseId;
       }
     } else if (user.role === "franchise_admin") {
       taskData.franchiseId = user._id;
-      if (taskData.cafeId) {
-        // Validate cafeId belongs to this franchise
-        const cafe = await User.findById(taskData.cafeId);
-        if (!cafe || cafe.franchiseId?.toString() !== user._id.toString()) {
-          return res.status(403).json({ message: "Invalid cafe selection" });
+      if (taskData.cartId) {
+        // Validate cartId belongs to this franchise
+        const cart = await User.findById(taskData.cartId);
+        if (!cart || cart.franchiseId?.toString() !== user._id.toString()) {
+          return res.status(403).json({ message: "Invalid cart selection" });
         }
       }
     } else if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
       // Mobile users can create tasks for their cart
       if (user.cafeId) {
-        taskData.cafeId = user.cafeId;
+        taskData.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for Task.cartId
       } else if (user.employeeId) {
         const employee = await Employee.findById(user.employeeId).lean();
-        if (employee && employee.cafeId) {
-          taskData.cafeId = employee.cafeId;
+        if (employee && employee.cartId) {
+          taskData.cartId = employee.cartId; // Task model uses cartId, not cafeId
         }
       } else {
         // Find employee by userId or email
@@ -414,8 +414,8 @@ exports.createTask = async (req, res) => {
             { email: user.email?.toLowerCase() }
           ]
         }).lean();
-        if (employee && employee.cafeId) {
-          taskData.cafeId = employee.cafeId;
+        if (employee && employee.cartId) {
+          taskData.cartId = employee.cartId; // Task model uses cartId, not cafeId
           if (employee.franchiseId) {
             taskData.franchiseId = employee.franchiseId;
           }
@@ -462,8 +462,9 @@ exports.createTask = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && task.cafeId) {
-      emitToCafe(io, task.cafeId.toString(), "task:created", task);
+    const taskCartId = task.cartId || task.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && taskCartId) {
+      emitToCafe(io, taskCartId.toString(), "task:created", task);
     }
 
     return res.status(201).json(task);
@@ -530,7 +531,8 @@ exports.updateTask = async (req, res) => {
 
     // Update fields
     Object.keys(updates).forEach((key) => {
-      if (key !== "_id" && key !== "cafeId" && key !== "franchiseId") {
+      // Don't allow updating cartId or franchiseId directly
+      if (key !== "_id" && key !== "cartId" && key !== "cafeId" && key !== "franchiseId") {
         task[key] = updates[key];
       }
     });
@@ -562,10 +564,11 @@ exports.updateTask = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && task.cafeId) {
-      emitToCafe(io, task.cafeId.toString(), "task:updated", task);
+    const taskCartId = task.cartId || task.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && taskCartId) {
+      emitToCafe(io, taskCartId.toString(), "task:updated", task);
       if (task.status === "completed") {
-        emitToCafe(io, task.cafeId.toString(), "task:completed", task);
+        emitToCafe(io, taskCartId.toString(), "task:completed", task);
       }
     }
 
@@ -616,9 +619,10 @@ exports.completeTask = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && task.cafeId) {
-      emitToCafe(io, task.cafeId.toString(), "task:completed", task);
-      emitToCafe(io, task.cafeId.toString(), "task:updated", task);
+    const taskCartId = task.cartId || task.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && taskCartId) {
+      emitToCafe(io, taskCartId.toString(), "task:completed", task);
+      emitToCafe(io, taskCartId.toString(), "task:updated", task);
     }
 
     return res.json(task);

@@ -5,20 +5,20 @@ const Employee = require("../models/employeeModel");
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cafeId = user._id;
+    query.cartId = user._id; // EmployeeSchedule model uses cartId, not cafeId
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their employee record to find cafeId
+    // Mobile users - get their employee record to find cartId
     const employee = await Employee.findOne({ userId: user._id }).lean();
     if (employee) {
-      query.cafeId = employee.cafeId;
+      query.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
     }
   } else if (user.role === "employee") {
     // Legacy employee role - look up Employee
     const employee = await Employee.findOne({ userId: user._id }).lean();
     if (employee) {
-      query.cafeId = employee.cafeId;
+      query.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
     }
   }
   return query;
@@ -57,7 +57,7 @@ exports.getEmployeeSchedule = async (req, res) => {
       schedule = await EmployeeSchedule.create({
         employeeId,
         weeklySchedule: [],
-        cafeId: employee.cafeId,
+        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
         franchiseId: employee.franchiseId,
       });
       await schedule.populate("employeeId", "name employeeRole mobile");
@@ -101,7 +101,7 @@ exports.getMySchedule = async (req, res) => {
       schedule = await EmployeeSchedule.create({
         employeeId: employee._id,
         weeklySchedule: [],
-        cafeId: employee.cafeId,
+        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
         franchiseId: employee.franchiseId,
       });
       await schedule.populate("employeeId", "name employeeRole mobile");
@@ -142,7 +142,7 @@ exports.upsertSchedule = async (req, res) => {
     }
     
     // Set hierarchy from employee
-    req.body.cafeId = employee.cafeId;
+    req.body.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
     req.body.franchiseId = employee.franchiseId;
     
     const schedule = await EmployeeSchedule.findOneAndUpdate(
@@ -154,8 +154,9 @@ exports.upsertSchedule = async (req, res) => {
     // Emit socket event for real-time updates
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && schedule.cafeId) {
-      emitToCafe(io, schedule.cafeId.toString(), "schedule:updated", schedule);
+    const scheduleCartId = schedule.cartId || schedule.cafeId; // Support old cafeId field for backward compatibility
+    if (io && emitToCafe && scheduleCartId) {
+      emitToCafe(io, scheduleCartId.toString(), "schedule:updated", schedule);
     }
     
     return res.json(schedule);
@@ -183,7 +184,7 @@ exports.updateTodayState = async (req, res) => {
         employeeId,
         weeklySchedule: [],
         todayState,
-        cafeId: employee.cafeId,
+        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
         franchiseId: employee.franchiseId,
       });
     } else {

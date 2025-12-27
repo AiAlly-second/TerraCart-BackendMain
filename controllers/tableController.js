@@ -873,6 +873,9 @@ exports.lookupTableBySlug = async (req, res) => {
       }
 
       // Priority 3: Check if there are WAITING entries - notify next one
+      // CRITICAL: When table is AVAILABLE, notify next waitlist person if any
+      // But if current user is NOT the one being notified, they still get direct access
+      // (since table is AVAILABLE, new users should not be forced into waitlist)
       const waitingCount = await Waitlist.countDocuments({
         table: table._id,
         status: "WAITING",
@@ -927,86 +930,11 @@ exports.lookupTableBySlug = async (req, res) => {
                 sessionToken: null,
               },
             });
-          } else {
-            // Someone else was notified - this user must wait
-            // If user has waitToken but entry not found, don't create new entry
-            if (!waitlistEntry && waitToken) {
-              // waitToken was provided but entry not found - return error
-              return res.status(400).json({
-                message:
-                  "Invalid waitlist token. Please join the waitlist again.",
-                table: buildPublicTableResponse(table, waitlistLength),
-              });
-            }
-
-            if (!waitlistEntry) {
-              // CRITICAL: Check if user already has an active waitlist entry for this table
-              const existingEntry = await Waitlist.findOne({
-                table: table._id,
-                status: { $in: ["WAITING", "NOTIFIED", "SEATED"] },
-                $or: [
-                  { sessionToken: clientSessionToken },
-                  { token: waitToken },
-                ].filter(Boolean),
-              });
-
-              if (existingEntry) {
-                waitlistEntry = existingEntry;
-                console.log(
-                  `[Table ${table.number}] Reusing existing waitlist entry: ${existingEntry.token}`
-                );
-                // User already has an entry - return it
-                const position = await getWaitlistPosition(waitlistEntry);
-                return res.status(423).json({
-                  table: buildPublicTableResponse(table, waitlistLength, {
-                    sessionOwner: false,
-                  }),
-                  sessionActive: true,
-                  message: `Table is ready for another guest. You are #${position} in the waitlist.`,
-                  waitlist: {
-                    token: waitlistEntry.token,
-                    status: waitlistEntry.status,
-                    position: position,
-                    name: waitlistEntry.name || null,
-                    partySize: waitlistEntry.partySize || 1,
-                    notifiedAt: waitlistEntry.notifiedAt,
-                    sessionToken: null,
-                  },
-                });
-              } else {
-                // No existing entry - DON'T auto-create, let user join via frontend
-                // Just return 423 status to indicate table is occupied
-                return res.status(423).json({
-                  table: buildPublicTableResponse(table, waitlistLength, {
-                    sessionOwner: false,
-                  }),
-                  sessionActive: true,
-                  message:
-                    "Table is currently occupied. Please join the waitlist.",
-                  waitlist: null, // No waitlist entry - user must join manually
-                });
-              }
-            }
-
-            // If waitlistEntry exists (from waitToken), return it
-            const position = await getWaitlistPosition(waitlistEntry);
-            return res.status(423).json({
-              table: buildPublicTableResponse(table, waitlistLength, {
-                sessionOwner: false,
-              }),
-              sessionActive: true,
-              message: `Table is ready for another guest. You are #${position} in the waitlist.`,
-              waitlist: {
-                token: waitlistEntry.token,
-                status: waitlistEntry.status,
-                position: position,
-                name: waitlistEntry.name || null,
-                partySize: waitlistEntry.partySize || 1,
-                notifiedAt: waitlistEntry.notifiedAt,
-                sessionToken: null,
-              },
-            });
           }
+          // CRITICAL: If someone else was notified but table is AVAILABLE,
+          // current user should still get direct access (don't force into waitlist)
+          // The waitlist logic only applies when table is OCCUPIED or RESERVED
+          // Fall through to Priority 4 to allow direct access
         }
       }
 
@@ -1459,6 +1387,14 @@ exports.updateTable = async (req, res) => {
         updates[field] = req.body[field];
       }
     }
+    
+    // CRITICAL: Ensure cartId is preserved - never allow it to be cleared via updates
+    // If table doesn't have cartId, try to set it from the user's context
+    if (!table.cartId && req.user && req.user.role === "admin") {
+      // If table has no cartId but user is cart admin, set it
+      updates.cartId = req.user._id;
+      console.log(`[TABLE] Setting cartId for table ${table.number} from admin user: ${req.user._id}`);
+    }
 
     if (updates.number !== undefined) {
       const numericNumber = Number(updates.number);
@@ -1498,6 +1434,14 @@ exports.updateTable = async (req, res) => {
           .status(409)
           .json({ message: "Table number already exists for this cart" });
       }
+    }
+    
+    // CRITICAL: Ensure cartId is preserved - never allow it to be cleared via updates
+    // If table doesn't have cartId, try to set it from the user's context
+    if (!table.cartId && req.user && req.user.role === "admin") {
+      // If table has no cartId but user is cart admin, set it
+      updates.cartId = req.user._id;
+      console.log(`[TABLE] Setting cartId for table ${table.number} from admin user: ${req.user._id}`);
     }
 
     Object.assign(table, updates);
@@ -1563,20 +1507,27 @@ exports.updateTable = async (req, res) => {
       number: table.number,
       status: table.status,
       currentOrder: table.currentOrder || null,
+      sessionToken: table.sessionToken || null, // Include sessionToken for customer frontend
     };
 
     // Emit to cafe room (for admin panel)
+    // CRITICAL: Use table.cartId to ensure admin receives updates for their tables
     if (io && emitToCafe && table.cartId) {
+      const tableCartId = table.cartId.toString();
+      console.log(`[TABLE] Emitting table:status:updated to cartId: ${tableCartId} for table ${table.number}`);
       emitToCafe(
         io,
-        table.cartId.toString(),
+        tableCartId,
         "table:status:updated",
         tableStatusPayload
       );
+    } else if (io && emitToCafe) {
+      console.warn(`[TABLE] Table ${table.number} has no cartId - cannot emit to admin room`);
     }
 
     // Also emit globally so customers can receive real-time updates
     if (io) {
+      console.log(`[TABLE] Emitting table:status:updated globally for table ${table.number}`);
       io.emit("table:status:updated", tableStatusPayload);
     }
 
