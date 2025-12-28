@@ -2,23 +2,37 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
-// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB)
-const getISTDate = () => {
-  const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000; // IST offset in milliseconds (UTC+5:30)
-  const istNow = new Date(now.getTime() + istOffset);
-  
-  // Get start of day in IST
-  const istDate = new Date(istNow);
-  istDate.setUTCHours(0, 0, 0, 0);
-  
-  // Convert back to UTC for MongoDB storage
-  istDate.setTime(istDate.getTime() - istOffset);
-  
-  return istDate;
+// IST offset constant (UTC+5:30)
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+
+// Helper function to get current IST time
+const getISTNow = () => {
+  const now = new Date(); // Current UTC time
+  return new Date(now.getTime() + IST_OFFSET_MS); // Convert to IST
 };
 
-// Helper function to get IST date range (today start and tomorrow start in UTC)
+// Helper function to convert IST time to UTC for MongoDB storage
+const istToUTC = (istDate) => {
+  return new Date(istDate.getTime() - IST_OFFSET_MS);
+};
+
+// Helper function to convert UTC time to IST
+const utcToIST = (utcDate) => {
+  return new Date(utcDate.getTime() + IST_OFFSET_MS);
+};
+
+// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB storage)
+const getISTDate = () => {
+  const istNow = getISTNow();
+  // Get start of day in IST
+  const istDate = new Date(istNow);
+  istDate.setHours(0, 0, 0, 0); // Set to start of day in IST
+  
+  // Convert to UTC for MongoDB storage
+  return istToUTC(istDate);
+};
+
+// Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
 const getISTDateRange = () => {
   const today = getISTDate();
   const tomorrow = new Date(today);
@@ -26,18 +40,11 @@ const getISTDateRange = () => {
   return { today, tomorrow };
 };
 
-// Helper function to get current IST time
-const getISTNow = () => {
-  const now = new Date();
-  const istOffset = 5.5 * 60 * 60 * 1000;
-  return new Date(now.getTime() + istOffset);
-};
-
 // Helper function to get day name in IST
 const getISTDayName = () => {
   const istNow = getISTNow();
   const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[istNow.getUTCDay()];
+  return dayNames[istNow.getDay()]; // Use getDay() for IST day
 };
 
 // Helper function to build query based on user role
@@ -151,21 +158,20 @@ exports.getAllAttendance = async (req, res) => {
           
           if (todaySchedule && todaySchedule.isWorking) {
           const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-          const istOffset = 5.5 * 60 * 60 * 1000;
+          // Create scheduled start time in IST
           const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
-          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset);
+          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
           
-          // Add 30 minute buffer
-          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+          // Add 30 minute buffer in IST
+          const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
             
-            if (now >= bufferTime) {
+            if (istNow >= bufferTimeIST) {
               try {
                 await EmployeeAttendance.create({
                   employeeId: employee._id,
                   date: today,
                   status: "absent",
-                  cafeId: employee.cafeId,
+                  cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
                   franchiseId: employee.franchiseId,
                 });
               } catch (err) {
@@ -222,10 +228,13 @@ exports.getTodayAttendance = async (req, res) => {
     };
 
     // Get existing attendance records
+    // For mobile users, query should already filter by employeeId
+    console.log('[ATTENDANCE] getTodayAttendance query:', JSON.stringify(query, null, 2));
     let attendance = await EmployeeAttendance.find(query)
       .populate("employeeId", "name mobile employeeRole")
       .sort({ "checkIn.time": -1 })
       .lean();
+    console.log('[ATTENDANCE] getTodayAttendance found records:', attendance.length);
 
     // Get all employees in the hierarchy to check for absent employees
     const employeeQuery = await buildHierarchyQuery(req.user);
@@ -259,15 +268,14 @@ exports.getTodayAttendance = async (req, res) => {
         if (todaySchedule && todaySchedule.isWorking) {
           // Check if it's past the scheduled start time (with 30 minute buffer)
           const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-          const istOffset = 5.5 * 60 * 60 * 1000;
+          // Create scheduled start time in IST
           const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setUTCHours(hours, minutes, 0, 0);
-          scheduledStartTimeIST.setTime(scheduledStartTimeIST.getTime() - istOffset); // Convert to UTC
+          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
           
-          // Add 30 minute buffer - only mark absent if it's 30 minutes past scheduled start time
-          const bufferTime = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
+          // Add 30 minute buffer in IST - only mark absent if it's 30 minutes past scheduled start time
+          const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
           
-          if (now >= bufferTime) {
+            if (istNow >= bufferTimeIST) {
             // Create absent attendance record
             try {
               const absentAttendance = await EmployeeAttendance.create({
@@ -394,7 +402,7 @@ exports.checkIn = async (req, res) => {
     }
 
     // Check hierarchy access
-    if (user.role === "admin" && employee.cafeId?.toString() !== user._id.toString()) {
+    if (user.role === "admin" && employee.cartId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
@@ -412,18 +420,73 @@ exports.checkIn = async (req, res) => {
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
 
-    let attendance = await EmployeeAttendance.findOne({
+    // Build query with cartId to ensure consistency with getTodayAttendance
+    // This ensures we only find attendance records that match both employeeId AND cartId
+    const attendanceQuery = {
       employeeId: targetEmployeeId,
       date: { $gte: today, $lt: tomorrow },
-    });
-
-    if (attendance && attendance.checkIn.time) {
-      return res.status(400).json({ message: "Employee already checked in today" });
+    };
+    
+    // Add cartId filter if employee has cartId (should always have it)
+    if (employee.cartId) {
+      attendanceQuery.cartId = employee.cartId;
+    }
+    
+    console.log('[ATTENDANCE] checkIn query:', JSON.stringify(attendanceQuery, null, 2));
+    let attendance = await EmployeeAttendance.findOne(attendanceQuery);
+    console.log('[ATTENDANCE] checkIn found record:', attendance ? 'YES' : 'NO');
+    
+    // If no record found with cartId, check for old records without cartId (migration fix)
+    if (!attendance && employee.cartId) {
+      const fallbackQuery = {
+        employeeId: targetEmployeeId,
+        date: { $gte: today, $lt: tomorrow },
+        $or: [
+          { cartId: { $exists: false } },
+          { cartId: null },
+        ],
+      };
+      console.log('[ATTENDANCE] checkIn fallback query (no cartId):', JSON.stringify(fallbackQuery, null, 2));
+      attendance = await EmployeeAttendance.findOne(fallbackQuery);
+      if (attendance) {
+        console.log('[ATTENDANCE] checkIn - Found old record without cartId, updating...');
+        attendance.cartId = employee.cartId;
+        await attendance.save();
+        console.log('[ATTENDANCE] checkIn - Updated cartId on old record');
+      }
+    }
+    
+    if (attendance) {
+      console.log('[ATTENDANCE] checkIn record details:', {
+        _id: attendance._id,
+        employeeId: attendance.employeeId?.toString(),
+        cartId: attendance.cartId?.toString(),
+        date: attendance.date,
+        hasCheckIn: !!attendance.checkIn?.time,
+      });
     }
 
-    const checkInTime = new Date(); // Store in UTC (MongoDB default)
+    if (attendance && attendance.checkIn && attendance.checkIn.time) {
+      console.log('[ATTENDANCE] checkIn - Employee already checked in');
+      // Update cartId if missing (migration fix)
+      if (!attendance.cartId && employee.cartId) {
+        attendance.cartId = employee.cartId;
+        await attendance.save();
+        console.log('[ATTENDANCE] checkIn - Updated cartId on existing record');
+      }
+      await attendance.populate("employeeId", "name mobile employeeRole");
+      return res.json({
+        message: "Already checked in today",
+        attendance,
+        isLate: false,
+      });
+    }
 
-    // Get employee schedule to check if late
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkInTimeIST = getISTNow();
+    const checkInTime = istToUTC(checkInTimeIST); // Store in UTC (MongoDB default)
+
+    // Get employee schedule to check if late (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
     let status = "present";
     let isLate = false;
@@ -435,15 +498,13 @@ exports.checkIn = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.startTime) {
         const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
-        // Create scheduled time in IST, then convert to UTC for comparison
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled time in IST for today
         const scheduledTimeIST = new Date(istNow);
-        scheduledTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledTimeIST.setTime(scheduledTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        // Compare checkInTime (UTC) with scheduledTime (UTC)
-        if (checkInTime > scheduledTimeIST) {
-          const lateMinutes = Math.floor((checkInTime - scheduledTimeIST) / (1000 * 60));
+        // Compare checkInTime (IST) with scheduledTime (IST)
+        if (checkInTimeIST > scheduledTimeIST) {
+          const lateMinutes = Math.floor((checkInTimeIST - scheduledTimeIST) / (1000 * 60));
           if (lateMinutes > 15) {
             // Late if more than 15 minutes
             status = "late";
@@ -476,7 +537,7 @@ exports.checkIn = async (req, res) => {
           notes: notes || "",
         },
         status: status,
-        cafeId: employee.cafeId,
+        cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
         franchiseId: employee.franchiseId,
       });
     }
@@ -486,9 +547,10 @@ exports.checkIn = async (req, res) => {
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && attendance.cafeId) {
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_in", attendance);
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
+    if (io && emitToCafe && attendanceCartId) {
+      emitToCafe(io, attendanceCartId.toString(), "attendance:checked_in", attendance);
+      emitToCafe(io, attendanceCartId.toString(), "attendance:updated", attendance);
     }
 
     return res.json({
@@ -531,7 +593,7 @@ exports.checkOut = async (req, res) => {
     }
 
     // Check hierarchy access
-    if (user.role === "admin" && employee.cafeId?.toString() !== user._id.toString()) {
+    if (user.role === "admin" && employee.cartId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
@@ -549,12 +611,22 @@ exports.checkOut = async (req, res) => {
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
 
-    const attendance = await EmployeeAttendance.findOne({
+    // Build query with cartId to ensure consistency with getTodayAttendance
+    const attendanceQuery = {
       employeeId: targetEmployeeId,
       date: { $gte: today, $lt: tomorrow },
-    });
+    };
+    
+    // Add cartId filter if employee has cartId
+    if (employee.cartId) {
+      attendanceQuery.cartId = employee.cartId;
+    }
+    
+    console.log('[ATTENDANCE] checkOut query:', JSON.stringify(attendanceQuery, null, 2));
+    const attendance = await EmployeeAttendance.findOne(attendanceQuery);
+    console.log('[ATTENDANCE] checkOut found record:', attendance ? 'YES' : 'NO');
 
-    if (!attendance || !attendance.checkIn.time) {
+    if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
       return res.status(400).json({ message: "Employee has not checked in today" });
     }
 
@@ -562,14 +634,17 @@ exports.checkOut = async (req, res) => {
       return res.status(400).json({ message: "Employee already checked out today" });
     }
 
-    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkOutTimeIST = getISTNow();
+    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
 
-    // Calculate working hours
-    const checkInTime = new Date(attendance.checkIn.time);
-    const workingMinutes = Math.floor((checkOutTime - checkInTime) / (1000 * 60));
+    // Calculate working hours (convert stored UTC times to IST for calculation)
+    const checkInTimeUTC = new Date(attendance.checkIn.time);
+    const checkInTimeIST = utcToIST(checkInTimeUTC);
+    const workingMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
     const workingHours = workingMinutes - (attendance.breakDuration || 0);
 
-    // Get schedule to calculate overtime
+    // Get schedule to calculate overtime (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
     let overtime = 0;
 
@@ -580,15 +655,13 @@ exports.checkOut = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        // Create scheduled end time in IST, then convert to UTC for comparison
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled end time in IST for today
         const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        // Compare checkOutTime (UTC) with scheduledEndTime (UTC)
-        if (checkOutTime > scheduledEndTimeIST) {
-          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
+        // Compare checkOutTime (IST) with scheduledEndTime (IST)
+        if (checkOutTimeIST > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTimeIST - scheduledEndTimeIST) / (1000 * 60));
         }
       }
     }
@@ -616,9 +689,10 @@ exports.checkOut = async (req, res) => {
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && attendance.cafeId) {
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:checked_out", attendance);
-      emitToCafe(io, attendance.cafeId.toString(), "attendance:updated", attendance);
+    const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
+    if (io && emitToCafe && attendanceCartId) {
+      emitToCafe(io, attendanceCartId.toString(), "attendance:checked_out", attendance);
+      emitToCafe(io, attendanceCartId.toString(), "attendance:updated", attendance);
     }
 
     return res.json({
@@ -671,15 +745,18 @@ exports.checkOutById = async (req, res) => {
       return res.status(400).json({ success: false, message: "Cannot checkout while on break. Please end break first." });
     }
 
-    const checkOutTime = new Date(); // Store in UTC (MongoDB default)
+    // Get current time in IST, then convert to UTC for MongoDB storage
+    const checkOutTimeIST = getISTNow();
+    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
 
-    // Calculate working hours
-    const checkInTime = new Date(attendance.checkIn.time);
-    const totalDurationMinutes = Math.floor((checkOutTime - checkInTime) / (1000 * 60));
+    // Calculate working hours (convert stored UTC times to IST for calculation)
+    const checkInTimeUTC = new Date(attendance.checkIn.time);
+    const checkInTimeIST = utcToIST(checkInTimeUTC);
+    const totalDurationMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
     const breakMinutes = attendance.breakDuration || 0;
     const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
 
-    // Get schedule to calculate overtime
+    // Get schedule to calculate overtime (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: attendance.employeeId });
     let overtime = 0;
 
@@ -690,13 +767,13 @@ exports.checkOutById = async (req, res) => {
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
         const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        const istOffset = 5.5 * 60 * 60 * 1000;
+        // Create scheduled end time in IST for today
         const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setUTCHours(hours, minutes, 0, 0);
-        scheduledEndTimeIST.setTime(scheduledEndTimeIST.getTime() - istOffset); // Convert to UTC
+        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
         
-        if (checkOutTime > scheduledEndTimeIST) {
-          overtime = Math.floor((checkOutTime - scheduledEndTimeIST) / (1000 * 60));
+        // Compare checkOutTime (IST) with scheduledEndTime (IST)
+        if (checkOutTimeIST > scheduledEndTimeIST) {
+          overtime = Math.floor((checkOutTimeIST - scheduledEndTimeIST) / (1000 * 60));
         }
       }
     }

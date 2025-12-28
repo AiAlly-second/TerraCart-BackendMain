@@ -10,18 +10,30 @@ const getCafeId = async (user) => {
   if (user.role === "admin") {
     return user._id; // Cart admin's _id is the cartId
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - these are direct User records with cafeId set during login
-    // User.cafeId links to cart admin, which is what we need for Inventory.cartId
+    // Mobile users - prioritize cartId, fallback to cafeId for backward compatibility
+    if (user.cartId) {
+      return user.cartId;
+    }
     if (user.cafeId) {
+      // Fallback for backward compatibility
       return user.cafeId;
     }
-    // Fallback: try to find Employee record by email (since Employee doesn't have userId)
-    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    return employee?.cartId; // Employee model uses cartId, not cafeId
+    // Fallback: try to find Employee record by email or userId
+    const employee = await Employee.findOne({
+      $or: [
+        { email: user.email?.toLowerCase() },
+        { userId: user._id }
+      ]
+    }).lean();
+    if (employee?.cartId) {
+      return employee.cartId;
+    }
+    // Last fallback: try cafeId from employee
+    return employee?.cafeId;
   } else if (user.role === "employee") {
     // Legacy employee role - look up Employee by email
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    return employee?.cartId; // Employee model uses cartId, not cafeId
+    return employee?.cartId || employee?.cafeId; // Employee model uses cartId, fallback to cafeId
   } else if (user.role === "franchise_admin") {
     return null; // Franchise admin doesn't have a specific cartId
   }
@@ -366,6 +378,16 @@ exports.updateStock = async (req, res) => {
     }
 
     await item.save();
+    
+    // Emit socket event for real-time updates
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
+    if (itemCartId) {
+      emitToCafe(io, itemCartId.toString(), "inventory:stock_updated", item);
+      emitToCafe(io, itemCartId.toString(), "inventory:updated", item);
+    }
+    
     return res.json(item);
   } catch (err) {
     console.error('[INVENTORY] Update error:', err);
@@ -376,43 +398,46 @@ exports.updateStock = async (req, res) => {
 // Get available ingredients from costing-v2 for managers to add to inventory
 exports.getAvailableIngredients = async (req, res) => {
   try {
-    // Get cafeId for the manager/mobile user
-    const cafeId = await getCafeId(req.user);
-    if (!cafeId) {
+    // Get cartId for the manager/mobile user (getCafeId returns cartId)
+    const cartId = await getCafeId(req.user);
+    if (!cartId) {
       return res.status(403).json({ 
         success: false,
-        message: "No cafe associated with this user" 
+        message: "No cart associated with this user" 
       });
     }
 
-    console.log('[INVENTORY] getAvailableIngredients - cafeId:', cafeId, 'for user:', req.user._id, 'role:', req.user.role);
+    console.log('[INVENTORY] getAvailableIngredients - cartId:', cartId, 'for user:', req.user._id, 'role:', req.user.role);
 
     // Build query to get ingredients for this cart/cafe/kiosk
     // For mobile users (manager, waiter, cook, captain), explicitly set outletId
     const filter = { isActive: true };
     
-    // For mobile roles, explicitly set outletId to their cafeId
+    // For mobile roles, explicitly set outletId to their cartId
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      filter.outletId = cafeId;
-      console.log('[INVENTORY] getAvailableIngredients - Mobile user, setting outletId:', cafeId);
+      filter.outletId = cartId;
+      console.log('[INVENTORY] getAvailableIngredients - Mobile user, setting outletId:', cartId);
     }
     
     // Build costing query (will handle admin, franchise_admin, super_admin)
     const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: false });
     
     console.log('[INVENTORY] getAvailableIngredients - Final filter:', JSON.stringify(costingFilter));
-    
+
     // Get ingredients that are not already in inventory
     const ingredients = await IngredientV2.find(costingFilter)
-      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation outletId")
+      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation outletId franchiseId _id")
       .sort({ category: 1, name: 1 })
       .lean();
     
     console.log('[INVENTORY] getAvailableIngredients - Found ingredients:', ingredients.length);
 
-    // Get existing inventory items linked to ingredients
+    // Get existing inventory items linked to ingredients (use cartId, not cafeId)
     const existingInventory = await InventoryItem.find({ 
-      cafeId: cafeId,
+      $or: [
+        { cartId: cartId }, // Use cartId (primary)
+        { cafeId: cartId }  // Fallback for backward compatibility
+      ],
       ingredientId: { $ne: null }
     }).select("ingredientId").lean();
     
@@ -428,17 +453,17 @@ exports.getAvailableIngredients = async (req, res) => {
         return false;
       }
       
-      // For mobile users, ensure ingredient belongs to their cafe
+      // For mobile users, ensure ingredient belongs to their cart
       if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-        // Ingredient should have outletId matching the manager's cafeId
+        // Ingredient should have outletId matching the user's cartId
         if (ing.outletId) {
           const ingredientOutletId = ing.outletId.toString();
-          const userCafeId = cafeId.toString();
-          if (ingredientOutletId !== userCafeId) {
+          const userCartId = cartId.toString();
+          if (ingredientOutletId !== userCartId) {
             console.log('[INVENTORY] Filtering out ingredient - outletId mismatch:', {
               ingredientId: ing._id,
               ingredientOutletId,
-              userCafeId
+              userCartId
             });
             return false;
           }

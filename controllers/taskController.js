@@ -3,34 +3,90 @@ const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
+// IST offset constant (UTC+5:30)
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+
+// Helper function to get current IST time
+const getISTNow = () => {
+  const now = new Date(); // Current UTC time
+  return new Date(now.getTime() + IST_OFFSET_MS); // Convert to IST
+};
+
+// Helper function to convert IST time to UTC for MongoDB storage
+const istToUTC = (istDate) => {
+  return new Date(istDate.getTime() - IST_OFFSET_MS);
+};
+
+// Helper function to convert UTC time to IST
+const utcToIST = (utcDate) => {
+  return new Date(utcDate.getTime() + IST_OFFSET_MS);
+};
+
+// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB storage)
+const getISTDate = () => {
+  const istNow = getISTNow();
+  // Get start of day in IST
+  const istDate = new Date(istNow);
+  istDate.setHours(0, 0, 0, 0); // Set to start of day in IST
+  
+  // Convert to UTC for MongoDB storage
+  return istToUTC(istDate);
+};
+
+// Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
+const getISTDateRange = () => {
+  const today = getISTDate();
+  const tomorrow = new Date(today);
+  tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
+  return { today, tomorrow };
+};
+
+// Helper function to get day name in IST
+const getISTDayName = () => {
+  const istNow = getISTNow();
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return dayNames[istNow.getDay()]; // Use getDay() for IST day
+};
+
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cafeId = user._id;
+    query.cartId = user._id; // Task model uses cartId, not cafeId
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their cafeId from user or employee record
-    if (user.cafeId) {
-      query.cafeId = user.cafeId;
+    // Mobile users - get their cartId from user or employee record
+    if (user.cartId) {
+      query.cartId = user.cartId;
+    } else if (user.cafeId) {
+      // Fallback to cafeId for backward compatibility
+      query.cartId = user.cafeId;
     } else if (user.employeeId) {
       const employee = await Employee.findById(user.employeeId).lean();
-      if (employee && employee.cafeId) {
-        query.cafeId = employee.cafeId;
+      if (employee && employee.cartId) {
+        query.cartId = employee.cartId;
+      } else if (employee && employee.cafeId) {
+        // Fallback to cafeId
+        query.cartId = employee.cafeId;
       }
     } else {
       // Fallback: find by email
       const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cafeId) {
-        query.cafeId = employee.cafeId;
+      if (employee && employee.cartId) {
+        query.cartId = employee.cartId;
+      } else if (employee && employee.cafeId) {
+        // Fallback to cafeId
+        query.cartId = employee.cafeId;
       }
     }
   } else if (user.role === "employee") {
     // Legacy employee role
     const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    if (employee && employee.cafeId) {
-      query.cafeId = employee.cafeId;
+    if (employee && employee.cartId) {
+      query.cartId = employee.cartId;
+    } else if (employee && employee.cafeId) {
+      query.cartId = employee.cafeId;
     }
   }
   return query;
@@ -49,7 +105,8 @@ const shouldShowTaskToday = (task, employeeSchedule, today) => {
     return true;
   }
 
-  const todayDayName = getDayName(today);
+  // Use IST day name for consistency
+  const todayDayName = getISTDayName();
   
   // Check if today is in the frequency list
   if (!task.frequency.includes(todayDayName)) {
@@ -92,7 +149,8 @@ const calculateTaskStatus = (task, employeeSchedule, now) => {
     return task.status;
   }
 
-  const taskDayName = getDayName(new Date(task.dueDate));
+  // Use IST day name for consistency - get today's IST day name
+  const taskDayName = getISTDayName();
   const daySchedule = employeeSchedule.weeklySchedule.find(
     (s) => s.day === taskDayName
   );
@@ -101,29 +159,35 @@ const calculateTaskStatus = (task, employeeSchedule, now) => {
     return task.status; // Not a working day, keep current status
   }
 
-  // Parse start and end times
+  // Parse start and end times (these are in IST format from schedule)
   const [startHour, startMinute] = daySchedule.startTime.split(":").map(Number);
   const [endHour, endMinute] = daySchedule.endTime.split(":").map(Number);
 
-  // Create scheduled times for the task's due date
-  const taskDate = new Date(task.dueDate);
-  const scheduledStart = new Date(taskDate);
-  scheduledStart.setHours(startHour, startMinute, 0, 0);
+  // Convert task due date from UTC (MongoDB) to IST
+  const taskDateUTC = new Date(task.dueDate);
+  const taskDateIST = utcToIST(taskDateUTC);
   
-  const scheduledEnd = new Date(taskDate);
-  scheduledEnd.setHours(endHour, endMinute, 0, 0);
+  // Create scheduled times in IST for the task's due date
+  const scheduledStartIST = new Date(taskDateIST);
+  scheduledStartIST.setHours(startHour, startMinute, 0, 0);
+  
+  const scheduledEndIST = new Date(taskDateIST);
+  scheduledEndIST.setHours(endHour, endMinute, 0, 0);
 
-  // Check if task is late (past scheduled start time and not completed)
-  if (now > scheduledStart && task.status !== "completed") {
-    const lateMinutes = Math.floor((now - scheduledStart) / (1000 * 60));
+  // Get current time in IST
+  const nowIST = getISTNow();
+
+  // Check if task is late (past scheduled start time and not completed) - all in IST
+  if (nowIST > scheduledStartIST && task.status !== "completed") {
+    const lateMinutes = Math.floor((nowIST - scheduledStartIST) / (1000 * 60));
     if (lateMinutes > 15) {
       // More than 15 minutes late
       return "late";
     }
   }
 
-  // Check if it's past end time and not completed - mark as overdue
-  if (now > scheduledEnd && task.status !== "completed") {
+  // Check if it's past end time and not completed - mark as overdue (all in IST)
+  if (nowIST > scheduledEndIST && task.status !== "completed") {
     return "pending"; // Keep as pending but will show as overdue
   }
 
@@ -279,10 +343,9 @@ exports.getMyTasks = async (req, res) => {
 // Get today's tasks
 exports.getTodayTasks = async (req, res) => {
   try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    // Use IST date range for consistent date comparison
+    const { today, tomorrow } = getISTDateRange();
+    const istNow = getISTNow();
 
     const user = req.user;
     let employeeId = null;
@@ -327,29 +390,69 @@ exports.getTodayTasks = async (req, res) => {
       .lean();
 
     // Filter tasks that should be shown today
+    console.log('[TASK] getTodayTasks - Total tasks found:', allTasks.length);
+    console.log('[TASK] getTodayTasks - Today IST date:', today.toISOString());
+    
     const todayTasks = allTasks.filter((task) => {
       // If it's a recurring task, check frequency and work schedule
       if (task.frequency && Array.isArray(task.frequency) && task.frequency.length > 0) {
-        return shouldShowTaskToday(task, employeeSchedule, today);
+        const shouldShow = shouldShowTaskToday(task, employeeSchedule, today);
+        console.log('[TASK] Recurring task:', {
+          id: task._id,
+          title: task.title,
+          frequency: task.frequency,
+          shouldShow: shouldShow,
+        });
+        return shouldShow;
       }
       
-      // For non-recurring tasks, check if task is due today
+      // For non-recurring tasks, check if task is due today (using IST date comparison)
       if (task.dueDate) {
-        const taskDueDate = new Date(task.dueDate);
-        taskDueDate.setHours(0, 0, 0, 0); // Normalize to start of day
-        const isDueToday = taskDueDate.getTime() === today.getTime();
+        // Convert task due date from UTC (MongoDB) to IST
+        const taskDueDateUTC = new Date(task.dueDate);
+        const taskDueDateIST = utcToIST(taskDueDateUTC);
+        
+        // Get start of day in IST for task due date
+        const taskDueDateISTStart = new Date(taskDueDateIST);
+        taskDueDateISTStart.setHours(0, 0, 0, 0);
+        
+        // Get today's start in IST
+        const todayIST = getISTNow();
+        const todayISTStart = new Date(todayIST);
+        todayISTStart.setHours(0, 0, 0, 0);
+        
+        // Compare IST dates
+        const isDueToday = taskDueDateISTStart.getTime() === todayISTStart.getTime();
+        
+        console.log('[TASK] Non-recurring task date check (IST):', {
+          id: task._id,
+          title: task.title,
+          taskDueDateUTC: taskDueDateUTC.toISOString(),
+          taskDueDateIST: taskDueDateIST.toISOString(),
+          taskDueDateISTStart: taskDueDateISTStart.toISOString(),
+          todayISTStart: todayISTStart.toISOString(),
+          isDueToday: isDueToday,
+        });
+        
         return isDueToday;
       }
       
       // If no dueDate, don't show the task
+      console.log('[TASK] Task has no dueDate:', {
+        id: task._id,
+        title: task.title,
+      });
       return false;
     });
-
-    const now = new Date();
     
-    // Calculate status for each task based on work schedule
+    console.log('[TASK] getTodayTasks - Tasks for today:', todayTasks.length);
+
+    // Use IST time for all calculations
+    const nowIST = getISTNow();
+    
+    // Calculate status for each task based on work schedule (using IST)
     const tasksWithStatus = todayTasks.map((task) => {
-      const calculatedStatus = calculateTaskStatus(task, employeeSchedule, now);
+      const calculatedStatus = calculateTaskStatus(task, employeeSchedule, nowIST);
       return { ...task, status: calculatedStatus };
     });
 
@@ -405,12 +508,18 @@ exports.createTask = async (req, res) => {
       }
     } else if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
       // Mobile users can create tasks for their cart
-      if (user.cafeId) {
-        taskData.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for Task.cartId
+      if (user.cartId) {
+        taskData.cartId = user.cartId; // Task model uses cartId
+      } else if (user.cafeId) {
+        // Fallback to cafeId for backward compatibility
+        taskData.cartId = user.cafeId;
       } else if (user.employeeId) {
         const employee = await Employee.findById(user.employeeId).lean();
         if (employee && employee.cartId) {
           taskData.cartId = employee.cartId; // Task model uses cartId, not cafeId
+        } else if (employee && employee.cafeId) {
+          // Fallback to cafeId
+          taskData.cartId = employee.cafeId;
         }
       } else {
         // Find employee by userId or email
@@ -422,6 +531,12 @@ exports.createTask = async (req, res) => {
         }).lean();
         if (employee && employee.cartId) {
           taskData.cartId = employee.cartId; // Task model uses cartId, not cafeId
+          if (employee.franchiseId) {
+            taskData.franchiseId = employee.franchiseId;
+          }
+        } else if (employee && employee.cafeId) {
+          // Fallback to cafeId
+          taskData.cartId = employee.cafeId;
           if (employee.franchiseId) {
             taskData.franchiseId = employee.franchiseId;
           }
