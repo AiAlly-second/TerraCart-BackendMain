@@ -329,32 +329,32 @@ exports.getIngredients = async (req, res) => {
       .populate("cartId", "name cafeName")
       .sort({ category: 1, name: 1 }); // Sort by category first, then name
 
-    // For Cart Admin, calculate outlet-specific qtyOnHand and currentCostPerBaseUnit
+    // For Cart Admin, calculate cart-specific qtyOnHand and currentCostPerBaseUnit
     // This ensures each cart admin only sees their own inventory quantities and costs
     if (req.user.role === "admin") {
       const cartId = req.user._id;
       for (const ingredient of ingredients) {
-        let outletSpecificQty = 0;
-        let outletSpecificCost = 0;
+        let cartSpecificQty = 0;
+        let cartSpecificCost = 0;
 
-        // If ingredient is outlet-specific and belongs to this outlet, use values directly
+        // If ingredient is cart-specific and belongs to this cart, use values directly
         if (
           ingredient.cartId &&
           ingredient.cartId.toString() === cartId.toString()
         ) {
-          // Already outlet-specific, qtyOnHand and currentCostPerBaseUnit are correct
+          // Already cart-specific, qtyOnHand and currentCostPerBaseUnit are correct
           continue;
         }
 
-        // For shared ingredients, calculate outlet-specific values from transactions
+        // For shared ingredients, calculate cart-specific values from transactions
         // Calculate stock by summing IN/RETURN transactions and subtracting OUT/WASTE transactions
-        const outletTransactions = await InventoryTransaction.find({
+        const cartTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
           cartId: cartId,
         }).sort({ date: 1 }); // Sort ascending to process chronologically
 
         let totalQty = 0;
-        for (const txn of outletTransactions) {
+        for (const txn of cartTransactions) {
           const txnQty = txn.qtyInBaseUnit || txn.qty;
           if (txn.type === "IN" || txn.type === "RETURN") {
             // Add to inventory
@@ -365,27 +365,25 @@ exports.getIngredients = async (req, res) => {
             if (totalQty < 0) totalQty = 0;
           }
         }
-        outletSpecificQty = Math.max(0, totalQty);
-        
-        // If no outlet-specific transactions exist but ingredient has global stock,
-        // use global stock as fallback (allows cart admins to see shared ingredients)
-        // Also use global cost in this case
-        if (outletSpecificQty === 0 && outletTransactions.length === 0 && ingredient.qtyOnHand > 0) {
-          outletSpecificQty = ingredient.qtyOnHand;
-          // Use global cost for shared ingredients when no outlet-specific transactions exist
-          outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+        cartSpecificQty = Math.max(0, totalQty);
+
+        // For new carts with no cart-specific transactions, set quantity and cost to 0
+        // This ensures new carts start with zero stock and zero cost, not random values from shared ingredients
+        if (cartSpecificQty === 0 && cartTransactions.length === 0) {
+          cartSpecificQty = 0;
+          cartSpecificCost = 0;
         }
 
-        // Calculate weighted average cost from all outlet-specific transactions
+        // Calculate weighted average cost from all cart-specific transactions
         // This matches the BOM calculation method for consistency
         // The weighted average cost is calculated from purchase transactions (IN type)
         // and represents the average cost per base unit of the current stock
-        if (outletTransactions.length > 0) {
+        if (cartTransactions.length > 0) {
           let totalQtyForCost = 0;
           let weightedAvgCost = 0;
           let totalValue = 0; // Track total value for verification
 
-          for (const txn of outletTransactions) {
+          for (const txn of cartTransactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty;
             if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - recalculate weighted average
@@ -393,7 +391,8 @@ exports.getIngredients = async (req, res) => {
               if (totalQtyForCost > 0 && txnQty > 0 && txnCost > 0) {
                 // Weighted average: (existing total value + new value) / (existing qty + new qty)
                 const existingTotalValue = totalQtyForCost * weightedAvgCost;
-                weightedAvgCost = (existingTotalValue + txnCost) / (totalQtyForCost + txnQty);
+                weightedAvgCost =
+                  (existingTotalValue + txnCost) / (totalQtyForCost + txnQty);
               } else if (txnQty > 0 && txnCost > 0) {
                 // First purchase - cost per base unit
                 weightedAvgCost = txnCost / txnQty;
@@ -412,42 +411,54 @@ exports.getIngredients = async (req, res) => {
           // But we use the calculated weightedAvgCost which accounts for consumption
           // Use calculated weighted average cost if we have a valid cost
           // This represents the average cost per base unit of the current stock
-          if (weightedAvgCost > 0 && outletSpecificQty > 0) {
-            outletSpecificCost = weightedAvgCost;
+          if (weightedAvgCost > 0 && cartSpecificQty > 0) {
+            cartSpecificCost = weightedAvgCost;
             // Debug: Log cost calculation for verification
-            if (process.env.NODE_ENV === 'development') {
-              console.log(`[Inventory Cost] ${ingredient.name}: Stock=${outletSpecificQty} ${ingredient.baseUnit}, WeightedAvgCost=₹${weightedAvgCost.toFixed(4)}/baseUnit, TotalValue=₹${(outletSpecificQty * weightedAvgCost).toFixed(2)}, TotalPurchaseValue=₹${totalValue.toFixed(2)}`);
+            if (process.env.NODE_ENV === "development") {
+              console.log(
+                `[Inventory Cost] ${
+                  ingredient.name
+                }: Stock=${cartSpecificQty} ${
+                  ingredient.baseUnit
+                }, WeightedAvgCost=₹${weightedAvgCost.toFixed(
+                  4
+                )}/baseUnit, TotalValue=₹${(
+                  cartSpecificQty * weightedAvgCost
+                ).toFixed(2)}, TotalPurchaseValue=₹${totalValue.toFixed(2)}`
+              );
             }
           } else if (weightedAvgCost > 0) {
             // Stock is 0 but we have historical cost - use it for when stock is replenished
-            outletSpecificCost = weightedAvgCost;
+            cartSpecificCost = weightedAvgCost;
           }
         }
 
-        // If no outlet-specific cost calculated, use global cost as fallback
-        // This allows cart admins to see costs for shared ingredients
-        if (outletSpecificCost <= 0) {
-          outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+        // Only use global cost as fallback if we have transactions but cost is 0
+        // For new carts with no transactions, keep cost at 0 (don't inherit from other carts)
+        if (cartSpecificCost <= 0 && cartTransactions.length > 0) {
+          // We have transactions but cost is 0 - use global cost as fallback
+          cartSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
         }
+        // If no transactions exist, cartSpecificCost stays at 0 (new cart, no purchases yet)
 
-        // Override qtyOnHand and currentCostPerBaseUnit with outlet-specific values
-        ingredient.qtyOnHand = outletSpecificQty;
-        // Use the calculated cost (either outlet-specific or global fallback)
+        // Override qtyOnHand and currentCostPerBaseUnit with cart-specific values
+        ingredient.qtyOnHand = cartSpecificQty;
+        // Use the calculated cost (either cart-specific or global fallback)
         // This ensures accurate total value calculation
-        ingredient.currentCostPerBaseUnit = outletSpecificCost;
+        ingredient.currentCostPerBaseUnit = cartSpecificCost;
         // Mark as modified so it's included in the response
         ingredient.markModified("qtyOnHand");
         ingredient.markModified("currentCostPerBaseUnit");
         // #region agent log
         logDebug(
           "costingController.js:395",
-          "Updated ingredient with outlet-specific values",
+          "Updated ingredient with cart-specific values",
           {
             ingredientId: ingredient._id,
             ingredientName: ingredient.name,
             cartId: cartId,
-            outletSpecificQty: outletSpecificQty,
-            outletSpecificCost: outletSpecificCost,
+            cartSpecificQty: cartSpecificQty,
+            cartSpecificCost: cartSpecificCost,
             originalQtyOnHand: ingredient.qtyOnHand,
             originalCost: ingredient.currentCostPerBaseUnit,
           },
@@ -738,8 +749,13 @@ exports.getFIFOLayers = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Check access control - cart admins can only view FIFO for their own ingredients
+    // Check access control and get cartId for filtering
+    let cartIdForFilter = null;
     if (req.user.role === "admin") {
+      // Cart admin - filter layers to only show their cart's layers
+      cartIdForFilter = req.user._id;
+
+      // For cart-specific ingredients, verify access
       if (
         ingredient.cartId &&
         ingredient.cartId.toString() !== req.user._id.toString()
@@ -750,10 +766,15 @@ exports.getFIFOLayers = async (req, res) => {
             "Access denied. You can only view FIFO layers for ingredients belonging to your cart.",
         });
       }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can optionally filter by cartId if provided in query
+      if (req.query.cartId) {
+        cartIdForFilter = req.query.cartId;
+      }
     }
 
-    // Get FIFO layers
-    const layers = await FIFOService.getLayers(req.params.id);
+    // Get FIFO layers (filtered by cartId if provided)
+    const layers = await FIFOService.getLayers(req.params.id, cartIdForFilter);
     res.json({ success: true, data: layers || [] });
   } catch (error) {
     console.error("[COSTING] Get FIFO layers error:", error);
@@ -883,16 +904,18 @@ exports.receivePurchase = async (req, res) => {
 
       // Convert purchase quantity and cost to base unit
       const qtyInBaseUnit = ingredient.convertToBaseUnit(item.qty, item.uom);
-      
+
       // Calculate cost per base unit: total cost / quantity in base unit
       // item.total is the total cost for this purchase item
       // item.unitPrice is per unit in the purchase unit (item.uom)
-      const totalCost = item.total || (item.unitPrice * item.qty);
+      const totalCost = item.total || item.unitPrice * item.qty;
       const costPerBaseUnit = totalCost / qtyInBaseUnit;
 
       // Validate conversion
       if (isNaN(qtyInBaseUnit) || qtyInBaseUnit <= 0) {
-        throw new Error(`Invalid quantity conversion for ${ingredient.name}: ${item.qty} ${item.uom}`);
+        throw new Error(
+          `Invalid quantity conversion for ${ingredient.name}: ${item.qty} ${item.uom}`
+        );
       }
       if (isNaN(costPerBaseUnit) || costPerBaseUnit < 0) {
         throw new Error(`Invalid cost calculation for ${ingredient.name}`);
@@ -924,10 +947,22 @@ exports.receivePurchase = async (req, res) => {
         cartId: purchase.cartId || null,
       });
       await transaction.save();
-      
+
       // Debug: Verify cost allocation and stock update
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`[Purchase Receive] Ingredient: ${ingredient.name} (${ingredient.cartId ? 'Cart-specific' : 'Shared'}), Purchase cartId: ${purchase.cartId || 'none'}, Qty: ${qtyInBaseUnit} ${ingredient.baseUnit}, Total Cost: ₹${totalCost}, Cost/BaseUnit: ₹${costPerBaseUnit.toFixed(4)}, Transaction saved: ${transaction._id}, Updated qtyOnHand: ${avgResult.updatedQtyOnHand}`);
+      if (process.env.NODE_ENV === "development") {
+        console.log(
+          `[Purchase Receive] Ingredient: ${ingredient.name} (${
+            ingredient.cartId ? "Cart-specific" : "Shared"
+          }), Purchase cartId: ${
+            purchase.cartId || "none"
+          }, Qty: ${qtyInBaseUnit} ${
+            ingredient.baseUnit
+          }, Total Cost: ₹${totalCost}, Cost/BaseUnit: ₹${costPerBaseUnit.toFixed(
+            4
+          )}, Transaction saved: ${transaction._id}, Updated qtyOnHand: ${
+            avgResult.updatedQtyOnHand
+          }`
+        );
       }
       // #region agent log
       logDebug(
@@ -996,21 +1031,23 @@ exports.receivePurchase = async (req, res) => {
         const cartIdForRecalc = recipe.cartId || null;
         await recipe.calculateCost(cartIdForRecalc);
         await recipe.save();
-        
+
         // Update linked menu items with new cost
         const menuItems = await MenuItem.find({ recipeId: recipe._id });
         for (const menuItem of menuItems) {
           // Skip menu items without cartId (they're invalid and will be fixed separately)
           if (!menuItem.cartId) {
-            if (process.env.NODE_ENV === 'development') {
-              console.warn(`[Purchase Receive] Skipping menu item ${menuItem._id} - missing cartId`);
+            if (process.env.NODE_ENV === "development") {
+              console.warn(
+                `[Purchase Receive] Skipping menu item ${menuItem._id} - missing cartId`
+              );
             }
             continue;
           }
           menuItem.calculateMetrics(recipe.costPerPortion);
           await menuItem.save();
         }
-        
+
         // #region agent log
         logDebug(
           "costingController.js:777",
@@ -1139,12 +1176,12 @@ exports.consumeInventory = async (req, res) => {
     });
     await transaction.save();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       data: {
         ...result,
         transactionId: transaction._id,
-      }
+      },
     });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -1247,13 +1284,13 @@ exports.returnToInventory = async (req, res) => {
     });
     await transaction.save();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       data: {
         ...result,
         transactionId: transaction._id,
         message: "Unused ingredients returned to inventory successfully",
-      }
+      },
     });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
@@ -1348,8 +1385,8 @@ exports.getCostingInventory = async (req, res) => {
         const employee = await Employee.findOne({
           $or: [
             { email: req.user.email?.toLowerCase() },
-            { userId: req.user._id }
-          ]
+            { userId: req.user._id },
+          ],
         }).lean();
         if (employee) {
           cartId = employee.cartId || employee.cafeId; // Prioritize cartId
@@ -1380,6 +1417,7 @@ exports.getCostingInventory = async (req, res) => {
       !cartId;
     const costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipOutletFilter,
+      includeShared: true, // Include franchise-level shared ingredients
     });
 
     // Get ingredients for this cart/cafe/kiosk
@@ -1471,8 +1509,7 @@ exports.getLowStock = async (req, res) => {
  */
 exports.recordWaste = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, reason, reasonDetails, cartId } =
-      req.body;
+    const { ingredientId, qty, uom, reason, reasonDetails, cartId } = req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1805,8 +1842,10 @@ exports.recalculateRecipeCost = async (req, res) => {
     for (const menuItem of menuItems) {
       // Skip menu items without cartId (they're invalid and will be fixed separately)
       if (!menuItem.cartId) {
-        if (process.env.NODE_ENV === 'development') {
-          console.warn(`[Recalculate Recipe Cost] Skipping menu item ${menuItem._id} - missing cartId`);
+        if (process.env.NODE_ENV === "development") {
+          console.warn(
+            `[Recalculate Recipe Cost] Skipping menu item ${menuItem._id} - missing cartId`
+          );
         }
         continue;
       }
@@ -1846,8 +1885,10 @@ exports.deleteRecipe = async (req, res) => {
       for (const menuItem of linkedMenuItems) {
         // Skip menu items without cartId (they're invalid and will be fixed separately)
         if (!menuItem.cartId) {
-          if (process.env.NODE_ENV === 'development') {
-            console.warn(`[Recipe Delete] Skipping menu item ${menuItem._id} - missing cartId`);
+          if (process.env.NODE_ENV === "development") {
+            console.warn(
+              `[Recipe Delete] Skipping menu item ${menuItem._id} - missing cartId`
+            );
           }
           continue;
         }
@@ -1858,7 +1899,7 @@ exports.deleteRecipe = async (req, res) => {
         menuItem.lastCostUpdate = new Date();
         await menuItem.save();
       }
-      if (process.env.NODE_ENV === 'development') {
+      if (process.env.NODE_ENV === "development") {
         console.log(
           `[RECIPE DELETE] Unlinked ${linkedMenuItems.length} menu item(s) from recipe ${recipe.name}`
         );
@@ -1919,7 +1960,7 @@ exports.getMenuItems = async (req, res) => {
             // Update menu item metrics with recalculated recipe cost
             menuItem.calculateMetrics(recipe.costPerPortion);
             // Update the populated recipe object for display
-            if (menuItem.recipeId && typeof menuItem.recipeId === 'object') {
+            if (menuItem.recipeId && typeof menuItem.recipeId === "object") {
               menuItem.recipeId.costPerPortion = recipe.costPerPortion;
             }
             // Don't save - just update for display (saves are done when recipes are explicitly updated)
@@ -1982,9 +2023,10 @@ exports.createMenuItem = async (req, res) => {
       if (recipe) {
         // Recalculate recipe cost using cartId to ensure accurate cost
         // For cart admin, use their cartId; for others, use recipe's cartId or null
-        const cartIdForCost = req.user.role === "admin" 
-          ? req.user._id 
-          : (data.cartId || recipe.cartId || null);
+        const cartIdForCost =
+          req.user.role === "admin"
+            ? req.user._id
+            : data.cartId || recipe.cartId || null;
         await recipe.calculateCost(cartIdForCost);
         await recipe.save(); // Save updated recipe cost
         // Calculate menu item metrics with recalculated recipe cost
@@ -2071,9 +2113,10 @@ exports.updateMenuItem = async (req, res) => {
       if (recipe) {
         // Recalculate recipe cost using cartId to ensure accurate cost
         // For cart admin, use their cartId; for others, use menu item's cartId or recipe's cartId
-        const cartIdForCost = req.user.role === "admin"
-          ? req.user._id
-          : (menuItem.cartId || recipe.cartId || null);
+        const cartIdForCost =
+          req.user.role === "admin"
+            ? req.user._id
+            : menuItem.cartId || recipe.cartId || null;
         await recipe.calculateCost(cartIdForCost);
         await recipe.save(); // Save updated recipe cost
         // Calculate menu item metrics with recalculated recipe cost
@@ -2358,9 +2401,10 @@ exports.importFromDefaultMenu = async (req, res) => {
           const recipe = await Recipe.findById(recipeId);
           if (recipe) {
             // Recalculate recipe cost using cartId to ensure accurate cost
-            const cartIdForCost = req.user.role === "admin"
-              ? req.user._id
-              : (outletData.cartId || recipe.cartId || null);
+            const cartIdForCost =
+              req.user.role === "admin"
+                ? req.user._id
+                : outletData.cartId || recipe.cartId || null;
             await recipe.calculateCost(cartIdForCost);
             await recipe.save(); // Save updated recipe cost
             // Calculate menu item metrics with recalculated recipe cost

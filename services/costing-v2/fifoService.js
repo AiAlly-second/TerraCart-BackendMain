@@ -304,16 +304,50 @@ class FIFOService {
   /**
    * Get current FIFO layers for an ingredient
    * @param {String} ingredientId - Ingredient ID
+   * @param {String} cartId - Optional cart ID to filter layers by cart
    * @returns {Promise<Array>} FIFO layers
    */
-  static async getLayers(ingredientId) {
+  static async getLayers(ingredientId, cartId = null) {
     const ingredient = await Ingredient.findById(ingredientId).select(
-      "fifoLayers"
+      "fifoLayers cartId"
     );
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
-    return ingredient.fifoLayers.filter((l) => l.remainingQty > 0);
+
+    let layers = ingredient.fifoLayers.filter((l) => l.remainingQty > 0);
+
+    // If cartId is provided, filter layers to only show those belonging to this cart
+    if (cartId) {
+      // If ingredient is cart-specific and belongs to this cart, return all layers
+      if (
+        ingredient.cartId &&
+        ingredient.cartId.toString() === cartId.toString()
+      ) {
+        return layers; // All layers belong to this cart
+      }
+
+      // For shared ingredients, filter layers by purchase cartId
+      const filteredLayers = [];
+      for (const layer of layers) {
+        if (layer.purchaseId) {
+          const purchase = await Purchase.findById(layer.purchaseId).select(
+            "cartId"
+          );
+          if (
+            purchase &&
+            purchase.cartId &&
+            purchase.cartId.toString() === cartId.toString()
+          ) {
+            filteredLayers.push(layer);
+          }
+        }
+      }
+      return filteredLayers;
+    }
+
+    // No cartId filter - return all layers
+    return layers;
   }
 
   /**

@@ -1339,22 +1339,32 @@ const createOrder = async (req, res) => {
 
     // Print KOT to printer (non-blocking)
     // CRITICAL: Log print attempt and handle errors properly
-    printKOT(order, kot, 0)
-      .then((result) => {
-        if (result && result.success) {
-          console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
-        } else {
-          console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
-        }
-      })
-      .catch((err) => {
-        console.error(`[ORDER] KOT print error for order ${order._id}:`, {
-          error: err?.message || err?.toString() || "Unknown error",
-          stack: err?.stack,
-          orderId: order._id,
-          tableNumber: order.tableNumber,
+    // Use order.kotLines[0] to ensure we're using the saved KOT data
+    if (order && order.kotLines && order.kotLines.length > 0) {
+      const kotToPrint = order.kotLines[0];
+      printKOT(order, kotToPrint, 0)
+        .then((result) => {
+          if (result && result.success) {
+            console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
+          } else {
+            console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
+          }
+        })
+        .catch((err) => {
+          console.error(`[ORDER] KOT print error for order ${order._id}:`, {
+            error: err?.message || err?.toString() || "Unknown error",
+            stack: err?.stack,
+            orderId: order._id,
+            tableNumber: order.tableNumber,
+          });
         });
+    } else {
+      console.error(`[ORDER] Cannot print KOT - order or KOT data missing for order ${order?._id}:`, {
+        hasOrder: !!order,
+        hasKotLines: !!(order && order.kotLines),
+        kotLinesLength: order?.kotLines?.length || 0,
       });
+    }
 
     return res.status(201).json(order);
   } catch (err) {
@@ -1666,23 +1676,33 @@ const addKot = async (req, res) => {
 
     // Print new KOT to printer (non-blocking)
     // CRITICAL: Log print attempt and handle errors properly
-    const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex)
-      .then((result) => {
-        if (result && result.success) {
-          console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
-        } else {
-          console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
-        }
-      })
-      .catch((err) => {
-        console.error(`[ORDER] KOT print error for order ${order._id}:`, {
-          error: err?.message || err?.toString() || "Unknown error",
-          stack: err?.stack,
-          orderId: order._id,
-          tableNumber: order.tableNumber,
+    // Use order.kotLines to ensure we're using the saved KOT data
+    if (order && order.kotLines && order.kotLines.length > 0) {
+      const kotIndex = order.kotLines.length - 1;
+      const kotToPrint = order.kotLines[kotIndex];
+      printKOT(order, kotToPrint, kotIndex)
+        .then((result) => {
+          if (result && result.success) {
+            console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
+          } else {
+            console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
+          }
+        })
+        .catch((err) => {
+          console.error(`[ORDER] KOT print error for order ${order._id}:`, {
+            error: err?.message || err?.toString() || "Unknown error",
+            stack: err?.stack,
+            orderId: order._id,
+            tableNumber: order.tableNumber,
+          });
         });
+    } else {
+      console.error(`[ORDER] Cannot print KOT - order or KOT data missing for order ${order?._id}:`, {
+        hasOrder: !!order,
+        hasKotLines: !!(order && order.kotLines),
+        kotLinesLength: order?.kotLines?.length || 0,
       });
+    }
 
     return res.json(order);
   } catch (err) {
@@ -2155,23 +2175,33 @@ const addItemsToOrder = async (req, res) => {
 
     // Print new KOT to printer (non-blocking)
     // CRITICAL: Log print attempt and handle errors properly
-    const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex)
-      .then((result) => {
-        if (result && result.success) {
-          console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
-        } else {
-          console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
-        }
-      })
-      .catch((err) => {
-        console.error(`[ORDER] KOT print error for order ${order._id}:`, {
-          error: err?.message || err?.toString() || "Unknown error",
-          stack: err?.stack,
-          orderId: order._id,
-          tableNumber: order.tableNumber,
+    // Use order.kotLines to ensure we're using the saved KOT data
+    if (order && order.kotLines && order.kotLines.length > 0) {
+      const kotIndex = order.kotLines.length - 1;
+      const kotToPrint = order.kotLines[kotIndex];
+      printKOT(order, kotToPrint, kotIndex)
+        .then((result) => {
+          if (result && result.success) {
+            console.log(`[ORDER] KOT printed successfully for order ${order._id}`);
+          } else {
+            console.error(`[ORDER] KOT print failed for order ${order._id}:`, result?.error || result?.message || "Unknown error");
+          }
+        })
+        .catch((err) => {
+          console.error(`[ORDER] KOT print error for order ${order._id}:`, {
+            error: err?.message || err?.toString() || "Unknown error",
+            stack: err?.stack,
+            orderId: order._id,
+            tableNumber: order.tableNumber,
+          });
         });
+    } else {
+      console.error(`[ORDER] Cannot print KOT - order or KOT data missing for order ${order?._id}:`, {
+        hasOrder: !!order,
+        hasKotLines: !!(order && order.kotLines),
+        kotLinesLength: order?.kotLines?.length || 0,
       });
+    }
 
     return res.json(order);
   } catch (err) {

@@ -78,6 +78,17 @@ function formatKOT(order, kot, kotIndex = 0) {
  * Print KOT to EPSON TM-T82X printer
  */
 async function printKOT(order, kot, kotIndex = 0) {
+  // Validate inputs
+  if (!order) {
+    console.error("[PRINTER] Cannot print KOT - order is missing");
+    return { success: false, error: "Order is required" };
+  }
+  
+  if (!kot) {
+    console.error(`[PRINTER] Cannot print KOT - KOT data is missing for order ${order._id}`);
+    return { success: false, error: "KOT data is required" };
+  }
+
   if (!PRINTER_ENABLED) {
     console.log("[PRINTER] Printing disabled in configuration");
     return { success: false, message: "Printer disabled" };
@@ -85,11 +96,19 @@ async function printKOT(order, kot, kotIndex = 0) {
 
   // Validate printer configuration
   if (!PRINTER_IP || !PRINTER_PORT) {
-    console.error("[PRINTER] Printer IP or Port not configured");
+    console.error("[PRINTER] Printer IP or Port not configured", {
+      PRINTER_IP: PRINTER_IP || "NOT SET",
+      PRINTER_PORT: PRINTER_PORT || "NOT SET",
+    });
     return { success: false, error: "Printer configuration missing" };
   }
 
-  console.log(`[PRINTER] Attempting to print KOT for order ${order._id} to ${PRINTER_IP}:${PRINTER_PORT}`);
+  console.log(`[PRINTER] Attempting to print KOT for order ${order._id} to ${PRINTER_IP}:${PRINTER_PORT}`, {
+    orderId: order._id,
+    kotIndex: kotIndex,
+    hasKotItems: !!(kot && kot.items && Array.isArray(kot.items)),
+    kotItemsCount: kot?.items?.length || 0,
+  });
 
   try {
     // Create network printer connection
