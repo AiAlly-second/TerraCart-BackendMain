@@ -1006,7 +1006,7 @@ exports.rejectCafeAdmin = async (req, res) => {
   }
 };
 
-// @desc    Toggle cafe admin active/inactive status (franchise admin or super admin)
+// @desc    Toggle cart admin active/inactive status (franchise admin or super admin)
 // @route   PATCH /api/users/:id/toggle-cafe-status
 exports.toggleCafeStatus = async (req, res) => {
   try {
@@ -1016,28 +1016,28 @@ exports.toggleCafeStatus = async (req, res) => {
 
     const user = await User.findById(id);
     if (!user) {
-      return res.status(404).json({ message: "Cafe admin not found" });
+      return res.status(404).json({ message: "Cart admin not found" });
     }
 
     if (user.role !== "admin") {
-      return res.status(400).json({ message: "User is not a cafe admin" });
+      return res.status(400).json({ message: "User is not a cart admin" });
     }
 
-    // For franchise admin: verify the cafe belongs to their franchise
+    // For franchise admin: verify the cart belongs to their franchise
     // For super admin: allow toggling any cart
     if (userRole === "franchise_admin") {
       if (user.franchiseId?.toString() !== userId.toString()) {
         return res.status(403).json({
           message:
-            "Access denied. This cafe does not belong to your franchise.",
+            "Access denied. This cart does not belong to your franchise.",
         });
       }
 
-      // For franchise admin: check if cafe is approved first
+      // For franchise admin: check if cart is approved first
       if (!user.isApproved) {
         return res.status(400).json({
           message:
-            "Cannot activate/deactivate an unapproved cafe. Please approve the cafe first.",
+            "Cannot activate/deactivate an unapproved cart. Please approve the cart first.",
         });
       }
     }
@@ -1077,11 +1077,11 @@ exports.toggleCafeStatus = async (req, res) => {
     const userResponse = user.toObject();
     delete userResponse.password;
 
-    let message = `Cafe ${
+    let message = `Cart ${
       user.isActive ? "activated" : "deactivated"
     } successfully`;
     if (userRole === "super_admin" && wasNotApproved) {
-      message = `Cafe approved and ${
+      message = `Cart approved and ${
         user.isActive ? "activated" : "deactivated"
       } successfully`;
     }
@@ -1092,7 +1092,7 @@ exports.toggleCafeStatus = async (req, res) => {
       user: userResponse,
     });
   } catch (error) {
-    console.error("[TOGGLE CAFE] Error:", error);
+    console.error("[TOGGLE CART] Error:", error);
     res.status(500).json({ message: error.message });
   }
 };

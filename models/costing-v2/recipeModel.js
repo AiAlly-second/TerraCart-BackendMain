@@ -151,32 +151,9 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         refType: "purchase",
       });
 
-      // Check if ingredient has FIFO layers with purchaseId that belong to THIS cart
-      // IMPORTANT: We must verify each FIFO layer's purchase belongs to this cart
-      let hasFifoLayersForThisCart = false;
-      if (
-        ingredient.fifoLayers &&
-        Array.isArray(ingredient.fifoLayers) &&
-        ingredient.fifoLayers.length > 0
-      ) {
-        // Check each FIFO layer to see if its purchase belongs to this cart
-        for (const layer of ingredient.fifoLayers) {
-          if (layer.purchaseId) {
-            const purchase = await Purchase.findById(layer.purchaseId);
-            if (
-              purchase &&
-              purchase.cartId &&
-              purchase.cartId.toString() === cartId.toString()
-            ) {
-              hasFifoLayersForThisCart = true;
-              break; // Found at least one purchase for this cart
-            }
-          }
-        }
-      }
-
       // Only consider purchases if they belong to THIS cart
-      hasPurchases = purchaseTransaction != null || hasFifoLayersForThisCart;
+      // Use transactions to check for purchases (not FIFO layers)
+      hasPurchases = purchaseTransaction != null;
 
       // #region agent log
       logDebug(
@@ -188,18 +165,18 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
           cartId: cartId,
           hasPurchases: hasPurchases,
           hasTransaction: purchaseTransaction != null,
-          hasFifoLayersForThisCart: hasFifoLayersForThisCart,
         },
         "C"
       );
       // #endregion
     } else {
-      // Check if ingredient has any FIFO layers with purchaseId (global check)
-      hasPurchases =
-        ingredient.fifoLayers &&
-        Array.isArray(ingredient.fifoLayers) &&
-        ingredient.fifoLayers.length > 0 &&
-        ingredient.fifoLayers.some((layer) => layer.purchaseId != null);
+      // Check if ingredient has any purchase transactions (global check)
+      const anyPurchaseTransaction = await InventoryTransactionV2.findOne({
+        ingredientId: item.ingredientId,
+        type: "IN",
+        refType: "purchase",
+      });
+      hasPurchases = anyPurchaseTransaction != null;
       // #region agent log
       logDebug(
         "recipeModel.js:120",
@@ -251,25 +228,27 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         cartSpecificQty = ingredient.qtyOnHand || 0;
         hasAvailableInventory = cartSpecificQty > 0;
       } else {
-        // For shared ingredients, calculate cart-specific quantity from FIFO layers
-        // Sum up remainingQty from FIFO layers that came from this cart's purchases
-        // This ensures cart-wise inventory isolation
-        if (ingredient.fifoLayers && Array.isArray(ingredient.fifoLayers)) {
-          for (const layer of ingredient.fifoLayers) {
-            if (layer.purchaseId && layer.remainingQty > 0) {
-              // Check if this purchase belongs to this cart
-              const purchase = await Purchase.findById(layer.purchaseId);
-              if (
-                purchase &&
-                purchase.cartId &&
-                purchase.cartId.toString() === cartId.toString()
-              ) {
-                cartSpecificQty += layer.remainingQty || 0;
-              }
-            }
+        // For shared ingredients, calculate cart-specific quantity from transactions
+        // This uses weighted average costing (same as inventory calculation)
+        const cartTransactions = await InventoryTransactionV2.find({
+          ingredientId: item.ingredientId,
+          cartId: cartId,
+        }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
+
+        let totalQty = 0;
+        for (const txn of cartTransactions) {
+          const txnQty = txn.qtyInBaseUnit || txn.qty;
+          if (txn.type === "IN" || txn.type === "RETURN") {
+            totalQty += txnQty;
+          } else if (txn.type === "OUT" || txn.type === "WASTE") {
+            totalQty -= txnQty;
+            if (totalQty < 0) totalQty = 0;
           }
         }
-        hasAvailableInventory = cartSpecificQty > 0;
+        cartSpecificQty = Math.max(0, totalQty);
+        // Has inventory if there are any purchase transactions (even if stock is now 0)
+        // This allows BOM to show cost based on purchases, not just current stock
+        hasAvailableInventory = cartTransactions.some(txn => txn.type === "IN" && txn.refType === "purchase");
         // #region agent log
         logDebug(
           "recipeModel.js:220",
@@ -333,59 +312,72 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       continue; // Skip this ingredient in cost calculation
     }
 
-    // Get weighted average cost per base unit
-    // For cart-specific ingredients, use the ingredient's weighted average (already calculated)
-    // For shared ingredients with cartId, calculate cart-specific weighted average from transactions
+    // Get last purchase cost per base unit (matching inventory calculation)
+    // This ensures BOM cost matches what's shown in inventory
     let ingredientCost = 0;
     
     if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
-      // Cart-specific ingredient - use weighted average directly
-      ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-    } else if (cartId) {
-      // Shared ingredient with cartId - calculate cart-specific weighted average from transactions
-      // But if no cart-specific transactions exist, use global cost
-      const cartTransactions = await InventoryTransactionV2.find({
+      // Cart-specific ingredient - find last purchase transaction
+      const lastPurchase = await InventoryTransactionV2.findOne({
         ingredientId: item.ingredientId,
         cartId: cartId,
-      }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
-
-      let totalQty = 0;
-      let weightedAvgCost = 0;
-
-      for (const txn of cartTransactions) {
-        const txnQty = txn.qtyInBaseUnit || txn.qty;
-        if (txn.type === "IN" || txn.type === "RETURN") {
-          // Add to inventory - recalculate weighted average
-          const txnCost = txn.costAllocated || 0;
-          if (totalQty > 0 && txnQty > 0) {
-            // Weighted average: (existing total value + new value) / (existing qty + new qty)
-            const existingTotalValue = totalQty * weightedAvgCost;
-            weightedAvgCost = (existingTotalValue + txnCost) / (totalQty + txnQty);
-          } else if (txnQty > 0) {
-            // First purchase
-            weightedAvgCost = txnCost / txnQty;
-          }
-          totalQty += txnQty;
-        } else if (txn.type === "OUT" || txn.type === "WASTE") {
-          // Remove from inventory (cost already allocated, just reduce quantity)
-          totalQty -= txnQty;
-          if (totalQty < 0) totalQty = 0;
-          // Weighted average cost doesn't change on consumption
+        type: "IN",
+        refType: "purchase",
+      }).sort({ date: -1 }); // Sort by date descending to get most recent
+      
+      if (lastPurchase) {
+        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
         }
       }
-
-      // Use calculated weighted average cost if we have cart-specific transactions
-      // Otherwise, use global cost (which includes purchases from all carts for shared ingredients)
-      if (cartTransactions.length > 0 && totalQty > 0 && weightedAvgCost > 0) {
-        ingredientCost = weightedAvgCost;
-      } else {
-        // No cart-specific transactions or stock - use global cost
-        // This ensures shared ingredients reflect purchases from all carts
+      
+      // Fallback to ingredient's currentCostPerBaseUnit if no purchase found
+      if (ingredientCost <= 0) {
+        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+      }
+    } else if (cartId) {
+      // Shared ingredient with cartId - find last purchase for this cart
+      const lastPurchase = await InventoryTransactionV2.findOne({
+        ingredientId: item.ingredientId,
+        cartId: cartId,
+        type: "IN",
+        refType: "purchase",
+      }).sort({ date: -1 }); // Sort by date descending to get most recent
+      
+      if (lastPurchase) {
+        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+        }
+      }
+      
+      // Fallback to global cost if no cart-specific purchase found
+      if (ingredientCost <= 0) {
         ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
       }
     } else {
-      // Global/shared ingredient - use weighted average directly
-      ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+      // Global/shared ingredient - find last purchase (any cart)
+      const lastPurchase = await InventoryTransactionV2.findOne({
+        ingredientId: item.ingredientId,
+        type: "IN",
+        refType: "purchase",
+      }).sort({ date: -1 }); // Sort by date descending to get most recent
+      
+      if (lastPurchase) {
+        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+        }
+      }
+      
+      // Fallback to ingredient's currentCostPerBaseUnit if no purchase found
+      if (ingredientCost <= 0) {
+        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+      }
     }
 
     if (ingredientCost <= 0) {
@@ -406,7 +398,31 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
     }
 
     // Convert to base unit
-    const qtyInBaseUnit = ingredient.convertToBaseUnit(item.qty, item.uom);
+    let qtyInBaseUnit;
+    try {
+      qtyInBaseUnit = ingredient.convertToBaseUnit(item.qty, item.uom);
+    } catch (conversionError) {
+      // Handle unit conversion errors gracefully
+      ingredientsWithoutPurchases.push(
+        `${ingredient.name || item.ingredientId?.toString()} (invalid unit conversion: ${item.uom} to ${ingredient.baseUnit})`
+      );
+      // #region agent log
+      logDebug(
+        "recipeModel.js:388",
+        "Unit conversion error - skipping ingredient",
+        {
+          ingredientId: item.ingredientId,
+          ingredientName: ingredient.name,
+          recipeUom: item.uom,
+          ingredientBaseUnit: ingredient.baseUnit,
+          error: conversionError.message,
+        },
+        "C"
+      );
+      // #endregion
+      continue; // Skip this ingredient
+    }
+    
     const cost = qtyInBaseUnit * ingredientCost;
     totalCost += cost;
     hasAnyValidCosts = true; // Mark that we have at least one valid cost

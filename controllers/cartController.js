@@ -295,7 +295,6 @@ exports.updateCartSettings = async (req, res) => {
     }
 
     const {
-      name,
       pickupEnabled,
       deliveryEnabled,
       deliveryRadius,
@@ -341,15 +340,6 @@ exports.updateCartSettings = async (req, res) => {
 
     // Update settings
     const updateData = {};
-    // Update name if provided
-    if (name !== undefined && name !== null) {
-      const trimmedName = name.trim();
-      // Only update if name is not empty (required field)
-      if (trimmedName !== '') {
-        updateData.name = trimmedName;
-      }
-      // If empty, don't update name (keep existing value)
-    }
     if (pickupEnabled !== undefined) updateData.pickupEnabled = pickupEnabled;
     if (deliveryEnabled !== undefined) updateData.deliveryEnabled = deliveryEnabled;
     if (deliveryRadius !== undefined) updateData.deliveryRadius = deliveryRadius;

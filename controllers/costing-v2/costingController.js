@@ -68,7 +68,7 @@ const decodeHtmlEntities = (str) => {
 /**
  * @route   GET /api/costing-v2/suppliers
  * @desc    Get suppliers filtered by cart/kiosk/cafe
- * @note    Suppliers are now cart-specific (have cartId field)
+ * @note    Suppliers are now cart-specific (have outletId field)
  */
 exports.getSuppliers = async (req, res) => {
   try {
@@ -78,7 +78,7 @@ exports.getSuppliers = async (req, res) => {
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
 
-    // Apply role-based filtering using buildCostingQuery (suppliers now have cartId)
+    // Apply role-based filtering using buildCostingQuery (suppliers now have outletId)
     const costingFilter = await buildCostingQuery(req.user, filter);
 
     console.log(
@@ -102,72 +102,26 @@ exports.getSuppliers = async (req, res) => {
  */
 exports.createSupplier = async (req, res) => {
   try {
-    // Automatically set cartId and franchiseId based on user role
+    // Use setOutletContext to automatically set cartId and franchiseId based on user role
     const supplierData = { ...req.body };
-
-    if (req.user.role === "admin") {
-      // Cart admin - supplier belongs to their cart
-      supplierData.cartId = req.user._id;
-      supplierData.franchiseId = req.user.franchiseId || req.user._id; // Fallback to _id if no franchiseId
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - can specify cartId or create for a specific cart
-      // If cartId is provided in body, validate it belongs to their franchise
-      if (supplierData.cartId) {
-        const outlet = await User.findById(supplierData.cartId);
-        if (
-          !outlet ||
-          outlet.franchiseId?.toString() !== req.user._id.toString()
-        ) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied: Kiosk does not belong to your franchise",
-          });
-        }
-        supplierData.franchiseId = req.user._id;
-      } else {
-        // No cartId specified - cannot create supplier (suppliers are cart-specific)
-        return res.status(400).json({
-          success: false,
-          message:
-            "cartId is required. Please specify which cart/kiosk this supplier belongs to.",
-        });
-      }
-    } else if (req.user.role === "super_admin") {
-      // Super admin - must specify cartId and franchiseId
-      if (!supplierData.cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required",
-        });
-      }
-      if (!supplierData.franchiseId) {
-        // Try to get franchiseId from the outlet
-        const outlet = await User.findById(supplierData.cartId);
-        if (outlet && outlet.franchiseId) {
-          supplierData.franchiseId = outlet.franchiseId;
-        } else {
-          return res.status(400).json({
-            success: false,
-            message:
-              "franchiseId is required or outlet must have a franchiseId",
-          });
-        }
-      }
-    } else {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied: Invalid role",
-      });
+    
+    // Handle outletId from request body (convert to cartId for consistency)
+    if (supplierData.outletId && !supplierData.cartId) {
+      supplierData.cartId = supplierData.outletId;
+      delete supplierData.outletId;
     }
+    
+    // Use setOutletContext utility to set cartId and franchiseId
+    const data = await setOutletContext(req.user, supplierData, true);
 
     console.log("[CREATE_SUPPLIER] Creating supplier with:", {
-      name: supplierData.name,
-      cartId: supplierData.cartId,
-      franchiseId: supplierData.franchiseId,
+      name: data.name,
+      cartId: data.cartId,
+      franchiseId: data.franchiseId,
       userRole: req.user.role,
     });
 
-    const supplier = new Supplier(supplierData);
+    const supplier = new Supplier(data);
     await supplier.save();
     res.status(201).json({ success: true, data: supplier });
   } catch (error) {
@@ -287,7 +241,7 @@ exports.getIngredients = async (req, res) => {
       lowStock,
       search,
       isActive,
-      cartId,
+      outletId,
       category,
       storageLocation,
     } = req.query;
@@ -296,19 +250,19 @@ exports.getIngredients = async (req, res) => {
     if (uom) filter.uom = uom;
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.cartId = outletId;
     if (category) filter.category = category;
     if (storageLocation) filter.storageLocation = storageLocation;
 
     // Apply role-based filtering
-    // For cart admins (role: "admin"), always filter by their cartId (req.user._id)
+    // For cart admins (role: "admin"), always filter by their outletId (req.user._id)
     // This ensures cart admins only see ingredients belonging to their cart/kiosk
-    // For franchise/super admins, can see shared ingredients (cartId=null) or filter by specific cartId.
+    // For franchise/super admins, can see shared ingredients (outletId=null) or filter by specific outletId.
     // Additionally, for franchise_admin we include shared/global ingredients (franchiseId=null).
     const shouldSkipOutletFilter =
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
-      !cartId;
+      !outletId;
     const costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipOutletFilter,
       includeShared: true,
@@ -317,7 +271,7 @@ exports.getIngredients = async (req, res) => {
     // Log filtering for debugging
     if (req.user.role === "admin") {
       console.log(
-        "[GET_INGREDIENTS] Cart admin filter - cartId:",
+        "[GET_INGREDIENTS] Cart admin filter - outletId:",
         req.user._id.toString(),
         "Filter:",
         JSON.stringify(costingFilter)
@@ -329,142 +283,323 @@ exports.getIngredients = async (req, res) => {
       .populate("cartId", "name cafeName")
       .sort({ category: 1, name: 1 }); // Sort by category first, then name
 
-    // For Cart Admin, calculate cart-specific qtyOnHand and currentCostPerBaseUnit
+    // For Cart Admin, calculate outlet-specific qtyOnHand and currentCostPerBaseUnit
     // This ensures each cart admin only sees their own inventory quantities and costs
     if (req.user.role === "admin") {
-      const cartId = req.user._id;
+      const outletId = req.user._id;
       for (const ingredient of ingredients) {
-        let cartSpecificQty = 0;
-        let cartSpecificCost = 0;
+        let outletSpecificQty = 0;
+        let outletSpecificCost = 0;
 
-        // If ingredient is cart-specific and belongs to this cart, use values directly
+        // If ingredient is outlet-specific and belongs to this outlet, recalculate from transactions
+        // This ensures we use actual transaction-based stock, not just database qtyOnHand
         if (
           ingredient.cartId &&
-          ingredient.cartId.toString() === cartId.toString()
+          ingredient.cartId.toString() === outletId.toString()
         ) {
-          // Already cart-specific, qtyOnHand and currentCostPerBaseUnit are correct
+          // Cart-specific ingredient - recalculate from transactions to get accurate stock
+          const cartTransactions = await InventoryTransaction.find({
+            ingredientId: ingredient._id,
+            cartId: outletId,
+          }).sort({ date: 1 });
+
+          // Debug: Also check if there are any transactions at all for this ingredient
+          const allTransactions = await InventoryTransaction.find({
+            ingredientId: ingredient._id,
+          });
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[STOCK DEBUG] Cart-specific ingredient ${ingredient.name}:`, {
+              ingredientId: ingredient._id,
+              cartId: ingredient.cartId,
+              outletId: outletId,
+              transactionsWithCartId: cartTransactions.length,
+              allTransactions: allTransactions.length,
+              qtyOnHand: ingredient.qtyOnHand,
+            });
+          }
+
+          let totalQty = 0;
+          let lastPurchaseCost = 0;
+
+          // If we have transactions, calculate from them
+          if (cartTransactions.length > 0) {
+            // Find the most recent purchase transaction (IN type) for last purchase cost
+            const purchaseTransactions = cartTransactions
+              .filter(txn => txn.type === "IN")
+              .sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
+            
+            if (purchaseTransactions.length > 0) {
+              const lastPurchase = purchaseTransactions[0];
+              const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+              const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+              if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+                lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
+                console.log(`[INVENTORY COST] ${ingredient.name}: Last purchase cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
+              }
+            }
+            
+            // Calculate total quantity from all transactions
+            for (const txn of cartTransactions) {
+              const txnQty = txn.qtyInBaseUnit || txn.qty;
+              if (txn.type === "IN" || txn.type === "RETURN") {
+                totalQty += txnQty;
+              } else if (txn.type === "OUT" || txn.type === "WASTE") {
+                totalQty -= txnQty;
+                if (totalQty < 0) totalQty = 0;
+              }
+            }
+            outletSpecificQty = Math.max(0, totalQty);
+            
+            // CRITICAL: Cost MUST be 0 when stock is 0
+            if (outletSpecificQty <= 0) {
+              outletSpecificCost = 0;
+            } else if (lastPurchaseCost > 0) {
+              outletSpecificCost = lastPurchaseCost;
+            } else {
+              // Use database cost only if stock > 0 and no purchase found
+              outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+            }
+          } else {
+            // No transactions found - use ingredient's qtyOnHand and cost directly
+            // This handles cases where stock was set manually or before transaction tracking
+            outletSpecificQty = Number(ingredient.qtyOnHand) || 0;
+            
+            // CRITICAL: If stock is 0, cost MUST be 0 (no exceptions)
+            if (outletSpecificQty <= 0) {
+              outletSpecificCost = 0;
+            } else {
+              // Stock > 0 - use database cost
+              outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+            }
+            
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[STOCK DEBUG] Cart-specific ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${outletSpecificQty}, cost: ${outletSpecificCost}`);
+            }
+          }
+
+          // Update ingredient values
+          ingredient.qtyOnHand = outletSpecificQty;
+          
+          // CRITICAL: Set cost - MUST be 0 when stock is 0 (absolute rule)
+          // This check happens AFTER all cost calculations to ensure it's never overridden
+          if (outletSpecificQty <= 0) {
+            // Stock is 0 - cost MUST be 0 (no exceptions)
+            ingredient.currentCostPerBaseUnit = 0;
+          } else {
+            // Stock > 0 - use calculated cost
+            ingredient.currentCostPerBaseUnit = outletSpecificCost;
+          }
+          
+          // Final safety check - ensure cost is 0 if stock is 0 (absolute guarantee)
+          // This is a redundant check to catch any edge cases
+          if (ingredient.qtyOnHand <= 0) {
+            ingredient.currentCostPerBaseUnit = 0;
+          }
+          
+          ingredient.markModified("qtyOnHand");
+          ingredient.markModified("currentCostPerBaseUnit");
           continue;
         }
 
-        // For shared ingredients, calculate cart-specific values from transactions
-        // Calculate stock by summing IN/RETURN transactions and subtracting OUT/WASTE transactions
+        // For shared ingredients, calculate outlet-specific values from transactions
+        // This uses weighted average costing (same as BOM calculation)
+        // IMPORTANT: For shared ingredients, we need to check BOTH:
+        // 1. Outlet-specific transactions (cartId = outletId)
+        // 2. Global transactions (cartId = null or missing) - for shared ingredients purchased globally
         const cartTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
-          cartId: cartId,
-        }).sort({ date: 1 }); // Sort ascending to process chronologically
+          $or: [
+            { cartId: outletId },
+            { cartId: null }, // Global transactions
+            { cartId: { $exists: false } } // Also check for missing cartId field
+          ]
+        }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
+
+        // Debug: Check transaction counts
+        const outletSpecificTransactions = await InventoryTransaction.find({
+          ingredientId: ingredient._id,
+          cartId: outletId,
+        });
+        const globalTransactions = await InventoryTransaction.find({
+          ingredientId: ingredient._id,
+          cartId: null,
+        });
+        const allTransactions = await InventoryTransaction.find({
+          ingredientId: ingredient._id,
+        });
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name}:`, {
+            ingredientId: ingredient._id,
+            cartId: ingredient.cartId,
+            outletId: outletId,
+            outletSpecificTransactions: outletSpecificTransactions.length,
+            globalTransactions: globalTransactions.length,
+            totalTransactions: cartTransactions.length,
+            allTransactions: allTransactions.length,
+            qtyOnHand: ingredient.qtyOnHand,
+          });
+        }
 
         let totalQty = 0;
-        for (const txn of cartTransactions) {
-          const txnQty = txn.qtyInBaseUnit || txn.qty;
-          if (txn.type === "IN" || txn.type === "RETURN") {
-            // Add to inventory
-            totalQty += txnQty;
-          } else if (txn.type === "OUT" || txn.type === "WASTE") {
-            // Remove from inventory
-            totalQty -= txnQty;
-            if (totalQty < 0) totalQty = 0;
-          }
-        }
-        cartSpecificQty = Math.max(0, totalQty);
+        let lastPurchaseCost = 0;
 
-        // For new carts with no cart-specific transactions, set quantity and cost to 0
-        // This ensures new carts start with zero stock and zero cost, not random values from shared ingredients
-        if (cartSpecificQty === 0 && cartTransactions.length === 0) {
-          cartSpecificQty = 0;
-          cartSpecificCost = 0;
-        }
-
-        // Calculate weighted average cost from all cart-specific transactions
-        // This matches the BOM calculation method for consistency
-        // The weighted average cost is calculated from purchase transactions (IN type)
-        // and represents the average cost per base unit of the current stock
+        // If we have transactions, calculate from them
         if (cartTransactions.length > 0) {
-          let totalQtyForCost = 0;
-          let weightedAvgCost = 0;
-          let totalValue = 0; // Track total value for verification
-
+          console.log(`[INVENTORY COST] ${ingredient.name}: Processing ${cartTransactions.length} transactions for cost calculation`);
+          
+          // Find the most recent purchase transaction (IN type) for last purchase cost
+          const purchaseTransactions = cartTransactions
+            .filter(txn => txn.type === "IN")
+            .sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
+          
+          if (purchaseTransactions.length > 0) {
+            const lastPurchase = purchaseTransactions[0];
+            const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+            const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+            if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+              lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
+              console.log(`[INVENTORY COST] ${ingredient.name}: Last purchase cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
+            }
+          }
+          
+          // Calculate total quantity from all transactions
           for (const txn of cartTransactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty;
             if (txn.type === "IN" || txn.type === "RETURN") {
-              // Add to inventory - recalculate weighted average
-              const txnCost = txn.costAllocated || 0;
-              if (totalQtyForCost > 0 && txnQty > 0 && txnCost > 0) {
-                // Weighted average: (existing total value + new value) / (existing qty + new qty)
-                const existingTotalValue = totalQtyForCost * weightedAvgCost;
-                weightedAvgCost =
-                  (existingTotalValue + txnCost) / (totalQtyForCost + txnQty);
-              } else if (txnQty > 0 && txnCost > 0) {
-                // First purchase - cost per base unit
-                weightedAvgCost = txnCost / txnQty;
-              }
-              totalQtyForCost += txnQty;
-              totalValue += txnCost; // Track total purchase value
+              totalQty += txnQty;
             } else if (txn.type === "OUT" || txn.type === "WASTE") {
-              // Remove from inventory (cost already allocated, just reduce quantity)
-              // The weighted average cost doesn't change on consumption
-              totalQtyForCost -= txnQty;
-              if (totalQtyForCost < 0) totalQtyForCost = 0;
+              totalQty -= txnQty;
+              if (totalQty < 0) totalQty = 0;
             }
           }
-
-          // Verify: The weighted average cost should match: totalValue / totalQtyForCost (if all stock is from purchases)
-          // But we use the calculated weightedAvgCost which accounts for consumption
-          // Use calculated weighted average cost if we have a valid cost
-          // This represents the average cost per base unit of the current stock
-          if (weightedAvgCost > 0 && cartSpecificQty > 0) {
-            cartSpecificCost = weightedAvgCost;
-            // Debug: Log cost calculation for verification
-            if (process.env.NODE_ENV === "development") {
-              console.log(
-                `[Inventory Cost] ${
-                  ingredient.name
-                }: Stock=${cartSpecificQty} ${
-                  ingredient.baseUnit
-                }, WeightedAvgCost=₹${weightedAvgCost.toFixed(
-                  4
-                )}/baseUnit, TotalValue=₹${(
-                  cartSpecificQty * weightedAvgCost
-                ).toFixed(2)}, TotalPurchaseValue=₹${totalValue.toFixed(2)}`
-              );
-            }
-          } else if (weightedAvgCost > 0) {
-            // Stock is 0 but we have historical cost - use it for when stock is replenished
-            cartSpecificCost = weightedAvgCost;
+          console.log(`[INVENTORY COST] ${ingredient.name}: Final calculated cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}, total qty = ${totalQty} ${ingredient.baseUnit}`);
+          outletSpecificQty = Math.max(0, totalQty);
+        } else {
+          // No transactions found for shared ingredient
+          // For shared ingredients, if there are no transactions at all, use the ingredient's qtyOnHand
+          // This handles cases where stock was set manually or before transaction tracking
+          // OR if the ingredient has global stock that should be visible to all outlets
+          outletSpecificQty = Number(ingredient.qtyOnHand) || 0;
+          lastPurchaseCost = 0;
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${outletSpecificQty}`);
           }
         }
-
-        // Only use global cost as fallback if we have transactions but cost is 0
-        // For new carts with no transactions, keep cost at 0 (don't inherit from other carts)
-        if (cartSpecificCost <= 0 && cartTransactions.length > 0) {
-          // We have transactions but cost is 0 - use global cost as fallback
-          cartSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+        
+        // CRITICAL: For inventory value calculation, cost MUST be 0 when stock is 0
+        // This is the most important rule - no exceptions
+        // Check stock FIRST before calculating cost
+        if (outletSpecificQty <= 0) {
+          // Stock is 0 - cost MUST be 0 regardless of any other factors
+          // This is the absolute rule - no exceptions, no fallbacks
+          outletSpecificCost = 0;
+        } else {
+          // Stock > 0 - use last purchase cost
+          if (lastPurchaseCost > 0) {
+            // We have a last purchase - use its cost
+            outletSpecificCost = lastPurchaseCost;
+          } else {
+            // No purchase found - use ingredient's cost from database
+            // This handles cases where stock exists but no transactions were recorded
+            outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+          }
         }
-        // If no transactions exist, cartSpecificCost stays at 0 (new cart, no purchases yet)
+        
+        // ABSOLUTE FINAL CHECK: If stock is 0, cost MUST be 0 (no exceptions)
+        // This overrides any previous cost calculation
+        if (outletSpecificQty <= 0) {
+          outletSpecificCost = 0;
+        }
 
-        // Override qtyOnHand and currentCostPerBaseUnit with cart-specific values
-        ingredient.qtyOnHand = cartSpecificQty;
-        // Use the calculated cost (either cart-specific or global fallback)
-        // This ensures accurate total value calculation
-        ingredient.currentCostPerBaseUnit = cartSpecificCost;
+        // Override qtyOnHand and currentCostPerBaseUnit with outlet-specific values
+        ingredient.qtyOnHand = outletSpecificQty;
+        
+        // CRITICAL: Set cost - MUST be 0 when stock is 0 (absolute rule)
+        // This check happens AFTER all cost calculations to ensure it's never overridden
+        if (outletSpecificQty <= 0) {
+          // Stock is 0 - cost MUST be 0 (no exceptions)
+          ingredient.currentCostPerBaseUnit = 0;
+        } else {
+          // Stock > 0 - use calculated cost
+          ingredient.currentCostPerBaseUnit = outletSpecificCost;
+        }
+        
+        // Final safety check: ensure cost is 0 if stock is 0 (absolute guarantee)
+        // This is a redundant check to catch any edge cases
+        if (ingredient.qtyOnHand <= 0) {
+          ingredient.currentCostPerBaseUnit = 0;
+        }
+        
+        // CRITICAL: Absolute final check - use threshold to catch any floating point issues
+        const finalQtyCheck = Math.abs(Number(ingredient.qtyOnHand) || 0);
+        const finalCostCheck = Math.abs(Number(ingredient.currentCostPerBaseUnit) || 0);
+        
+        if (finalQtyCheck < 0.0001 && finalCostCheck > 0) {
+          // Stock is essentially 0 but cost is > 0 - force cost to 0
+          if (process.env.NODE_ENV === 'development') {
+            console.warn(`[INVENTORY VALUE BUG] Ingredient ${ingredient.name} has qtyOnHand=${finalQtyCheck} but cost=${finalCostCheck}. Forcing cost to 0.`);
+          }
+          ingredient.currentCostPerBaseUnit = 0;
+          ingredient.markModified("currentCostPerBaseUnit");
+        }
+        
         // Mark as modified so it's included in the response
         ingredient.markModified("qtyOnHand");
         ingredient.markModified("currentCostPerBaseUnit");
         // #region agent log
         logDebug(
           "costingController.js:395",
-          "Updated ingredient with cart-specific values",
+          "Updated ingredient with outlet-specific values",
           {
             ingredientId: ingredient._id,
             ingredientName: ingredient.name,
-            cartId: cartId,
-            cartSpecificQty: cartSpecificQty,
-            cartSpecificCost: cartSpecificCost,
+            outletId: outletId,
+            outletSpecificQty: outletSpecificQty,
+            outletSpecificCost: outletSpecificCost,
             originalQtyOnHand: ingredient.qtyOnHand,
             originalCost: ingredient.currentCostPerBaseUnit,
           },
           "D"
         );
         // #endregion
+      }
+    }
+
+    // FINAL SAFETY CHECK: Ensure ALL ingredients have cost = 0 when stock = 0
+    // This is a critical check to prevent any inventory value calculation errors
+    // Use strict comparison with threshold to catch floating point issues
+    for (const ingredient of ingredients) {
+      const qty = Math.abs(Number(ingredient.qtyOnHand) || 0);
+      let cost = Math.abs(Number(ingredient.currentCostPerBaseUnit) || 0);
+      
+      // CRITICAL: If stock is 0 or very close to 0 (within 0.0001), cost MUST be 0
+      // This catches any edge cases where stock might be 0.00001 or similar
+      if (qty < 0.0001) {
+        // Stock is essentially 0 - force cost to 0 regardless of any other factors
+        if (cost > 0) {
+          if (process.env.NODE_ENV === 'development') {
+            console.warn(`[FINAL CHECK] Forcing cost to 0 for ${ingredient.name}: qty=${qty}, cost=${cost}`);
+          }
+          ingredient.currentCostPerBaseUnit = 0;
+          cost = 0; // Update local variable too
+          ingredient.markModified("currentCostPerBaseUnit");
+        }
+      }
+      
+      // Double-check: ensure cost is exactly 0 when qty is exactly 0
+      if (qty === 0 && cost !== 0) {
+        ingredient.currentCostPerBaseUnit = 0;
+        ingredient.markModified("currentCostPerBaseUnit");
+      }
+      
+      // TRIPLE-CHECK: Convert to plain object and verify before response
+      // This ensures the value is actually 0 in the response, not just in the Mongoose document
+      if (qty < 0.0001) {
+        // Force to 0 in the response object
+        ingredient.currentCostPerBaseUnit = 0;
       }
     }
 
@@ -475,7 +610,39 @@ exports.getIngredients = async (req, res) => {
       );
     }
 
-    res.json({ success: true, data: ingredients });
+    // ABSOLUTE FINAL CHECK: Before sending response, ensure cost = 0 when stock = 0
+    // Convert to plain objects and verify one last time
+    const sanitizedIngredients = ingredients.map((ing) => {
+      const qty = Math.abs(Number(ing.qtyOnHand) || 0);
+      let cost = Math.abs(Number(ing.currentCostPerBaseUnit) || 0);
+      
+      // CRITICAL: If stock is 0, cost MUST be 0 (absolute rule)
+      if (qty < 0.0001) {
+        cost = 0;
+      }
+      
+      // Convert to plain object and set cost explicitly
+      const plainIng = ing.toObject ? ing.toObject() : ing;
+      
+      // CRITICAL: Force cost to 0 if stock is 0 (no exceptions)
+      if (qty < 0.0001) {
+        plainIng.currentCostPerBaseUnit = 0;
+        cost = 0; // Ensure local variable is also 0
+      } else {
+        // Stock > 0 - use the calculated cost
+        plainIng.currentCostPerBaseUnit = cost;
+      }
+      
+      // Debug logging for cart admin in development
+      if (process.env.NODE_ENV === 'development' && req.user.role === 'admin' && qty < 0.0001 && cost > 0) {
+        console.error(`[SANITIZATION ERROR] ${ing.name}: qty=${qty}, cost=${cost} - forcing cost to 0`);
+        plainIng.currentCostPerBaseUnit = 0;
+      }
+      
+      return plainIng;
+    });
+
+    res.json({ success: true, data: sanitizedIngredients });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -493,7 +660,7 @@ exports.createIngredient = async (req, res) => {
       bodyData.category = decodeHtmlEntities(bodyData.category);
     }
 
-    // Ingredients can be shared (cartId optional) or kiosk-specific
+    // Ingredients can be shared (outletId optional) or kiosk-specific
     const data = await setOutletContext(req.user, bodyData, false);
     const ingredient = new Ingredient(data);
     await ingredient.save();
@@ -502,10 +669,10 @@ exports.createIngredient = async (req, res) => {
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.cartId) {
+    if (ingredient.outletId) {
       emitToCafe(
         io,
-        ingredient.cartId.toString(),
+        ingredient.outletId.toString(),
         "ingredient:created",
         ingredient
       );
@@ -534,8 +701,8 @@ exports.updateIngredient = async (req, res) => {
     // Check access control - cart admins can only update their own ingredients
     if (req.user.role === "admin") {
       if (
-        existingIngredient.cartId &&
-        existingIngredient.cartId.toString() !== req.user._id.toString()
+        existingIngredient.outletId &&
+        existingIngredient.outletId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -567,10 +734,10 @@ exports.updateIngredient = async (req, res) => {
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.cartId) {
+    if (ingredient.outletId) {
       emitToCafe(
         io,
-        ingredient.cartId.toString(),
+        ingredient.outletId.toString(),
         "ingredient:updated",
         ingredient
       );
@@ -592,7 +759,7 @@ exports.updateIngredient = async (req, res) => {
           await linkedInventory.save();
           emitToCafe(
             io,
-            ingredient.cartId.toString(),
+            ingredient.outletId.toString(),
             "inventory:updated",
             linkedInventory
           );
@@ -632,10 +799,10 @@ exports.deleteIngredient = async (req, res) => {
 
     // Check access control
     if (req.user.role === "admin") {
-      // If ingredient has cartId, it must match the cart admin's ID
+      // If ingredient has outletId, it must match the cart admin's ID
       if (
-        ingredient.cartId &&
-        ingredient.cartId.toString() !== req.user._id.toString()
+        ingredient.outletId &&
+        ingredient.outletId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -643,8 +810,8 @@ exports.deleteIngredient = async (req, res) => {
             "Access denied: You can only delete ingredients belonging to your cart",
         });
       }
-      // If ingredient is shared (cartId is null), cart admin cannot delete it
-      if (!ingredient.cartId) {
+      // If ingredient is shared (outletId is null), cart admin cannot delete it
+      if (!ingredient.outletId) {
         return res.status(403).json({
           success: false,
           message: "Access denied: You cannot delete shared ingredients",
@@ -652,8 +819,8 @@ exports.deleteIngredient = async (req, res) => {
       }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin can delete ingredients from their franchise carts
-      if (ingredient.cartId) {
-        const outlet = await User.findById(ingredient.cartId);
+      if (ingredient.outletId) {
+        const outlet = await User.findById(ingredient.outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -675,7 +842,6 @@ exports.deleteIngredient = async (req, res) => {
         });
       }
     }
-    // super_admin can delete any ingredient (no restrictions)
 
     // Check if ingredient is used in recipes
     const Recipe = require("../../models/costing-v2/recipeModel");
@@ -719,8 +885,8 @@ exports.deleteIngredient = async (req, res) => {
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.cartId) {
-      emitToCafe(io, ingredient.cartId.toString(), "ingredient:deleted", {
+    if (ingredient.outletId) {
+      emitToCafe(io, ingredient.outletId.toString(), "ingredient:deleted", {
         id: ingredient._id,
       });
     }
@@ -749,16 +915,11 @@ exports.getFIFOLayers = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Check access control and get cartId for filtering
-    let cartIdForFilter = null;
+    // Check access control - cart admins can only view FIFO for their own ingredients
     if (req.user.role === "admin") {
-      // Cart admin - filter layers to only show their cart's layers
-      cartIdForFilter = req.user._id;
-
-      // For cart-specific ingredients, verify access
       if (
-        ingredient.cartId &&
-        ingredient.cartId.toString() !== req.user._id.toString()
+        ingredient.outletId &&
+        ingredient.outletId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -766,15 +927,10 @@ exports.getFIFOLayers = async (req, res) => {
             "Access denied. You can only view FIFO layers for ingredients belonging to your cart.",
         });
       }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin can optionally filter by cartId if provided in query
-      if (req.query.cartId) {
-        cartIdForFilter = req.query.cartId;
-      }
     }
 
-    // Get FIFO layers (filtered by cartId if provided)
-    const layers = await FIFOService.getLayers(req.params.id, cartIdForFilter);
+    // Get FIFO layers
+    const layers = await FIFOService.getLayers(req.params.id);
     res.json({ success: true, data: layers || [] });
   } catch (error) {
     console.error("[COSTING] Get FIFO layers error:", error);
@@ -793,12 +949,12 @@ exports.getFIFOLayers = async (req, res) => {
  */
 exports.getPurchases = async (req, res) => {
   try {
-    const { status, supplierId, from, to, cartId } = req.query;
+    const { status, supplierId, from, to, outletId } = req.query;
     const filter = {};
 
     if (status) filter.status = status;
     if (supplierId) filter.supplierId = supplierId;
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.cartId = outletId;
     if (from || to) {
       filter.date = {};
       if (from) filter.date.$gte = new Date(from);
@@ -868,7 +1024,7 @@ exports.createPurchase = async (req, res) => {
 
 /**
  * @route   POST /api/costing-v2/purchases/:id/receive
- * @desc    Receive purchase and update inventory (Weighted Average)
+ * @desc    Receive purchase and update inventory (FIFO)
  */
 exports.receivePurchase = async (req, res) => {
   try {
@@ -895,44 +1051,63 @@ exports.receivePurchase = async (req, res) => {
     // Track which ingredients were purchased for BOM recalculation
     const purchasedIngredientIds = [];
 
-    // Process each item: update weighted average and inventory
+    // Process each item: update weighted average cost and update inventory
     for (const item of purchase.items) {
       const ingredient = await Ingredient.findById(item.ingredientId);
       if (!ingredient) continue;
 
       purchasedIngredientIds.push(item.ingredientId);
 
-      // Convert purchase quantity and cost to base unit
+      // Convert to base unit
       const qtyInBaseUnit = ingredient.convertToBaseUnit(item.qty, item.uom);
-
-      // Calculate cost per base unit: total cost / quantity in base unit
-      // item.total is the total cost for this purchase item
-      // item.unitPrice is per unit in the purchase unit (item.uom)
-      const totalCost = item.total || item.unitPrice * item.qty;
-      const costPerBaseUnit = totalCost / qtyInBaseUnit;
-
-      // Validate conversion
-      if (isNaN(qtyInBaseUnit) || qtyInBaseUnit <= 0) {
-        throw new Error(
-          `Invalid quantity conversion for ${ingredient.name}: ${item.qty} ${item.uom}`
-        );
+      
+      // Calculate unit cost in base unit
+      // Formula: unitCostInBaseUnit = unitPrice (per display unit) / conversionFactor (display units per base unit)
+      // Example: If unitPrice is ₹608.26/kg and baseUnit is "g":
+      //   convertToBaseUnit(1, "kg") = 1000 (grams in 1 kg)
+      //   unitCostInBaseUnit = 608.26 / 1000 = 0.60826 per gram ✓
+      const conversionFactor = ingredient.convertToBaseUnit(1, item.uom);
+      const unitCostInBaseUnit = item.unitPrice / conversionFactor;
+      
+      // Validate the calculated cost is reasonable
+      // For ingredients with baseUnit "g" or "ml", cost per base unit should typically be < 100
+      // If it's > 100, it might indicate the calculation is wrong
+      if ((ingredient.baseUnit === 'g' || ingredient.baseUnit === 'ml') && unitCostInBaseUnit > 100) {
+        console.error(`[PURCHASE COST ERROR] ${ingredient.name}: Calculated cost per ${ingredient.baseUnit} is ₹${unitCostInBaseUnit.toFixed(6)}, which seems too high. Unit price: ₹${item.unitPrice}/${item.uom}, Conversion factor: ${conversionFactor}`);
       }
-      if (isNaN(costPerBaseUnit) || costPerBaseUnit < 0) {
-        throw new Error(`Invalid cost calculation for ${ingredient.name}`);
-      }
+      
+      // Always log purchase cost calculation for debugging
+      console.log(`[PURCHASE] ${ingredient.name}: unitPrice=₹${item.unitPrice}/${item.uom}, baseUnit=${ingredient.baseUnit}, conversionFactor=${conversionFactor}, unitCostInBaseUnit=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
 
       // Update weighted average cost
-      const avgResult = await WeightedAverageService.updateWeightedAverage(
+      // Use cartId for weighted average calculation
+      const cartId = purchase.cartId || null;
+      const weightedAvgResult = await WeightedAverageService.updateWeightedAverage(
         item.ingredientId,
         qtyInBaseUnit,
-        costPerBaseUnit,
-        purchase.cartId || null
+        unitCostInBaseUnit,
+        cartId
       );
 
-      // Create inventory transaction with both original and base unit quantities
-      // costAllocated should be the total cost paid for this purchase item
-      // This will be used to calculate weighted average cost per base unit
-      // IMPORTANT: Transaction must be created AFTER updateWeightedAverage so stock calculation is correct
+      // Calculate cost allocated using the actual purchase cost (not weighted average)
+      // The transaction should record the actual cost of this purchase
+      // The weighted average is used to update ingredient.currentCostPerBaseUnit
+      // IMPORTANT: costAllocated = qtyInBaseUnit × unitCostInBaseUnit
+      // This is the total cost for this purchase transaction
+      // When calculating weighted average in inventory: weightedAvgCost = costAllocated / qtyInBaseUnit
+      // This should equal unitCostInBaseUnit, ensuring consistency
+      const costAllocated = qtyInBaseUnit * unitCostInBaseUnit;
+      
+      // Validate costAllocated calculation
+      if (process.env.NODE_ENV === 'development') {
+        const expectedCost = item.unitPrice * item.qty; // Total purchase cost
+        const calculatedCost = costAllocated;
+        if (Math.abs(expectedCost - calculatedCost) > 0.01) {
+          console.warn(`[PURCHASE] ${ingredient.name}: Cost mismatch! Expected: ₹${expectedCost.toFixed(2)}, Calculated: ₹${calculatedCost.toFixed(2)}. qtyInBaseUnit=${qtyInBaseUnit}, unitCostInBaseUnit=${unitCostInBaseUnit.toFixed(6)}`);
+        }
+      }
+
+      // Create inventory transaction
       const transaction = new InventoryTransaction({
         ingredientId: item.ingredientId,
         type: "IN",
@@ -942,28 +1117,11 @@ exports.receivePurchase = async (req, res) => {
         refType: "purchase",
         refId: purchase._id,
         date: new Date(),
-        costAllocated: totalCost, // Total cost for this purchase item (matches item.total from purchase)
+        costAllocated: costAllocated, // Use weighted average cost
         recordedBy: req.user._id,
         cartId: purchase.cartId || null,
       });
       await transaction.save();
-
-      // Debug: Verify cost allocation and stock update
-      if (process.env.NODE_ENV === "development") {
-        console.log(
-          `[Purchase Receive] Ingredient: ${ingredient.name} (${
-            ingredient.cartId ? "Cart-specific" : "Shared"
-          }), Purchase cartId: ${
-            purchase.cartId || "none"
-          }, Qty: ${qtyInBaseUnit} ${
-            ingredient.baseUnit
-          }, Total Cost: ₹${totalCost}, Cost/BaseUnit: ₹${costPerBaseUnit.toFixed(
-            4
-          )}, Transaction saved: ${transaction._id}, Updated qtyOnHand: ${
-            avgResult.updatedQtyOnHand
-          }`
-        );
-      }
       // #region agent log
       logDebug(
         "costingController.js:776",
@@ -972,7 +1130,7 @@ exports.receivePurchase = async (req, res) => {
           transactionId: transaction._id,
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          cartId: purchase.cartId,
+          outletId: purchase.cartId,
           purchaseId: purchase._id,
           qty: qtyInBaseUnit,
           costAllocated: transaction.costAllocated,
@@ -991,16 +1149,16 @@ exports.receivePurchase = async (req, res) => {
     // Recalculate costs for all BOMs that use the purchased ingredients
     // This ensures BOM costs are updated when purchases are received
     if (purchasedIngredientIds.length > 0) {
-      // Delay to ensure all transactions are committed to database
+      // Small delay to ensure all transactions are committed to database
       // This prevents race conditions where BOM recalculation happens before transactions are visible
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       // #region agent log
       logDebug(
         "costingController.js:760",
         "Recalculating BOMs after purchase",
         {
           purchaseId: purchase._id,
-          cartId: purchase.cartId,
+          outletId: purchase.cartId,
           ingredientIds: purchasedIngredientIds,
         },
         "B"
@@ -1025,29 +1183,10 @@ exports.receivePurchase = async (req, res) => {
 
       // Recalculate costs for each affected recipe
       for (const recipe of affectedRecipes) {
-        // Use recipe's cartId for recalculation, not purchase cartId
-        // This ensures recipes get costs based on their own outlet's purchases
-        // For shared recipes (cartId = null), use null to get global costs
-        const cartIdForRecalc = recipe.cartId || null;
-        await recipe.calculateCost(cartIdForRecalc);
+        // Use outletId from purchase to recalculate outlet-specific costs
+        const outletIdForRecalc = purchase.cartId || null;
+        await recipe.calculateCost(outletIdForRecalc);
         await recipe.save();
-
-        // Update linked menu items with new cost
-        const menuItems = await MenuItem.find({ recipeId: recipe._id });
-        for (const menuItem of menuItems) {
-          // Skip menu items without cartId (they're invalid and will be fixed separately)
-          if (!menuItem.cartId) {
-            if (process.env.NODE_ENV === "development") {
-              console.warn(
-                `[Purchase Receive] Skipping menu item ${menuItem._id} - missing cartId`
-              );
-            }
-            continue;
-          }
-          menuItem.calculateMetrics(recipe.costPerPortion);
-          await menuItem.save();
-        }
-
         // #region agent log
         logDebug(
           "costingController.js:777",
@@ -1057,9 +1196,7 @@ exports.receivePurchase = async (req, res) => {
             recipeName: recipe.name,
             totalCost: recipe.totalCostCached,
             costPerPortion: recipe.costPerPortion,
-            recipeOutletId: cartIdForRecalc,
-            purchaseOutletId: purchase.cartId,
-            menuItemsUpdated: menuItems.length,
+            outletId: outletIdForRecalc,
           },
           "B"
         );
@@ -1080,18 +1217,11 @@ exports.receivePurchase = async (req, res) => {
 
 /**
  * @route   POST /api/costing-v2/inventory/consume
- * @desc    Consume ingredient (for recipes or manual usage) - uses weighted average
+ * @desc    Consume ingredient (for recipes or manual usage)
  */
 exports.consumeInventory = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, refType, refId, cartId, notes } = req.body;
-
-    if (!ingredientId || !qty || !uom) {
-      return res.status(400).json({
-        success: false,
-        message: "ingredientId, qty, and uom are required",
-      });
-    }
+    const { ingredientId, qty, uom, refType, refId, outletId } = req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1100,54 +1230,39 @@ exports.consumeInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Validate unit conversion
-    let qtyInBaseUnit;
-    try {
-      qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
-    } catch (conversionError) {
-      return res.status(400).json({
-        success: false,
-        message: `Unit conversion error: ${conversionError.message}`,
-      });
-    }
-
-    if (qtyInBaseUnit <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be greater than 0",
-      });
-    }
-
-    // For cart admin, always use their own cartId
-    // For franchise admin and super admin, use provided cartId or validate
-    let finalOutletId = cartId;
+    // For cart admin, always use their own outletId
+    // For franchise admin and super admin, use provided outletId or validate
+    let finalOutletId = outletId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide cartId
-      if (!cartId) {
+      // Franchise admin - must provide outletId
+      if (!outletId) {
         return res.status(400).json({
           success: false,
-          message: "cartId is required for franchise admin",
+          message: "outletId is required for franchise admin",
         });
       }
-      if (!(await validateOutletAccess(req.user, cartId))) {
+      if (!(await validateOutletAccess(req.user, outletId))) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this kiosk" });
       }
-      finalOutletId = cartId;
+      finalOutletId = outletId;
     } else if (req.user.role === "super_admin") {
-      // Super admin - must provide cartId
-      if (!cartId) {
+      // Super admin - must provide outletId
+      if (!outletId) {
         return res.status(400).json({
           success: false,
-          message: "cartId is required for super admin",
+          message: "outletId is required for super admin",
         });
       }
-      finalOutletId = cartId;
+      finalOutletId = outletId;
     }
+
+    // Convert to base unit
+    const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
 
     // Consume using weighted average
     const result = await WeightedAverageService.consume(
@@ -1163,26 +1278,19 @@ exports.consumeInventory = async (req, res) => {
     const transaction = new InventoryTransaction({
       ingredientId: ingredientId,
       type: "OUT",
-      qty: qty, // Original quantity
-      uom: uom, // Original unit
-      qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit
+      qty: qty,
+      uom: uom,
+      qtyInBaseUnit: qtyInBaseUnit,
       refType: refType || "manual",
       refId: refId || null,
       date: new Date(),
       costAllocated: result.costAllocated,
-      notes: notes || "",
       recordedBy: req.user._id,
-      cartId: finalOutletId || null,
+      cartId: finalOutletId,
     });
     await transaction.save();
 
-    res.json({
-      success: true,
-      data: {
-        ...result,
-        transactionId: transaction._id,
-      },
-    });
+    res.json({ success: true, data: { ...result, transaction } });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1190,19 +1298,11 @@ exports.consumeInventory = async (req, res) => {
 
 /**
  * @route   POST /api/costing-v2/inventory/return
- * @desc    Return unused ingredient to inventory - valued at current weighted average
- * @note    Simple return - just add unused ingredients back to stock
+ * @desc    Return ingredient to inventory
  */
 exports.returnToInventory = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, refType, notes, cartId } = req.body;
-
-    if (!ingredientId || !qty || !uom) {
-      return res.status(400).json({
-        success: false,
-        message: "ingredientId, qty, and uom are required",
-      });
-    }
+    const { ingredientId, qty, uom, refType, refId, originalTransactionId, outletId, notes } = req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1211,57 +1311,46 @@ exports.returnToInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Validate unit conversion
-    let qtyInBaseUnit;
-    try {
-      qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
-    } catch (conversionError) {
-      return res.status(400).json({
-        success: false,
-        message: `Unit conversion error: ${conversionError.message}`,
-      });
-    }
-
-    if (qtyInBaseUnit <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be greater than 0",
-      });
-    }
-
-    // For cart admin, always use their own cartId
-    let finalOutletId = cartId;
+    // For cart admin, always use their own outletId
+    // For franchise admin and super admin, use provided outletId or validate
+    let finalOutletId = outletId;
     if (req.user.role === "admin") {
+      // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      if (!cartId) {
+      // Franchise admin - must provide outletId
+      if (!outletId) {
         return res.status(400).json({
           success: false,
-          message: "cartId is required for franchise admin",
+          message: "outletId is required for franchise admin",
         });
       }
-      if (!(await validateOutletAccess(req.user, cartId))) {
+      if (!(await validateOutletAccess(req.user, outletId))) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this kiosk" });
       }
-      finalOutletId = cartId;
+      finalOutletId = outletId;
     } else if (req.user.role === "super_admin") {
-      if (!cartId) {
+      // Super admin - must provide outletId
+      if (!outletId) {
         return res.status(400).json({
           success: false,
-          message: "cartId is required for super admin",
+          message: "outletId is required for super admin",
         });
       }
-      finalOutletId = cartId;
+      finalOutletId = outletId;
     }
 
-    // Return to inventory using weighted average (doesn't recalculate average)
+    // Convert to base unit
+    const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
+
+    // Return to inventory using weighted average
     const result = await WeightedAverageService.returnToInventory(
       ingredientId,
       qtyInBaseUnit,
-      refType || "return",
-      null, // No specific refId for simple returns
+      refType || "manual",
+      refId || null,
       req.user._id,
       finalOutletId
     );
@@ -1270,28 +1359,21 @@ exports.returnToInventory = async (req, res) => {
     const transaction = new InventoryTransaction({
       ingredientId: ingredientId,
       type: "RETURN",
-      qty: qty, // Original quantity
-      uom: uom, // Original unit
-      qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit
-      originalTransactionId: null, // Not linked to specific transaction
-      refType: refType || "return",
-      refId: null,
+      qty: qty,
+      uom: uom,
+      qtyInBaseUnit: qtyInBaseUnit,
+      originalTransactionId: originalTransactionId || null,
+      refType: refType || "manual",
+      refId: refId || null,
       date: new Date(),
       costAllocated: result.costAllocated,
-      notes: notes || "Unused ingredients returned to inventory",
+      notes: notes || "",
       recordedBy: req.user._id,
-      cartId: finalOutletId || null,
+      cartId: finalOutletId,
     });
     await transaction.save();
 
-    res.json({
-      success: true,
-      data: {
-        ...result,
-        transactionId: transaction._id,
-        message: "Unused ingredients returned to inventory successfully",
-      },
-    });
+    res.json({ success: true, data: { ...result, transaction } });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -1303,7 +1385,7 @@ exports.returnToInventory = async (req, res) => {
  */
 exports.getInventoryTransactions = async (req, res) => {
   try {
-    const { ingredientId, type, from, to, cartId } = req.query;
+    const { ingredientId, type, from, to, outletId } = req.query;
     const filter = {};
 
     if (ingredientId) filter.ingredientId = ingredientId;
@@ -1320,9 +1402,9 @@ exports.getInventoryTransactions = async (req, res) => {
       filter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (cartId) {
+      if (outletId) {
         // Validate outlet belongs to their franchise
-        const outlet = await User.findById(cartId);
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -1332,7 +1414,7 @@ exports.getInventoryTransactions = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.cartId = cartId;
+        filter.cartId = outletId;
       } else {
         // Get all kiosks under franchise
         const outlets = await User.find({
@@ -1344,10 +1426,10 @@ exports.getInventoryTransactions = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - can filter by outlet or see all
-      if (cartId) {
-        filter.cartId = cartId;
+      if (outletId) {
+        filter.cartId = outletId;
       }
-      // If no cartId specified, show all transactions
+      // If no outletId specified, show all transactions
     }
 
     const transactions = await InventoryTransaction.find(filter)
@@ -1371,53 +1453,46 @@ exports.getCostingInventory = async (req, res) => {
   try {
     const Employee = require("../../models/employeeModel");
 
-    // Get cartId for mobile users (waiter, cook, captain, manager)
-    // Prioritize cartId, fallback to cafeId for backward compatibility
-    let cartId = null;
+    // Get cafeId for mobile users (waiter, cook, captain, manager)
+    let outletId = null;
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - prioritize cartId, fallback to cafeId
-      if (req.user.cartId) {
-        cartId = req.user.cartId;
-      } else if (req.user.cafeId) {
-        cartId = req.user.cafeId; // Fallback for backward compatibility
+      // Mobile users - get cafeId from user or employee record
+      if (req.user.cafeId) {
+        outletId = req.user.cafeId;
       } else {
-        // Fallback: find employee by email or userId
+        // Fallback: find employee by email
         const employee = await Employee.findOne({
-          $or: [
-            { email: req.user.email?.toLowerCase() },
-            { userId: req.user._id },
-          ],
+          email: req.user.email?.toLowerCase(),
         }).lean();
-        if (employee) {
-          cartId = employee.cartId || employee.cafeId; // Prioritize cartId
+        if (employee && employee.cafeId) {
+          outletId = employee.cafeId;
         }
       }
 
-      if (!cartId) {
+      if (!outletId) {
         return res.status(403).json({
           success: false,
-          message: "No cart associated with this user",
+          message: "No cafe associated with this user",
         });
       }
     } else if (req.user.role === "admin") {
-      // Cart admin - use their own ID as cartId
-      cartId = req.user._id;
+      // Cart admin - use their own ID as outletId
+      outletId = req.user._id;
     }
 
     // Build filter for ingredients
     const filter = { isActive: true };
-    if (cartId) {
-      filter.cartId = cartId;
+    if (outletId) {
+      filter.outletId = outletId;
     }
 
     // Apply role-based filtering
     const shouldSkipOutletFilter =
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
-      !cartId;
+      !outletId;
     const costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipOutletFilter,
-      includeShared: true, // Include franchise-level shared ingredients
     });
 
     // Get ingredients for this cart/cafe/kiosk
@@ -1445,14 +1520,14 @@ exports.getCostingInventory = async (req, res) => {
       minStock: ing.reorderLevel || 0,
       ingredientId: ing._id,
       // Add cafeId for filtering
-      cafeId: cartId || ing.cartId,
+      cafeId: outletId || ing.outletId,
     }));
 
     console.log(
       "[COSTING] getCostingInventory - Found items:",
       inventoryItems.length,
-      "for cartId:",
-      cartId
+      "for outletId:",
+      outletId
     );
 
     res.json({
@@ -1472,8 +1547,8 @@ exports.getCostingInventory = async (req, res) => {
 exports.getLowStock = async (req, res) => {
   try {
     // Apply role-based filtering
-    // For cart admins, only show low stock items from their cart (filter by cartId)
-    // For franchise/super admins, can see all low stock items or filter by cartId
+    // For cart admins, only show low stock items from their cart (filter by outletId)
+    // For franchise/super admins, can see all low stock items or filter by outletId
     const shouldSkipOutletFilter =
       req.user.role === "franchise_admin" || req.user.role === "super_admin";
     const filter = await buildCostingQuery(
@@ -1485,7 +1560,7 @@ exports.getLowStock = async (req, res) => {
     // Log filtering for debugging
     if (req.user.role === "admin") {
       console.log(
-        "[GET_LOW_STOCK] Cart admin filter - cartId:",
+        "[GET_LOW_STOCK] Cart admin filter - outletId:",
         req.user._id.toString()
       );
     }
@@ -1509,7 +1584,8 @@ exports.getLowStock = async (req, res) => {
  */
 exports.recordWaste = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, reason, reasonDetails, cartId } = req.body;
+    const { ingredientId, qty, uom, reason, reasonDetails, outletId } =
+      req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1518,30 +1594,68 @@ exports.recordWaste = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Validate and set outlet context
-    const finalOutletId =
-      cartId || (req.user.role === "admin" ? req.user._id : null);
-    if (
-      finalOutletId &&
-      !(await validateOutletAccess(req.user, finalOutletId))
-    ) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Access denied to this kiosk" });
+    // For cart admin, always use their own outletId
+    // For franchise admin and super admin, use provided outletId or validate
+    let finalOutletId = outletId;
+    if (req.user.role === "admin") {
+      // Cart admin - always use their own kiosk
+      finalOutletId = req.user._id;
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin - must provide outletId
+      if (!outletId) {
+        return res.status(400).json({
+          success: false,
+          message: "outletId is required for franchise admin",
+        });
+      }
+      if (!(await validateOutletAccess(req.user, outletId))) {
+        return res
+          .status(403)
+          .json({ success: false, message: "Access denied to this kiosk" });
+      }
+      finalOutletId = outletId;
+    } else if (req.user.role === "super_admin") {
+      // Super admin - must provide outletId
+      if (!outletId) {
+        return res.status(400).json({
+          success: false,
+          message: "outletId is required for super admin",
+        });
+      }
+      finalOutletId = outletId;
     }
 
     // Convert to base unit
     const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
 
-    // Consume using FIFO to get cost
-    const consumeResult = await FIFOService.consume(
+    // Consume using weighted average to get cost
+    // Allow negative stock for waste tracking (waste can exceed available stock for accounting purposes)
+    const consumeResult = await WeightedAverageService.consume(
       ingredientId,
       qtyInBaseUnit,
       "waste",
       null,
       req.user._id,
-      finalOutletId
+      finalOutletId,
+      true // allowNegativeStock = true for waste
     );
+
+    // Create inventory transaction for waste
+    // This is critical for inventory tracking and cost calculations
+    const transaction = new InventoryTransaction({
+      ingredientId,
+      type: "WASTE",
+      qty: qty, // Original quantity
+      uom: uom, // Original unit
+      qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit
+      refType: "waste",
+      refId: null, // Will link to waste record after creation
+      date: new Date(),
+      costAllocated: consumeResult.costAllocated,
+      recordedBy: req.user._id,
+      cartId: finalOutletId || null, // Use cartId for consistency
+    });
+    await transaction.save();
 
     // Get franchiseId for waste record
     let franchiseId = null;
@@ -1562,14 +1676,20 @@ exports.recordWaste = async (req, res) => {
       date: new Date(),
       costAllocated: consumeResult.costAllocated,
       recordedBy: req.user._id,
-      cartId: finalOutletId,
+      cartId: finalOutletId || null, // Use cartId for consistency
     });
 
     await waste.save();
+    
+    // Update transaction with waste record ID
+    transaction.refId = waste._id;
+    await transaction.save();
+
     await waste.populate("ingredientId", "name uom");
 
     res.status(201).json({ success: true, data: waste });
   } catch (error) {
+    console.error("[WASTE] Error recording waste:", error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -1580,7 +1700,7 @@ exports.recordWaste = async (req, res) => {
  */
 exports.getWaste = async (req, res) => {
   try {
-    const { ingredientId, from, to, cartId } = req.query;
+    const { ingredientId, from, to, outletId } = req.query;
     const filter = {};
 
     if (ingredientId) filter.ingredientId = ingredientId;
@@ -1590,15 +1710,15 @@ exports.getWaste = async (req, res) => {
       if (to) filter.date.$lte = new Date(to);
     }
 
-    // Apply role-based filtering for cartId (waste model doesn't have franchiseId)
+    // Apply role-based filtering for cartId
     if (req.user.role === "admin") {
       // Cart admin - only see their own kiosk's waste records
       filter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (cartId) {
+      if (outletId) {
         // Validate outlet belongs to their franchise
-        const outlet = await User.findById(cartId);
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -1608,7 +1728,7 @@ exports.getWaste = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.cartId = cartId;
+        filter.cartId = outletId;
       } else {
         // Get all kiosks under franchise
         const outlets = await User.find({
@@ -1620,10 +1740,10 @@ exports.getWaste = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - can filter by outlet or see all
-      if (cartId) {
-        filter.cartId = cartId;
+      if (outletId) {
+        filter.cartId = outletId;
       }
-      // If no cartId specified, show all waste records
+      // If no outletId specified, show all waste records
     }
 
     const waste = await Waste.find(filter)
@@ -1654,23 +1774,88 @@ exports.getRecipes = async (req, res) => {
       "A"
     );
     // #endregion
-    const { isActive, search, cartId } = req.query;
+    const { isActive, search, outletId } = req.query;
     const filter = {};
 
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.cartId = outletId;
 
-    // Apply role-based filtering (recipes can be shared or kiosk-specific)
-    // For franchise_admin, also include global/shared recipes (franchiseId=null)
-    // For super_admin: only show global BOMs (cartId: null) unless filtering by specific cartId
-    const costingFilter = await buildCostingQuery(req.user, filter, {
-      includeShared: true,
-    });
-
-    // Super admin should only see global BOMs (cartId: null) unless filtering by specific outlet
-    if (req.user.role === "super_admin" && !cartId) {
-      costingFilter.cartId = null;
+    // Apply role-based filtering (recipes can be shared or cart-specific)
+    // For cart admin: only show recipes for their own cart OR global recipes (cartId: null)
+    // For franchise_admin: show recipes for their franchise carts OR global recipes
+    // For super_admin: only show global BOMs (cartId: null) unless filtering by specific outletId
+    let costingFilter = { ...filter };
+    if (req.user.role === "admin") {
+      // Cart admin: only their own cart's recipes OR global recipes (cartId: null)
+      // Remove cartId from filter if it was set, as we'll use $or instead
+      delete costingFilter.cartId;
+      
+      // Build $or conditions: cart-specific recipes OR global recipes
+      const orConditions = [
+        { cartId: req.user._id }, // Cart-specific recipes
+        { cartId: null }, // Global recipes (super admin BOMs)
+        { cartId: { $exists: false } }, // Legacy recipes without cartId
+      ];
+      
+      // If cart admin has a franchiseId, we need to handle franchiseId filtering carefully:
+      // - For cart-specific recipes (cartId: req.user._id), match franchiseId
+      // - For global recipes (cartId: null), allow regardless of franchiseId
+      if (req.user.franchiseId) {
+        // Use $and with $or to handle both cart-specific and global recipes
+        costingFilter.$and = [
+          {
+            $or: [
+              // Cart-specific recipes: must match cartId AND franchiseId
+              {
+                $and: [
+                  { cartId: req.user._id },
+                  { franchiseId: req.user.franchiseId },
+                ],
+              },
+              // Global recipes: cartId is null, franchiseId can be null or match
+              {
+                $and: [
+                  { $or: [{ cartId: null }, { cartId: { $exists: false } }] },
+                  {
+                    $or: [
+                      { franchiseId: null },
+                      { franchiseId: { $exists: false } },
+                      { franchiseId: req.user.franchiseId },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ];
+      } else {
+        // No franchiseId: simple $or for cartId
+        costingFilter.$or = orConditions;
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin: recipes for their franchise carts OR global recipes
+      const franchiseCarts = await User.find({
+        role: "admin",
+        franchiseId: req.user._id,
+        isActive: true,
+      }).select("_id");
+      const cartIds = franchiseCarts.map((c) => c._id);
+      // Remove cartId from filter if it was set, as we'll use $or instead
+      delete costingFilter.cartId;
+      costingFilter.$or = [
+        { cartId: { $in: cartIds } },
+        { cartId: null },
+        { cartId: { $exists: false } },
+      ];
+      costingFilter.franchiseId = req.user._id;
+    } else if (req.user.role === "super_admin") {
+      // Super admin: only global BOMs (cartId: null) unless filtering by specific outlet
+      if (!outletId) {
+        costingFilter.cartId = null;
+      } else {
+        costingFilter.cartId = outletId;
+      }
     }
 
     const recipes = await Recipe.find(costingFilter)
@@ -1681,19 +1866,19 @@ exports.getRecipes = async (req, res) => {
       .populate("cartId", "name cafeName")
       .sort({ name: 1 });
 
-    // For Cart Admin, recalculate costs dynamically using their cartId
+    // For Cart Admin, recalculate costs dynamically using their outletId
     // This ensures costs are based on outlet-specific purchases, not cached global values
     if (req.user.role === "admin") {
       // #region agent log
       logDebug(
         "costingController.js:1200",
         "Cart Admin - recalculating BOM costs",
-        { cartId: req.user._id, recipeCount: recipes.length },
+        { outletId: req.user._id, recipeCount: recipes.length },
         "A"
       );
       // #endregion
       for (const recipe of recipes) {
-        // Recalculate cost using Cart Admin's cartId
+        // Recalculate cost using Cart Admin's outletId
         await recipe.calculateCost(req.user._id);
         // #region agent log
         logDebug(
@@ -1704,7 +1889,7 @@ exports.getRecipes = async (req, res) => {
             recipeName: recipe.name,
             totalCost: recipe.totalCostCached,
             costPerPortion: recipe.costPerPortion,
-            cartId: req.user._id,
+            outletId: req.user._id,
           },
           "A"
         );
@@ -1733,26 +1918,26 @@ exports.getRecipes = async (req, res) => {
  */
 exports.createRecipe = async (req, res) => {
   try {
-    // Set outlet context (recipes can be shared, so cartId is optional)
+    // Set outlet context (recipes can be shared, so outletId is optional)
     const data = await setOutletContext(req.user, { ...req.body }, false);
 
-    // Check for duplicate BOM name for the same outlet before creating
+    // Check for duplicate BOM name for the same cart before creating
     const existingRecipe = await Recipe.findOne({
       name: data.name.trim(),
       cartId: data.cartId || null,
     });
 
     if (existingRecipe) {
-      const outletInfo = data.cartId ? " for this outlet" : " (global BOM)";
+      const cartInfo = data.cartId ? " for this cart" : " (global BOM)";
       return res.status(400).json({
         success: false,
-        message: `A BOM with the name "${data.name}" already exists${outletInfo}. Please use a different name or edit the existing BOM.`,
+        message: `A BOM with the name "${data.name}" already exists${cartInfo}. Please use a different name or edit the existing BOM.`,
       });
     }
 
     const recipe = new Recipe(data);
 
-    // Calculate cost - for Cart Admin, use their cartId to check outlet-specific purchases
+    // Calculate cost - for Cart Admin, use their cartId to check cart-specific purchases
     const cartIdForCost =
       req.user.role === "admin" ? req.user._id : data.cartId || null;
     await recipe.calculateCost(cartIdForCost);
@@ -1793,7 +1978,7 @@ exports.updateRecipe = async (req, res) => {
 
     Object.assign(recipe, req.body);
 
-    // Recalculate cost - for Cart Admin, use their cartId to check outlet-specific purchases
+    // Recalculate cost - for Cart Admin, use their cartId to check cart-specific purchases
     const cartIdForCost =
       req.user.role === "admin"
         ? req.user._id
@@ -1831,7 +2016,7 @@ exports.recalculateRecipeCost = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
-    // Recalculate cost - for Cart Admin, use their cartId to check outlet-specific purchases
+    // Recalculate cost - for Cart Admin, use their cartId to check cart-specific purchases
     const cartIdForCost =
       req.user.role === "admin" ? req.user._id : recipe.cartId || null;
     await recipe.calculateCost(cartIdForCost);
@@ -1840,15 +2025,6 @@ exports.recalculateRecipeCost = async (req, res) => {
     // Update linked menu items
     const menuItems = await MenuItem.find({ recipeId: recipe._id });
     for (const menuItem of menuItems) {
-      // Skip menu items without cartId (they're invalid and will be fixed separately)
-      if (!menuItem.cartId) {
-        if (process.env.NODE_ENV === "development") {
-          console.warn(
-            `[Recalculate Recipe Cost] Skipping menu item ${menuItem._id} - missing cartId`
-          );
-        }
-        continue;
-      }
       menuItem.calculateMetrics(recipe.costPerPortion);
       await menuItem.save();
     }
@@ -1877,21 +2053,38 @@ exports.deleteRecipe = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
+    // Access control: Cart admin can only delete their own cart's recipes
+    if (req.user.role === "admin") {
+      if (recipe.cartId && recipe.cartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only delete recipes belonging to your cart.",
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can only delete recipes from their franchise carts
+      if (recipe.cartId) {
+        const cart = await User.findById(recipe.cartId);
+        if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: "Access denied. You can only delete recipes belonging to your franchise carts.",
+          });
+        }
+      } else if (recipe.franchiseId && recipe.franchiseId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only delete recipes belonging to your franchise.",
+        });
+      }
+    }
+
     // Find all menu items linked to this recipe
     const linkedMenuItems = await MenuItem.find({ recipeId: recipe._id });
 
     // If there are linked menu items, unlink them (set recipeId to null and reset cost metrics)
     if (linkedMenuItems.length > 0) {
       for (const menuItem of linkedMenuItems) {
-        // Skip menu items without cartId (they're invalid and will be fixed separately)
-        if (!menuItem.cartId) {
-          if (process.env.NODE_ENV === "development") {
-            console.warn(
-              `[Recipe Delete] Skipping menu item ${menuItem._id} - missing cartId`
-            );
-          }
-          continue;
-        }
         menuItem.recipeId = null;
         menuItem.costPerPortion = 0;
         menuItem.foodCostPercent = 0;
@@ -1899,11 +2092,9 @@ exports.deleteRecipe = async (req, res) => {
         menuItem.lastCostUpdate = new Date();
         await menuItem.save();
       }
-      if (process.env.NODE_ENV === "development") {
-        console.log(
-          `[RECIPE DELETE] Unlinked ${linkedMenuItems.length} menu item(s) from recipe ${recipe.name}`
-        );
-      }
+      console.log(
+        `[RECIPE DELETE] Unlinked ${linkedMenuItems.length} menu item(s) from recipe ${recipe.name}`
+      );
     }
 
     // Delete the recipe
@@ -1929,13 +2120,13 @@ exports.deleteRecipe = async (req, res) => {
  */
 exports.getMenuItems = async (req, res) => {
   try {
-    const { category, isActive, search, cartId } = req.query;
+    const { category, isActive, search, outletId } = req.query;
     const filter = {};
 
     if (category) filter.category = category;
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.cartId = outletId;
 
     // Apply role-based filtering (menu items are kiosk-specific)
     const costingFilter = await buildCostingQuery(req.user, filter);
@@ -1944,30 +2135,6 @@ exports.getMenuItems = async (req, res) => {
       .populate("recipeId", "name costPerPortion portions")
       .populate("cartId", "name cafeName")
       .sort({ category: 1, name: 1 });
-
-    // For Cart Admin, recalculate recipe costs and update menu item metrics
-    // This ensures food cost is accurate based on current ingredient prices
-    if (req.user.role === "admin") {
-      const cartIdForRecalc = req.user._id;
-      for (const menuItem of menuItems) {
-        if (menuItem.recipeId) {
-          // Get recipe ID (could be ObjectId or populated object)
-          const recipeId = menuItem.recipeId._id || menuItem.recipeId;
-          // Recalculate recipe cost using cart admin's cartId
-          const recipe = await Recipe.findById(recipeId);
-          if (recipe) {
-            await recipe.calculateCost(cartIdForRecalc);
-            // Update menu item metrics with recalculated recipe cost
-            menuItem.calculateMetrics(recipe.costPerPortion);
-            // Update the populated recipe object for display
-            if (menuItem.recipeId && typeof menuItem.recipeId === "object") {
-              menuItem.recipeId.costPerPortion = recipe.costPerPortion;
-            }
-            // Don't save - just update for display (saves are done when recipes are explicitly updated)
-          }
-        }
-      }
-    }
 
     res.json({ success: true, data: menuItems });
   } catch (error) {
@@ -2003,8 +2170,9 @@ exports.createMenuItem = async (req, res) => {
       }
     }
 
-    // Set outlet context (menu items are kiosk-specific)
-    const data = await setOutletContext(req.user, menuItemData);
+    // Set outlet context (menu items are kiosk-specific, outletRequired = true)
+    // This ensures cartId and franchiseId are properly set
+    const data = await setOutletContext(req.user, menuItemData, true);
 
     const menuItem = new MenuItem(data);
 
@@ -2021,15 +2189,13 @@ exports.createMenuItem = async (req, res) => {
     if (recipeId) {
       const recipe = await Recipe.findById(recipeId);
       if (recipe) {
-        // Recalculate recipe cost using cartId to ensure accurate cost
-        // For cart admin, use their cartId; for others, use recipe's cartId or null
-        const cartIdForCost =
-          req.user.role === "admin"
-            ? req.user._id
-            : data.cartId || recipe.cartId || null;
+        // IMPORTANT: Recalculate recipe cost with correct cartId before using it
+        // This ensures the cost matches the cart's purchase prices
+        const cartIdForCost = req.user.role === "admin" ? req.user._id : (data.cartId || null);
         await recipe.calculateCost(cartIdForCost);
-        await recipe.save(); // Save updated recipe cost
-        // Calculate menu item metrics with recalculated recipe cost
+        await recipe.save();
+        
+        // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
       }
     } else {
@@ -2046,6 +2212,14 @@ exports.createMenuItem = async (req, res) => {
 
     res.status(201).json({ success: true, data: menuItem });
   } catch (error) {
+    console.error("[CREATE_MENU_ITEM] Error:", error);
+    // Provide more detailed error message
+    if (error.message.includes("required")) {
+      return res.status(400).json({ 
+        success: false, 
+        message: `Validation error: ${error.message}. Please ensure all required fields are provided.` 
+      });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -2111,15 +2285,13 @@ exports.updateMenuItem = async (req, res) => {
     if (recipeIdToUse) {
       const recipe = await Recipe.findById(recipeIdToUse);
       if (recipe) {
-        // Recalculate recipe cost using cartId to ensure accurate cost
-        // For cart admin, use their cartId; for others, use menu item's cartId or recipe's cartId
-        const cartIdForCost =
-          req.user.role === "admin"
-            ? req.user._id
-            : menuItem.cartId || recipe.cartId || null;
+        // IMPORTANT: Recalculate recipe cost with correct cartId before using it
+        // This ensures the cost matches the cart's purchase prices
+        const cartIdForCost = req.user.role === "admin" ? req.user._id : (menuItem.cartId || null);
         await recipe.calculateCost(cartIdForCost);
-        await recipe.save(); // Save updated recipe cost
-        // Calculate menu item metrics with recalculated recipe cost
+        await recipe.save();
+        
+        // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
       }
     } else {
@@ -2163,8 +2335,8 @@ exports.deleteMenuItem = async (req, res) => {
 
     // Verify that the menu item belongs to the cart admin's outlet
     if (
-      menuItem.cartId &&
-      menuItem.cartId.toString() !== req.user._id.toString()
+      menuItem.outletId &&
+      menuItem.outletId.toString() !== req.user._id.toString()
     ) {
       return res.status(403).json({
         success: false,
@@ -2294,7 +2466,7 @@ exports.getDefaultMenuItems = async (req, res) => {
  */
 exports.importFromDefaultMenu = async (req, res) => {
   try {
-    const { items, recipeId, cartId } = req.body; // items: array of {name, category, franchiseId}
+    const { items, recipeId, outletId } = req.body; // items: array of {name, category, franchiseId}
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res
@@ -2303,7 +2475,7 @@ exports.importFromDefaultMenu = async (req, res) => {
     }
 
     // Set outlet context
-    const outletData = await setOutletContext(req.user, { cartId });
+    const outletData = await setOutletContext(req.user, { outletId });
 
     // Get default menu to fetch prices
     const franchiseId = items[0]?.franchiseId || null;
@@ -2336,13 +2508,13 @@ exports.importFromDefaultMenu = async (req, res) => {
             ? {
                 name: item.name,
                 category: item.category,
-                cartId: outletData.cartId,
+                outletId: outletData.outletId,
                 defaultMenuPath: item.defaultMenuPath,
               }
             : {
                 name: item.name,
                 category: item.category,
-                cartId: outletData.cartId,
+                outletId: outletData.outletId,
               }
         );
 
@@ -2366,7 +2538,7 @@ exports.importFromDefaultMenu = async (req, res) => {
               message: "About to create menu item from default",
               data: {
                 userRole: req.user.role,
-                cartId: outletData.cartId,
+                outletId: outletData.outletId,
                 franchiseId: outletData.franchiseId,
                 itemName: item.name,
                 itemCategory: item.category,
@@ -2382,7 +2554,7 @@ exports.importFromDefaultMenu = async (req, res) => {
           name: item.name,
           category: item.category,
           sellingPrice,
-          cartId: outletData.cartId,
+          outletId: outletData.outletId,
           franchiseId: outletData.franchiseId,
           defaultMenuFranchiseId: item.franchiseId || null,
           defaultMenuCategoryName: item.category,
@@ -2396,18 +2568,10 @@ exports.importFromDefaultMenu = async (req, res) => {
 
         const menuItem = new MenuItem(menuItemData);
 
-        // If a recipe is provided, recalculate its cost and use for metrics
+        // If a recipe is provided, use its costPerPortion for metrics.
         if (recipeId) {
           const recipe = await Recipe.findById(recipeId);
           if (recipe) {
-            // Recalculate recipe cost using cartId to ensure accurate cost
-            const cartIdForCost =
-              req.user.role === "admin"
-                ? req.user._id
-                : outletData.cartId || recipe.cartId || null;
-            await recipe.calculateCost(cartIdForCost);
-            await recipe.save(); // Save updated recipe cost
-            // Calculate menu item metrics with recalculated recipe cost
             menuItem.calculateMetrics(recipe.costPerPortion);
           }
         }
@@ -2572,7 +2736,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get labour costs - filter by date range properly
-        const labourFilter = { cartId: kiosk._id };
+        const labourFilter = { outletId: kiosk._id };
         if (from || to) {
           // Include labour costs that overlap with the date range
           const fromDate = from ? new Date(from) : new Date("1970-01-01");
@@ -2603,7 +2767,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get expenses for this kiosk in the date range
-        const expenseFilter = { cartId: kiosk._id };
+        const expenseFilter = { outletId: kiosk._id };
         if (from || to) {
           expenseFilter.expenseDate = {};
           if (from) {
@@ -2796,10 +2960,10 @@ exports.getHierarchicalCosting = async (req, res) => {
  */
 exports.getLabourCosts = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { from, to, outletId } = req.query;
     const filter = {};
 
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.outletId = outletId;
     if (from || to) {
       filter.$or = [
         {
@@ -2849,10 +3013,10 @@ exports.createLabourCost = async (req, res) => {
  */
 exports.getOverheads = async (req, res) => {
   try {
-    const { from, to, cartId, category } = req.query;
+    const { from, to, outletId, category } = req.query;
     const filter = {};
 
-    if (cartId) filter.cartId = cartId;
+    if (outletId) filter.outletId = outletId;
     if (category) filter.category = category;
     if (from || to) {
       filter.$or = [
@@ -2905,7 +3069,7 @@ exports.createOverhead = async (req, res) => {
  */
 exports.getFoodCostReport = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { from, to, outletId } = req.query;
 
     // Log user info for debugging
     console.log("[FOOD_COST_REPORT] User:", {
@@ -2935,8 +3099,8 @@ exports.getFoodCostReport = async (req, res) => {
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        const outlet = await User.findById(cartId);
+      if (outletId) {
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -2946,7 +3110,7 @@ exports.getFoodCostReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
@@ -2957,8 +3121,8 @@ exports.getFoodCostReport = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        transactionOutletFilter.cartId = cartId;
+      if (outletId) {
+        transactionOutletFilter.cartId = outletId;
       }
     }
 
@@ -2992,21 +3156,21 @@ exports.getFoodCostReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const cartIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: cartIds };
+        const outletIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: outletIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       }
     }
 
@@ -3067,7 +3231,7 @@ exports.getFoodCostReport = async (req, res) => {
  */
 exports.getMenuEngineeringReport = async (req, res) => {
   try {
-    const { from, to, limit = 50, cartId } = req.query;
+    const { from, to, limit = 50, outletId } = req.query;
     const orderFilter = {};
 
     if (from || to) {
@@ -3083,21 +3247,21 @@ exports.getMenuEngineeringReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const cartIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: cartIds };
+        const outletIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: outletIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       }
     }
 
@@ -3105,15 +3269,15 @@ exports.getMenuEngineeringReport = async (req, res) => {
     const menuItemFilter = { isActive: true };
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk's menu items
-      menuItemFilter.cartId = req.user._id;
+      menuItemFilter.outletId = req.user._id;
       console.log(
-        "[MENU_ENGINEERING_REPORT] Cart admin filter - cartId:",
+        "[MENU_ENGINEERING_REPORT] Cart admin filter - outletId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        const outlet = await User.findById(cartId);
+      if (outletId) {
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3123,19 +3287,19 @@ exports.getMenuEngineeringReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        menuItemFilter.cartId = cartId;
+        menuItemFilter.outletId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        menuItemFilter.cartId = { $in: outlets.map((o) => o._id) };
+        menuItemFilter.outletId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        menuItemFilter.cartId = cartId;
+      if (outletId) {
+        menuItemFilter.outletId = outletId;
       }
     }
 
@@ -3220,7 +3384,7 @@ exports.getMenuEngineeringReport = async (req, res) => {
  */
 exports.getSupplierPriceHistory = async (req, res) => {
   try {
-    const { supplierId, ingredientId, cartId } = req.query;
+    const { supplierId, ingredientId, outletId } = req.query;
     const filter = { status: "received" };
 
     if (supplierId) filter.supplierId = supplierId;
@@ -3228,15 +3392,15 @@ exports.getSupplierPriceHistory = async (req, res) => {
     // Apply role-based outlet filtering
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      filter.cartId = req.user._id;
+      filter.outletId = req.user._id;
       console.log(
-        "[SUPPLIER_PRICE_HISTORY] Cart admin filter - cartId:",
+        "[SUPPLIER_PRICE_HISTORY] Cart admin filter - outletId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        const outlet = await User.findById(cartId);
+      if (outletId) {
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3246,19 +3410,19 @@ exports.getSupplierPriceHistory = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.cartId = cartId;
+        filter.outletId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        filter.cartId = { $in: outlets.map((o) => o._id) };
+        filter.outletId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        filter.cartId = cartId;
+      if (outletId) {
+        filter.outletId = outletId;
       }
     }
 
@@ -3318,7 +3482,7 @@ exports.getSupplierPriceHistory = async (req, res) => {
  */
 exports.getPnLReport = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { from, to, outletId } = req.query;
 
     // Log user info for debugging
     console.log("[PNL_REPORT] User:", {
@@ -3348,8 +3512,8 @@ exports.getPnLReport = async (req, res) => {
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        const outlet = await User.findById(cartId);
+      if (outletId) {
+        const outlet = await User.findById(outletId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3359,7 +3523,7 @@ exports.getPnLReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
@@ -3370,8 +3534,8 @@ exports.getPnLReport = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        transactionOutletFilter.cartId = cartId;
+      if (outletId) {
+        transactionOutletFilter.cartId = outletId;
       }
     }
 
@@ -3416,21 +3580,21 @@ exports.getPnLReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const cartIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: cartIds };
+        const outletIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: outletIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        orderFilter.cartId = cartId;
+      if (outletId) {
+        orderFilter.cartId = outletId;
       }
     }
 
@@ -3467,27 +3631,27 @@ exports.getPnLReport = async (req, res) => {
     const labourFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      labourFilter.cartId = req.user._id;
+      labourFilter.outletId = req.user._id;
       console.log(
-        "[PNL_REPORT] Cart admin labour filter - cartId:",
+        "[PNL_REPORT] Cart admin labour filter - outletId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        labourFilter.cartId = cartId;
+      if (outletId) {
+        labourFilter.outletId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        labourFilter.cartId = { $in: outlets.map((o) => o._id) };
+        labourFilter.outletId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        labourFilter.cartId = cartId;
+      if (outletId) {
+        labourFilter.outletId = outletId;
       }
     }
 
@@ -3531,27 +3695,27 @@ exports.getPnLReport = async (req, res) => {
     const expenseFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      expenseFilter.cartId = req.user._id;
+      expenseFilter.outletId = req.user._id;
       console.log(
-        "[PNL_REPORT] Cart admin expense filter - cartId:",
+        "[PNL_REPORT] Cart admin expense filter - outletId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (cartId) {
-        expenseFilter.cartId = cartId;
+      if (outletId) {
+        expenseFilter.outletId = outletId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        expenseFilter.cartId = { $in: outlets.map((o) => o._id) };
+        expenseFilter.outletId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (cartId) {
-        expenseFilter.cartId = cartId;
+      if (outletId) {
+        expenseFilter.outletId = outletId;
       }
     }
 
@@ -3615,17 +3779,17 @@ exports.getPnLReport = async (req, res) => {
  */
 exports.getExpenses = async (req, res) => {
   try {
-    const { from, to, category, cartId, search } = req.query;
+    const { from, to, category, outletId, search } = req.query;
     const query = await buildCostingQuery(req.user, {});
 
-    if (cartId) {
-      const hasAccess = await validateOutletAccess(req.user, cartId);
+    if (outletId) {
+      const hasAccess = await validateOutletAccess(req.user, outletId);
       if (!hasAccess) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this outlet" });
       }
-      query.cartId = cartId;
+      query.outletId = outletId;
     }
 
     if (from || to) {
@@ -3712,7 +3876,7 @@ exports.updateExpense = async (req, res) => {
     }
 
     // Validate access (validateOutletAccess is async)
-    const hasAccess = await validateOutletAccess(req.user, expense.cartId);
+    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
     if (!hasAccess) {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
@@ -3749,7 +3913,7 @@ exports.deleteExpense = async (req, res) => {
     }
 
     // Validate access (validateOutletAccess is async)
-    const hasAccess = await validateOutletAccess(req.user, expense.cartId);
+    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
     if (!hasAccess) {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
@@ -3768,17 +3932,17 @@ exports.deleteExpense = async (req, res) => {
  */
 exports.getExpenseSummary = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { from, to, outletId } = req.query;
     const query = await buildCostingQuery(req.user, {});
 
-    if (cartId) {
-      const hasAccess = await validateOutletAccess(req.user, cartId);
+    if (outletId) {
+      const hasAccess = await validateOutletAccess(req.user, outletId);
       if (!hasAccess) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this outlet" });
       }
-      query.cartId = cartId;
+      query.outletId = outletId;
     }
 
     if (from || to) {
@@ -3876,20 +4040,22 @@ exports.createExpenseCategory = async (req, res) => {
  */
 exports.syncMenuItemsFromDefault = async (req, res) => {
   try {
-    const { franchiseId, cartId } = req.body;
+    const { franchiseId, outletId } = req.body;
     const {
       syncDefaultMenuToCosting,
     } = require("../../services/costing-v2/syncDefaultMenuToCosting");
 
     // For cart admin, sync from their MenuItem collection (cart menu)
     let targetFranchiseId = franchiseId;
-    let targetCartId = cartId || null;
+    let cartId = null;
+    let targetOutletId = outletId;
 
     if (req.user.role === "admin") {
       // Cart admin: sync from MenuItem collection (cart menu)
-      // If cartId not provided, use cart admin's own cart ID
-      if (!targetCartId) {
-        targetCartId = req.user._id;
+      cartId = req.user._id;
+      // If outletId not provided, use cart admin's own kiosk ID
+      if (!targetOutletId) {
+        targetOutletId = req.user._id;
       }
     } else if (req.user.role === "franchise_admin") {
       targetFranchiseId = req.user._id;
@@ -3899,7 +4065,8 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
 
     const syncResult = await syncDefaultMenuToCosting(
       targetFranchiseId,
-      targetCartId
+      cartId,
+      targetOutletId
     );
 
     res.json({
@@ -3934,7 +4101,7 @@ exports.pushToCartAdmins = async (req, res) => {
       });
     }
 
-    const { cartId } = req.body; // Optional: push to specific cart admin, or all if not provided
+    const { outletId } = req.body; // Optional: push to specific cart admin, or all if not provided
 
     // Get all super admin ingredients (cartId: null)
     const superAdminIngredients = await Ingredient.find({
@@ -3952,9 +4119,9 @@ exports.pushToCartAdmins = async (req, res) => {
 
     // Get target cart admins
     let cartAdmins = [];
-    if (cartId) {
+    if (outletId) {
       // Push to specific cart admin
-      const cartAdmin = await User.findById(cartId);
+      const cartAdmin = await User.findById(outletId);
       if (!cartAdmin || cartAdmin.role !== "admin") {
         return res.status(404).json({
           success: false,
@@ -4201,3 +4368,4 @@ exports.pushToCartAdmins = async (req, res) => {
     });
   }
 };
+

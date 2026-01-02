@@ -215,6 +215,7 @@ class WeightedAverageService {
    * @param {String} refId - Reference ID
    * @param {String} userId - User recording the transaction
    * @param {String} cartId - Optional outlet ID for cart-specific consumption
+   * @param {Boolean} allowNegativeStock - Allow consumption even if it exceeds available stock (for waste tracking)
    * @returns {Promise<Object>} { costAllocated, remainingQty }
    */
   static async consume(
@@ -223,7 +224,8 @@ class WeightedAverageService {
     refType,
     refId,
     userId,
-    cartId = null
+    cartId = null,
+    allowNegativeStock = false
   ) {
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -301,8 +303,8 @@ class WeightedAverageService {
       avgCost = ingredient.currentCostPerBaseUnit || 0;
     }
 
-    // Validate sufficient stock
-    if (availableQty < qtyToConsume) {
+    // Validate sufficient stock (unless allowNegativeStock is true for waste tracking)
+    if (availableQty < qtyToConsume && !allowNegativeStock) {
       let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableQty} ${ingredient.baseUnit}, Required: ${qtyToConsume} ${ingredient.baseUnit}`;
       
       if (cartId && availableQty === 0) {
@@ -322,9 +324,9 @@ class WeightedAverageService {
     // Calculate cost allocated using weighted average
     const costAllocated = qtyToConsume * avgCost;
 
-    // Update ingredient stock (validate no negative stock)
+    // Update ingredient stock (validate no negative stock unless allowNegativeStock is true)
     const newQty = availableQty - qtyToConsume;
-    if (newQty < 0) {
+    if (newQty < 0 && !allowNegativeStock) {
       throw new Error(
         `Stock update would result in negative quantity. Available: ${availableQty} ${ingredient.baseUnit}, Consuming: ${qtyToConsume} ${ingredient.baseUnit}`
       );
