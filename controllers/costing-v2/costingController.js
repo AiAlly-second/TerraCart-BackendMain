@@ -52,6 +52,24 @@ function convertQtyToBaseUnit(qty, fromUom, baseUnit) {
   console.warn(`[CONVERSION] No conversion factor found for ${fromUom} to ${baseUnit}, using original qty`);
   return qty;
 }
+
+// Helper function to safely convert to base unit (works with both Mongoose documents and plain objects)
+function safeConvertToBaseUnit(ingredient, qty, fromUom) {
+  // If ingredient has the method (Mongoose document), use it
+  if (ingredient && typeof ingredient.convertToBaseUnit === 'function') {
+    try {
+      return ingredient.convertToBaseUnit(qty, fromUom);
+    } catch (error) {
+      // Fallback to manual conversion if method fails
+      return convertQtyToBaseUnit(qty, fromUom, ingredient.baseUnit);
+    }
+  }
+  
+  // Otherwise, use manual conversion
+  const baseUnit = ingredient?.baseUnit || 'pcs';
+  return convertQtyToBaseUnit(qty, fromUom, baseUnit);
+}
+
 const Waste = require("../../models/costing-v2/wasteModel");
 const LabourCost = require("../../models/costing-v2/labourCostModel");
 const Overhead = require("../../models/costing-v2/overheadModel");
@@ -863,18 +881,10 @@ exports.getIngredients = async (req, res) => {
             // Fallback: convert from qty and uom if qtyInBaseUnit is missing
             if (txn.qty && txn.uom) {
               try {
-                // Try using ingredient's convertToBaseUnit method first
-                if (ingredient && typeof ingredient.convertToBaseUnit === 'function') {
-                  qty = ingredient.convertToBaseUnit(Number(txn.qty), txn.uom);
-                  if (process.env.NODE_ENV === 'development') {
-                    console.log(`[INVENTORY STOCK] ${ingredient.name}: Converted ${txn.qty} ${txn.uom} to ${qty} ${ingredient.baseUnit} using ingredient method`);
-                  }
-                } else {
-                  // Fallback: manual conversion using standard factors
-                  qty = convertQtyToBaseUnit(Number(txn.qty), txn.uom, ingredient.baseUnit);
-                  if (process.env.NODE_ENV === 'development') {
-                    console.log(`[INVENTORY STOCK] ${ingredient.name}: Converted ${txn.qty} ${txn.uom} to ${qty} ${ingredient.baseUnit} using manual conversion`);
-                  }
+                // Use safe conversion helper
+                qty = safeConvertToBaseUnit(ingredient, Number(txn.qty), txn.uom);
+                if (process.env.NODE_ENV === 'development') {
+                  console.log(`[INVENTORY STOCK] ${ingredient.name}: Converted ${txn.qty} ${txn.uom} to ${qty} ${ingredient.baseUnit}`);
                 }
               } catch (error) {
                 console.error(`[INVENTORY STOCK ERROR] ${ingredient.name}: Cannot convert ${txn.qty} ${txn.uom} to ${ingredient.baseUnit}:`, error.message);
@@ -934,110 +944,87 @@ exports.getIngredients = async (req, res) => {
           }
         }
         
-        // SIMPLE COST: Use EXACT purchase unitPrice (same as purchase time)
-        let lastPurchaseUnitPrice = 0; // Exact unitPrice from purchase (per display unit)
-        let lastPurchaseUom = ingredient.uom; // Unit from purchase
-        let costPerBaseUnit = 0; // Cost per base unit (for total value calculation)
+        // WEIGHTED AVERAGE COST: Calculate from all transactions (not just last purchase)
+        let lastPurchaseUnitPrice = 0; // Last purchase unitPrice for display (per display unit)
+        let lastPurchaseUom = ingredient.uom; // Unit from last purchase
+        let costPerBaseUnit = 0; // Weighted average cost per base unit
         
         if (stock <= 0) {
           lastPurchaseUnitPrice = 0;
           costPerBaseUnit = 0;
         } else if (transactions.length > 0) {
-          // Find most recent purchase (IN transaction)
+          // Calculate weighted average from all transactions
+          let totalQty = 0;
+          let totalValue = 0;
+          let weightedAvgCost = 0;
+          
+          // Also track last purchase for display
           const purchases = transactions
             .filter(t => t.type === "IN")
             .sort((a, b) => new Date(b.date) - new Date(a.date));
           
           if (purchases.length > 0) {
             const lastPurchase = purchases[0];
-            
-            // CRITICAL: Use exact unitPrice from purchase (per display unit - SAME as purchase)
+            // Set last purchase price for display
             if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-              // Use exact unitPrice as-is (per purchase uom) - NO CONVERSION
               lastPurchaseUnitPrice = Number(lastPurchase.unitPrice);
               lastPurchaseUom = lastPurchase.uom || ingredient.uom;
-              
-              // Convert to base unit ONLY for internal calculations (total value)
-              try {
-                // CRITICAL: convertToBaseUnit(1, "kg") returns how many base units (g) are in 1 kg = 1000
-                // So if unitPrice is ₹200/kg, cost per gram = 200 / 1000 = ₹0.2/g
-                // Example: convertToBaseUnit(1, "kg") when baseUnit="g" returns 1000
-                //          So 1 kg = 1000 g
-                //          unitPrice ₹200/kg means ₹200 per 1000g = ₹0.2 per gram
-                const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchaseUom);
-                
-                if (conversionFactor > 0 && isFinite(conversionFactor)) {
-                  // Formula: costPerBaseUnit = unitPrice / conversionFactor
-                  // Example: ₹200/kg / 1000 (g per kg) = ₹0.2/g ✓
-                  costPerBaseUnit = Number((lastPurchaseUnitPrice / conversionFactor).toFixed(6));
-                  
-                  if (process.env.NODE_ENV === 'development') {
-                    console.log(`[INVENTORY COST] ${ingredient.name}: Calculated costPerBaseUnit = ₹${costPerBaseUnit}/${ingredient.baseUnit} (from ₹${lastPurchaseUnitPrice}/${lastPurchaseUom} / ${conversionFactor})`);
-                  }
-                  
-                  // CRITICAL: Validate the calculated cost is reasonable
-                  // If cost per base unit seems too high, there might be a conversion error
-                  // For g/ml, reasonable cost per gram/ml is usually < ₹1000
-                  if (costPerBaseUnit > 10000 && (ingredient.baseUnit === 'g' || ingredient.baseUnit === 'ml')) {
-                    console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Calculated cost per ${ingredient.baseUnit} is very high: ₹${costPerBaseUnit}. This suggests a conversion error. unitPrice=₹${lastPurchaseUnitPrice}/${lastPurchaseUom}, conversionFactor=${conversionFactor}`);
-                    // Try fallback calculation using costAllocated
-                    const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
-                    const costAllocated = Number(lastPurchase.costAllocated) || 0;
-                    if (qty > 0 && costAllocated > 0) {
-                      const fallbackCost = Number((costAllocated / qty).toFixed(6));
-                      console.log(`[INVENTORY COST] ${ingredient.name}: Using fallback cost calculation: ₹${fallbackCost}/${ingredient.baseUnit} (from costAllocated ₹${costAllocated} / qty ${qty})`);
-                      costPerBaseUnit = fallbackCost;
-                      // Also recalculate unitPrice from fallback
-                      const displayQty = Number(lastPurchase.qty) || 0;
-                      if (displayQty > 0) {
-                        // Convert fallback cost back to display unit
-                        const displayConversionFactor = ingredient.convertToBaseUnit(1, lastPurchaseUom);
-                        lastPurchaseUnitPrice = Number((fallbackCost * displayConversionFactor).toFixed(2));
-                        console.log(`[INVENTORY COST] ${ingredient.name}: Recalculated unitPrice = ₹${lastPurchaseUnitPrice}/${lastPurchaseUom}`);
-                      }
-                    }
-                  }
-                } else {
-                  // Fallback: use costAllocated / qtyInBaseUnit if conversion fails
-                  const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
-                  const costAllocated = Number(lastPurchase.costAllocated) || 0;
-                  if (qty > 0 && costAllocated > 0) {
-                    costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
-                    const displayQty = Number(lastPurchase.qty) || 0;
-                    if (displayQty > 0) {
-                      lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
-                    }
-                    if (process.env.NODE_ENV === 'development') {
-                      console.warn(`[INVENTORY COST] ${ingredient.name}: Using fallback cost calculation - costAllocated=${costAllocated}, qtyInBaseUnit=${qty}, costPerBaseUnit=${costPerBaseUnit}`);
-                    }
-                  }
-                }
-              } catch (error) {
-                console.error(`[INVENTORY COST ERROR] ${ingredient.name}:`, error);
+            }
+          }
+          
+          // Calculate weighted average from all transactions
+          for (const txn of transactions) {
+            const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
+            
+            if (txn.type === "IN" || txn.type === "RETURN") {
+              // Add to inventory - calculate weighted average
+              let txnCostPerBaseUnit = 0;
+              if (txn.unitPrice != null && txn.unitPrice > 0) {
+                // Use exact purchase price - convert to base unit
+                const conversionFactor = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+                txnCostPerBaseUnit = txn.unitPrice / conversionFactor;
+              } else if (txn.costAllocated > 0 && txnQty > 0) {
                 // Fallback: calculate from costAllocated
-                const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
-                const costAllocated = Number(lastPurchase.costAllocated) || 0;
-                if (qty > 0 && costAllocated > 0) {
-                  costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
-                  const displayQty = Number(lastPurchase.qty) || 0;
-                  if (displayQty > 0) {
-                    lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
-                  }
-                }
+                txnCostPerBaseUnit = txn.costAllocated / txnQty;
               }
-            } else {
-              // Fallback: calculate from costAllocated if unitPrice not available
-              const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
-              const costAllocated = Number(lastPurchase.costAllocated) || 0;
-              if (qty > 0) {
-                costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
-                const displayQty = Number(lastPurchase.qty) || 0;
-                if (displayQty > 0) {
-                  lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
-                  lastPurchaseUom = lastPurchase.uom || ingredient.uom;
-                }
+              
+              if (txnQty > 0 && txnCostPerBaseUnit > 0) {
+                // Weighted average: (existing total value + new value) / (existing qty + new qty)
+                const newValue = txnQty * txnCostPerBaseUnit;
+                totalValue = totalValue + newValue;
+                totalQty += txnQty;
+                weightedAvgCost = totalQty > 0 ? totalValue / totalQty : 0;
+              }
+            } else if (txn.type === "OUT" || txn.type === "WASTE") {
+              // Remove from inventory - reduce total value proportionally
+              if (totalQty > 0 && weightedAvgCost > 0) {
+                const consumedValue = txnQty * weightedAvgCost;
+                totalValue = Math.max(0, totalValue - consumedValue);
+              }
+              totalQty -= txnQty;
+              if (totalQty < 0) {
+                totalQty = 0;
+                totalValue = 0;
+                weightedAvgCost = 0;
+              } else if (totalQty > 0) {
+                weightedAvgCost = totalValue / totalQty;
+              } else {
+                weightedAvgCost = 0;
               }
             }
+          }
+          
+          // Use calculated weighted average
+          costPerBaseUnit = weightedAvgCost;
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[INVENTORY COST] ${ingredient.name}: Weighted average cost = ₹${costPerBaseUnit.toFixed(6)}/${ingredient.baseUnit} (calculated from ${transactions.length} transactions)`);
+          }
+        } else {
+          // No transactions - use saved weighted average from ingredient
+          costPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[INVENTORY COST] ${ingredient.name}: No transactions, using saved cost = ₹${costPerBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
           }
         }
         
@@ -1138,45 +1125,59 @@ exports.getIngredients = async (req, res) => {
         }
         stock = Math.max(0, stock);
         
-        // Calculate cost from last purchase
+        // Calculate weighted average cost from all transactions
         let cost = 0;
         if (stock > 0 && transactions.length > 0) {
-          const purchases = transactions
-            .filter(t => t.type === "IN")
-            .sort((a, b) => new Date(b.date) - new Date(a.date));
+          let totalQty = 0;
+          let totalValue = 0;
+          let weightedAvgCost = 0;
           
-          if (purchases.length > 0) {
-            const lastPurchase = purchases[0];
+          // Calculate weighted average from all transactions
+          for (const txn of transactions) {
+            const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
             
-            if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-              try {
-                const purchaseUom = lastPurchase.uom || ingredient.uom;
-                const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+            if (txn.type === "IN" || txn.type === "RETURN") {
+              // Add to inventory - calculate weighted average
+              if (totalQty > 0 && txnQty > 0) {
+                // Calculate cost per base unit for this transaction
+                let txnCostPerBaseUnit = 0;
+                if (txn.unitPrice != null && txn.unitPrice > 0) {
+                  // Use exact purchase price - convert to base unit
+                  const conversionFactor = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+                  txnCostPerBaseUnit = txn.unitPrice / conversionFactor;
+                } else if (txn.costAllocated > 0 && txnQty > 0) {
+                  // Fallback: calculate from costAllocated
+                  txnCostPerBaseUnit = txn.costAllocated / txnQty;
+                }
                 
-                if (conversionFactor > 0 && isFinite(conversionFactor)) {
-                  cost = lastPurchase.unitPrice / conversionFactor;
-                } else {
-                  const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
-                  const costAllocated = lastPurchase.costAllocated || 0;
-                  if (qty > 0) {
-                    cost = costAllocated / qty;
-                  }
+                // Weighted average: (existing total value + new value) / (existing qty + new qty)
+                const existingTotalValue = totalQty * (weightedAvgCost || 0);
+                const newValue = txnQty * txnCostPerBaseUnit;
+                totalValue = existingTotalValue + newValue;
+                totalQty += txnQty;
+                weightedAvgCost = totalQty > 0 ? totalValue / totalQty : 0;
+              } else if (txnQty > 0) {
+                // First purchase - set initial cost
+                if (txn.unitPrice != null && txn.unitPrice > 0) {
+                  const conversionFactor = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+                  weightedAvgCost = txn.unitPrice / conversionFactor;
+                } else if (txn.costAllocated > 0) {
+                  weightedAvgCost = txn.costAllocated / txnQty;
                 }
-              } catch (error) {
-                const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
-                const costAllocated = lastPurchase.costAllocated || 0;
-                if (qty > 0) {
-                  cost = costAllocated / qty;
-                }
+                totalQty = txnQty;
+                totalValue = totalQty * weightedAvgCost;
               }
-            } else {
-              const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
-              const costAllocated = lastPurchase.costAllocated || 0;
-              if (qty > 0) {
-                cost = costAllocated / qty;
-              }
+            } else if (txn.type === "OUT" || txn.type === "WASTE") {
+              // Remove from inventory (cost already allocated, just reduce quantity)
+              // Weighted average cost doesn't change on consumption
+              totalQty -= txnQty;
+              if (totalQty < 0) totalQty = 0;
+              // Recalculate total value based on remaining quantity
+              totalValue = totalQty * weightedAvgCost;
             }
           }
+          
+          cost = weightedAvgCost;
         }
         
         ingredient.qtyOnHand = stock;
@@ -1231,73 +1232,14 @@ exports.getIngredients = async (req, res) => {
         }
 
         let totalQty = 0;
-        let lastPurchaseCost = 0;
+        let weightedAvgCost = 0;
 
-        // If we have transactions, calculate from them
+        // If we have transactions, calculate weighted average from them
         if (cartTransactions.length > 0) {
-          console.log(`[INVENTORY COST] ${ingredient.name}: Processing ${cartTransactions.length} transactions for cost calculation`);
+          console.log(`[INVENTORY COST] ${ingredient.name}: Processing ${cartTransactions.length} transactions for weighted average cost calculation`);
           
-          // Find the most recent purchase transaction (IN type) for last purchase cost
-          const purchaseTransactions = cartTransactions
-            .filter(txn => txn.type === "IN")
-            .sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
-          
-          if (purchaseTransactions.length > 0) {
-            const lastPurchase = purchaseTransactions[0];
-            const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-            
-            // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
-            // This ensures inventory price matches purchase price exactly
-            if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-              // Use exact purchase price - convert to base unit if needed
-              const purchaseUom = lastPurchase.uom || ingredient.uom;
-              
-              // IMPORTANT: unitPrice is stored per display unit (uom), need to convert to base unit
-              // Example: If unitPrice = ₹200/kg and baseUnit = g:
-              //   conversionFactor = convertToBaseUnit(1, "kg") = 1000 (grams in 1 kg)
-              //   lastPurchaseCost = 200 / 1000 = 0.2 per gram
-              const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
-              
-              // Validate conversion factor
-              if (conversionFactor <= 0 || isNaN(conversionFactor) || !isFinite(conversionFactor)) {
-                console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Invalid conversion factor ${conversionFactor} for ${purchaseUom} to ${ingredient.baseUnit}`);
-                // Fallback to costAllocated calculation
-                const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-                if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-                  lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
-                  console.log(`[INVENTORY COST] ${ingredient.name}: Using fallback calculation = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}`);
-                }
-              } else {
-                // Convert unitPrice (per display unit) to base unit
-                // Example: ₹200/kg → ₹0.2/g (if baseUnit is g)
-                lastPurchaseCost = lastPurchase.unitPrice / conversionFactor;
-                
-                // Validate the result is reasonable
-                if (lastPurchaseCost <= 0 || !isFinite(lastPurchaseCost)) {
-                  console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Invalid calculated cost ${lastPurchaseCost} from unitPrice=${lastPurchase.unitPrice}, conversionFactor=${conversionFactor}`);
-                  // Fallback to costAllocated
-                  const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-                  if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-                    lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
-                  }
-                }
-              }
-              
-              console.log(`[INVENTORY COST] ${ingredient.name}: unitPrice=₹${lastPurchase.unitPrice}/${purchaseUom}, conversionFactor=${conversionFactor}, baseUnit=${ingredient.baseUnit}, lastPurchaseCost=₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}, qtyInBaseUnit=${lastPurchaseQty}`);
-            } else {
-              // Fallback: calculate from costAllocated
-              const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-              if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-                lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
-                console.log(`[INVENTORY COST] ${ingredient.name}: Calculated cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
-              }
-            }
-          }
-          
-          // Calculate total quantity from all transactions
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`[STOCK CALC] ${ingredient.name}: Processing ${cartTransactions.length} transactions for stock calculation`);
-          }
+          // Calculate weighted average cost from all transactions
+          let totalValue = 0; // Total value of inventory in base unit
           
           for (const txn of cartTransactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
@@ -1308,17 +1250,50 @@ exports.getIngredients = async (req, res) => {
             }
             
             if (txn.type === "IN" || txn.type === "RETURN") {
-              totalQty += txnQty;
+              // Add to inventory - calculate weighted average
+              if (totalQty > 0 && txnQty > 0) {
+                // Calculate cost per base unit for this transaction
+                let txnCostPerBaseUnit = 0;
+                if (txn.unitPrice != null && txn.unitPrice > 0) {
+                  // Use exact purchase price - convert to base unit
+                  const conversionFactor = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+                  txnCostPerBaseUnit = txn.unitPrice / conversionFactor;
+                } else if (txn.costAllocated > 0 && txnQty > 0) {
+                  // Fallback: calculate from costAllocated
+                  txnCostPerBaseUnit = txn.costAllocated / txnQty;
+                }
+                
+                // Weighted average: (existing total value + new value) / (existing qty + new qty)
+                const existingTotalValue = totalQty * (weightedAvgCost || 0);
+                const newValue = txnQty * txnCostPerBaseUnit;
+                totalValue = existingTotalValue + newValue;
+                totalQty += txnQty;
+                weightedAvgCost = totalQty > 0 ? totalValue / totalQty : 0;
+              } else if (txnQty > 0) {
+                // First purchase - set initial cost
+                if (txn.unitPrice != null && txn.unitPrice > 0) {
+                  const conversionFactor = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+                  weightedAvgCost = txn.unitPrice / conversionFactor;
+                } else if (txn.costAllocated > 0) {
+                  weightedAvgCost = txn.costAllocated / txnQty;
+                }
+                totalQty = txnQty;
+                totalValue = totalQty * weightedAvgCost;
+              }
             } else if (txn.type === "OUT" || txn.type === "WASTE") {
+              // Remove from inventory (cost already allocated, just reduce quantity)
+              // Weighted average cost doesn't change on consumption
               totalQty -= txnQty;
               if (totalQty < 0) totalQty = 0;
+              // Recalculate total value based on remaining quantity
+              totalValue = totalQty * weightedAvgCost;
             }
           }
           
           cartSpecificQty = Math.max(0, totalQty);
           
           if (process.env.NODE_ENV === 'development') {
-            console.log(`[STOCK CALC] ${ingredient.name}: Final calculated stock = ${cartSpecificQty} ${ingredient.baseUnit}, lastPurchaseCost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}`);
+            console.log(`[STOCK CALC] ${ingredient.name}: Final calculated stock = ${cartSpecificQty} ${ingredient.baseUnit}, weighted avg cost = ₹${weightedAvgCost.toFixed(6)}/${ingredient.baseUnit}`);
           }
         } else {
           // No transactions found for shared ingredient
@@ -1326,7 +1301,7 @@ exports.getIngredients = async (req, res) => {
           // This handles cases where stock was set manually or before transaction tracking
           // OR if the ingredient has global stock that should be visible to all carts
           cartSpecificQty = Number(ingredient.qtyOnHand) || 0;
-          lastPurchaseCost = 0;
+          weightedAvgCost = 0;
           
           if (process.env.NODE_ENV === 'development') {
             console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${cartSpecificQty}`);
@@ -1341,12 +1316,12 @@ exports.getIngredients = async (req, res) => {
           // This is the absolute rule - no exceptions, no fallbacks
           cartSpecificCost = 0;
         } else {
-          // Stock > 0 - use last purchase cost
-          if (lastPurchaseCost > 0) {
-            // We have a last purchase - use its cost
-            cartSpecificCost = lastPurchaseCost;
+          // Stock > 0 - use weighted average cost
+          if (weightedAvgCost > 0) {
+            // We have calculated weighted average from transactions - use it
+            cartSpecificCost = weightedAvgCost;
           } else {
-            // No purchase found - use ingredient's cost from database
+            // No transactions found - use ingredient's weighted average cost from database
             // This handles cases where stock exists but no transactions were recorded
             cartSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
           }
@@ -2098,14 +2073,14 @@ exports.receivePurchase = async (req, res) => {
       purchasedIngredientIds.push(item.ingredientId);
 
       // Convert to base unit
-      const qtyInBaseUnit = ingredient.convertToBaseUnit(item.qty, item.uom);
+      const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, item.qty, item.uom);
       
       // Calculate unit cost in base unit
       // Formula: unitCostInBaseUnit = unitPrice (per display unit) / conversionFactor (display units per base unit)
       // Example: If unitPrice is ₹608.26/kg and baseUnit is "g":
       //   convertToBaseUnit(1, "kg") = 1000 (grams in 1 kg)
       //   unitCostInBaseUnit = 608.26 / 1000 = 0.60826 per gram ✓
-      const conversionFactor = ingredient.convertToBaseUnit(1, item.uom);
+      const conversionFactor = safeConvertToBaseUnit(ingredient, 1, item.uom);
       const unitCostInBaseUnit = item.unitPrice / conversionFactor;
       
       // Validate the calculated cost is reasonable
@@ -2118,26 +2093,27 @@ exports.receivePurchase = async (req, res) => {
       // Always log purchase cost calculation for debugging
       console.log(`[PURCHASE] ${ingredient.name}: unitPrice=₹${item.unitPrice}/${item.uom}, baseUnit=${ingredient.baseUnit}, conversionFactor=${conversionFactor}, unitCostInBaseUnit=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
 
-      // SIMPLE: Update stock with exact purchase price (no weighted average)
+      // WEIGHTED AVERAGE: Update stock with weighted average cost calculation
+      // Formula: (Existing Stock Qty × Existing Avg Cost + New Purchase Qty × New Purchase Cost) / (Existing Stock Qty + New Purchase Qty)
       // Use cartId for stock update
       const cartId = purchase.cartId || null;
       
       // Log before update for debugging
       if (process.env.NODE_ENV === 'development') {
-        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Updating stock - qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, exactPurchasePrice=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}, cartId=${cartId}`);
+        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Updating stock - qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, purchasePrice=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}, cartId=${cartId}`);
       }
       
-      // Update stock and store exact purchase price (no averaging)
+      // Update stock and calculate weighted average cost
       const stockUpdateResult = await WeightedAverageService.updateWeightedAverage(
         item.ingredientId,
         qtyInBaseUnit,
-        unitCostInBaseUnit, // Exact purchase price per base unit
+        unitCostInBaseUnit, // Purchase price per base unit
         cartId
       );
       
       // Log after update for debugging
       if (process.env.NODE_ENV === 'development') {
-        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Stock updated - previousQty=${stockUpdateResult.previousQty}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, exactPrice=₹${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
+        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Stock updated - previousQty=${stockUpdateResult.previousQty}, previousAvgCost=₹${stockUpdateResult.previousAvgCost.toFixed(6)}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, weightedAvgCost=₹${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
       }
 
       // Calculate cost allocated using the actual purchase cost (not weighted average)
@@ -2351,7 +2327,7 @@ exports.consumeInventory = async (req, res) => {
     }
 
     // Convert to base unit
-    const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
+    const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
 
     // Consume using weighted average
     const result = await WeightedAverageService.consume(
@@ -2432,7 +2408,7 @@ exports.returnToInventory = async (req, res) => {
     }
 
     // Convert to base unit
-    const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
+    const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
 
     // Return to inventory using weighted average
     const result = await WeightedAverageService.returnToInventory(
@@ -2715,7 +2691,7 @@ exports.recordWaste = async (req, res) => {
     }
 
     // Convert to base unit
-    const qtyInBaseUnit = ingredient.convertToBaseUnit(qty, uom);
+    const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
 
     // Consume using weighted average to get cost
     // Allow negative stock for waste tracking (waste can exceed available stock for accounting purposes)
