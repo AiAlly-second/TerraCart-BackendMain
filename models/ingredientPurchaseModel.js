@@ -8,7 +8,7 @@ const ingredientPurchaseSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User", // Kiosk/Cafe reference
       required: true,
@@ -72,7 +72,7 @@ const ingredientPurchaseSchema = new mongoose.Schema(
 );
 
 // Indexes for efficient queries
-ingredientPurchaseSchema.index({ outletId: 1, purchaseDate: -1 });
+ingredientPurchaseSchema.index({ cartId: 1, purchaseDate: -1 });
 ingredientPurchaseSchema.index({ ingredientId: 1, purchaseDate: -1 });
 ingredientPurchaseSchema.index({ franchiseId: 1, purchaseDate: -1 });
 ingredientPurchaseSchema.index({ purchaseDate: -1 });

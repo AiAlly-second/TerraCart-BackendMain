@@ -17,8 +17,11 @@ const adminLogin = async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    console.log(`[ADMIN_LOGIN] Login attempt - Email: ${email ? email.toLowerCase().trim() : 'missing'}`);
+
     // Validate input
     if (!email || !password) {
+      console.log(`[ADMIN_LOGIN] ❌ Missing email or password`);
       return res.status(400).json({
         success: false,
         message: "Please provide email and password",
@@ -33,14 +36,18 @@ const adminLogin = async (req, res) => {
 
     // Use generic error to prevent user enumeration
     if (!user) {
+      console.log(`[ADMIN_LOGIN] ❌ User not found: ${normalizedEmail}`);
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
       });
     }
 
+    console.log(`[ADMIN_LOGIN] User found: ${user.name} (${user._id}), Role: ${user.role}, isActive: ${user.isActive}, isApproved: ${user.isApproved}`);
+
     // Check if user is an admin role
     if (!["super_admin", "franchise_admin", "admin"].includes(user.role)) {
+      console.log(`[ADMIN_LOGIN] ❌ Invalid role: ${user.role} (not an admin role)`);
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
@@ -90,14 +97,19 @@ const adminLogin = async (req, res) => {
     // Check password
     const isPasswordMatch = await user.matchPassword(password);
     if (!isPasswordMatch) {
+      console.log(`[ADMIN_LOGIN] ❌ Password mismatch for user: ${user.email}`);
       return res.status(401).json({
         success: false,
         message: "Invalid credentials",
       });
     }
 
+    console.log(`[ADMIN_LOGIN] ✅ Password verified for user: ${user.email}`);
+
     // Generate token
     const token = generateToken(user._id);
+    
+    console.log(`[ADMIN_LOGIN] ✅ Login successful - User: ${user.name} (${user.role})`);
 
     // Build user response with role-specific fields
     const userResponse = {

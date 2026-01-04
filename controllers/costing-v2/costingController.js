@@ -1,5 +1,6 @@
 const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 const Supplier = require("../../models/costing-v2/supplierModel");
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const Purchase = require("../../models/costing-v2/purchaseModel");
@@ -27,6 +28,30 @@ const logDebug = (location, message, data, hypothesisId) => {
 const MenuItem = require("../../models/costing-v2/menuItemModel");
 const { MenuItem: OperationalMenuItem } = require("../../models/menuItemModel");
 const MenuCategory = require("../../models/menuCategoryModel");
+
+// Helper function for manual unit conversion (fallback when ingredient method fails)
+function convertQtyToBaseUnit(qty, fromUom, baseUnit) {
+  if (fromUom === baseUnit) return qty;
+  
+  // Standard conversions
+  if (baseUnit === 'g') {
+    if (fromUom === 'kg') return qty * 1000;
+    if (fromUom === 'g') return qty;
+  } else if (baseUnit === 'ml') {
+    if (fromUom === 'l') return qty * 1000;
+    if (fromUom === 'ml') return qty;
+  } else if (baseUnit === 'pcs') {
+    if (fromUom === 'pcs' || fromUom === 'pack' || fromUom === 'box' || fromUom === 'bottle' || fromUom === 'dozen') {
+      // For pieces, assume 1:1 unless it's dozen
+      if (fromUom === 'dozen') return qty * 12;
+      return qty;
+    }
+  }
+  
+  // If no conversion found, return original qty (assume same unit)
+  console.warn(`[CONVERSION] No conversion factor found for ${fromUom} to ${baseUnit}, using original qty`);
+  return qty;
+}
 const Waste = require("../../models/costing-v2/wasteModel");
 const LabourCost = require("../../models/costing-v2/labourCostModel");
 const Overhead = require("../../models/costing-v2/overheadModel");
@@ -68,7 +93,7 @@ const decodeHtmlEntities = (str) => {
 /**
  * @route   GET /api/costing-v2/suppliers
  * @desc    Get suppliers filtered by cart/kiosk/cafe
- * @note    Suppliers are now cart-specific (have outletId field)
+ * @note    Suppliers are now cart-specific (have cartId field)
  */
 exports.getSuppliers = async (req, res) => {
   try {
@@ -78,7 +103,7 @@ exports.getSuppliers = async (req, res) => {
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
 
-    // Apply role-based filtering using buildCostingQuery (suppliers now have outletId)
+    // Apply role-based filtering using buildCostingQuery (suppliers now have cartId)
     const costingFilter = await buildCostingQuery(req.user, filter);
 
     console.log(
@@ -104,11 +129,11 @@ exports.createSupplier = async (req, res) => {
   try {
     // Use setOutletContext to automatically set cartId and franchiseId based on user role
     const supplierData = { ...req.body };
-    
-    // Handle outletId from request body (convert to cartId for consistency)
-    if (supplierData.outletId && !supplierData.cartId) {
-      supplierData.cartId = supplierData.outletId;
-      delete supplierData.outletId;
+
+    // Handle cartId from request body (convert to cartId for consistency)
+    if (supplierData.cartId && !supplierData.cartId) {
+      supplierData.cartId = supplierData.cartId;
+      delete supplierData.cartId;
     }
     
     // Use setOutletContext utility to set cartId and franchiseId
@@ -236,190 +261,953 @@ exports.deleteSupplier = async (req, res) => {
  */
 exports.getIngredients = async (req, res) => {
   try {
+    // CRITICAL: Log request details for debugging
+    console.log(`[GET_INGREDIENTS] Request received - User: ${req.user?.role} (${req.user?._id}), Query:`, req.query);
+    
     const {
       uom,
       lowStock,
       search,
       isActive,
-      outletId,
+      cartId: queryCartId,
+      outletId, // Backward compatibility - will be mapped to cartId
       category,
       storageLocation,
     } = req.query;
     const filter = {};
 
     if (uom) filter.uom = uom;
-    if (isActive !== undefined) filter.isActive = isActive === "true";
+    // CRITICAL: For cart admins, default to showing active ingredients
+    // Only apply isActive filter if explicitly provided
+    if (isActive !== undefined && isActive !== "") {
+      filter.isActive = isActive === "true";
+    } else {
+      // Default: show active ingredients for cart admins
+      // This ensures they see ingredients by default
+      filter.isActive = true;
+    }
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (outletId) filter.cartId = outletId;
+    // Only set cartId from query parameter for franchise/super admins, not for cart admins
+    // Cart admins should see both their own ingredients (cartId = their _id) AND shared ingredients (cartId = null)
+    // This is handled by buildCostingQuery with includeShared: true
+    // Support both cartId and outletId (backward compatibility)
+    const cartIdParam = queryCartId || outletId;
+    if (cartIdParam && req.user.role !== "admin") {
+      filter.cartId = cartIdParam;
+    }
     if (category) filter.category = category;
     if (storageLocation) filter.storageLocation = storageLocation;
 
     // Apply role-based filtering
-    // For cart admins (role: "admin"), always filter by their outletId (req.user._id)
+    // For cart admins (role: "admin"), always filter by their cartId (req.user._id)
     // This ensures cart admins only see ingredients belonging to their cart/kiosk
-    // For franchise/super admins, can see shared ingredients (outletId=null) or filter by specific outletId.
+    // For franchise/super admins, can see shared ingredients (cartId=null) or filter by specific cartId.
     // Additionally, for franchise_admin we include shared/global ingredients (franchiseId=null).
-    const shouldSkipOutletFilter =
+    const shouldSkipCartFilter =
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
-      !outletId;
+      !cartIdParam;
     const costingFilter = await buildCostingQuery(req.user, filter, {
-      skipOutletFilter: shouldSkipOutletFilter,
+      skipOutletFilter: shouldSkipCartFilter,
       includeShared: true,
     });
 
-    // Log filtering for debugging
+    // Enhanced logging for debugging
+    console.log(`[GET_INGREDIENTS] User: ${req.user?.role} (${req.user?._id})`);
+    console.log(`[GET_INGREDIENTS] Input filter:`, JSON.stringify(filter, null, 2));
+    console.log(`[GET_INGREDIENTS] Final costingFilter:`, JSON.stringify(costingFilter, null, 2));
+    
     if (req.user.role === "admin") {
-      console.log(
-        "[GET_INGREDIENTS] Cart admin filter - outletId:",
-        req.user._id.toString(),
-        "Filter:",
-        JSON.stringify(costingFilter)
-      );
+      // Check what ingredients exist before query
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
+      
+      const cartSpecificCount = await Ingredient.countDocuments({ cartId: userCartIdObj });
+      const sharedCount = await Ingredient.countDocuments({ cartId: null });
+      const noCartIdCount = await Ingredient.countDocuments({ cartId: { $exists: false } });
+      
+      console.log(`[GET_INGREDIENTS] Cart admin ${req.user._id} - Before query:`);
+      console.log(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecificCount}`);
+      console.log(`  - Shared (cartId=null): ${sharedCount}`);
+      console.log(`  - Legacy (no cartId): ${noCartIdCount}`);
+      console.log(`  - Total: ${cartSpecificCount + sharedCount + noCartIdCount}`);
     }
 
-    let ingredients = await Ingredient.find(costingFilter)
-      .populate("preferredSupplierId", "name")
-      .populate("cartId", "name cafeName")
-      .sort({ category: 1, name: 1 }); // Sort by category first, then name
-
-    // For Cart Admin, calculate outlet-specific qtyOnHand and currentCostPerBaseUnit
-    // This ensures each cart admin only sees their own inventory quantities and costs
+    // CRITICAL: For cart admins, test the query directly before executing
     if (req.user.role === "admin") {
-      const outletId = req.user._id;
-      for (const ingredient of ingredients) {
-        let outletSpecificQty = 0;
-        let outletSpecificCost = 0;
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
+      
+      // Test direct queries
+      const directTest1 = await Ingredient.find({ cartId: userCartIdObj }).countDocuments();
+      const directTest2 = await Ingredient.find({ cartId: null }).countDocuments();
+      const directTest3 = await Ingredient.find({ 
+        $or: [
+          { cartId: userCartIdObj },
+          { cartId: null },
+          { cartId: { $exists: false } }
+        ]
+      }).countDocuments();
+      
+      console.log(`[GET_INGREDIENTS] Direct query tests:`);
+      console.log(`  - {cartId: ObjectId("${userCartIdObj}")}: ${directTest1} results`);
+      console.log(`  - {cartId: null}: ${directTest2} results`);
+      console.log(`  - {$or: [...]}: ${directTest3} results`);
+      console.log(`[GET_INGREDIENTS] Executing query with filter:`, JSON.stringify(costingFilter, null, 2));
+    }
 
-        // If ingredient is outlet-specific and belongs to this outlet, recalculate from transactions
-        // This ensures we use actual transaction-based stock, not just database qtyOnHand
-        if (
-          ingredient.cartId &&
-          ingredient.cartId.toString() === outletId.toString()
-        ) {
-          // Cart-specific ingredient - recalculate from transactions to get accurate stock
-          const cartTransactions = await InventoryTransaction.find({
-            ingredientId: ingredient._id,
-            cartId: outletId,
-          }).sort({ date: 1 });
-
-          // Debug: Also check if there are any transactions at all for this ingredient
-          const allTransactions = await InventoryTransaction.find({
-            ingredientId: ingredient._id,
+    // CRITICAL: For cart admins, use a SIMPLIFIED and RELIABLE query
+    let ingredients = [];
+    if (req.user.role === "admin") {
+      console.log(`[GET_INGREDIENTS] ========================================`);
+      console.log(`[GET_INGREDIENTS] CART ADMIN REQUEST - User ID: ${req.user._id}`);
+      console.log(`[GET_INGREDIENTS] ========================================`);
+      
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
+      
+      // STEP 1: Check database state
+      const totalInDB = await Ingredient.countDocuments({});
+      const withCartIdNull = await Ingredient.countDocuments({ cartId: null });
+      const withCartIdUser = await Ingredient.countDocuments({ cartId: userCartIdObj });
+      const withNoCartId = await Ingredient.countDocuments({ cartId: { $exists: false } });
+      
+      console.log(`[GET_INGREDIENTS] ========== DATABASE STATE ==========`);
+      console.log(`[GET_INGREDIENTS] Total ingredients in DB: ${totalInDB}`);
+      console.log(`[GET_INGREDIENTS] Ingredients with cartId=null: ${withCartIdNull}`);
+      console.log(`[GET_INGREDIENTS] Ingredients with cartId=${userCartIdObj}: ${withCartIdUser}`);
+      console.log(`[GET_INGREDIENTS] Ingredients without cartId field: ${withNoCartId}`);
+      console.log(`[GET_INGREDIENTS] =====================================`);
+      
+      // STEP 2: Get isActive filter value (default to true)
+      const isActiveValue = costingFilter.isActive !== undefined ? costingFilter.isActive : true;
+      console.log(`[GET_INGREDIENTS] isActive filter: ${isActiveValue}`);
+      
+      // STEP 3: Build base query for shared + cart-specific ingredients
+      // Use $or to get both shared (cartId: null) and cart-specific (cartId: userCartId) ingredients
+      const baseQuery = {
+        $or: [
+          { cartId: null },
+          { cartId: userCartIdObj },
+          { cartId: { $exists: false } }
+        ]
+      };
+      
+      // STEP 4: Apply isActive filter
+      if (isActiveValue === true) {
+        // For active ingredients, use $ne: false to include undefined/null
+        baseQuery.isActive = { $ne: false };
+      } else if (isActiveValue === false) {
+        baseQuery.isActive = false;
+      }
+      // If isActiveValue is undefined, don't filter by isActive
+      
+      // STEP 5: Apply other filters (category, storageLocation, name, uom)
+      const otherFilters = {};
+      if (costingFilter.category) otherFilters.category = costingFilter.category;
+      if (costingFilter.storageLocation) otherFilters.storageLocation = costingFilter.storageLocation;
+      if (costingFilter.name) {
+        // Handle regex search
+        if (costingFilter.name.$regex) {
+          otherFilters.name = costingFilter.name;
+        } else {
+          otherFilters.name = { $regex: costingFilter.name, $options: "i" };
+        }
+      }
+      if (costingFilter.uom) otherFilters.uom = costingFilter.uom;
+      
+      // STEP 6: Combine all filters
+      let finalQuery = baseQuery;
+      if (Object.keys(otherFilters).length > 0) {
+        finalQuery = {
+          $and: [
+            baseQuery,
+            otherFilters
+          ]
+        };
+        console.log(`[GET_INGREDIENTS] Additional filters applied:`, JSON.stringify(otherFilters, null, 2));
+      }
+      
+      console.log(`[GET_INGREDIENTS] Final query:`, JSON.stringify(finalQuery, null, 2));
+      
+      // STEP 7: Execute query
+      ingredients = await Ingredient.find(finalQuery)
+        .populate("preferredSupplierId", "name")
+        .populate("cartId", "name cafeName")
+        .sort({ category: 1, name: 1 })
+        .lean(); // Use lean() for better performance
+      
+      console.log(`[GET_INGREDIENTS] ✅ Query executed - Found ${ingredients.length} ingredients`);
+      
+      // STEP 8: Log sample results
+      if (ingredients.length > 0) {
+        console.log(`[GET_INGREDIENTS] Sample ingredients:`, ingredients.slice(0, 5).map(ing => ({
+          name: ing.name,
+          cartId: ing.cartId ? (ing.cartId._id || ing.cartId).toString() : 'null',
+          isActive: ing.isActive,
+          category: ing.category
+        })));
+        
+        // Count shared vs cart-specific
+        const sharedCount = ingredients.filter(ing => !ing.cartId || ing.cartId === null).length;
+        const cartSpecificCount = ingredients.filter(ing => ing.cartId && ing.cartId.toString() === userCartIdObj.toString()).length;
+        console.log(`[GET_INGREDIENTS] Breakdown: ${sharedCount} shared + ${cartSpecificCount} cart-specific = ${ingredients.length} total`);
+      } else {
+        console.error(`[GET_INGREDIENTS] ❌ NO INGREDIENTS FOUND!`);
+        console.error(`[GET_INGREDIENTS] Check if super admin has created ingredients with cartId: null`);
+      }
+      
+      console.log(`[GET_INGREDIENTS] ================================================`);
+      
+      // If still 0, try multiple fallback strategies
+      if (ingredients.length === 0) {
+        console.log(`[GET_INGREDIENTS] ⚠️ Query returned 0, trying fallback strategies...`);
+        
+        // Strategy 1: Try without any filters
+        if (Object.keys(otherFilters).length > 0) {
+          const testIngredients1 = await Ingredient.find(directQuery)
+            .populate("preferredSupplierId", "name")
+            .populate("cartId", "name cafeName")
+            .sort({ category: 1, name: 1 });
+          console.log(`[GET_INGREDIENTS] Fallback 1 (no filters): ${testIngredients1.length} ingredients`);
+          if (testIngredients1.length > 0) {
+            console.log(`[GET_INGREDIENTS] ⚠️ ISSUE: Filters are excluding all ingredients!`);
+            ingredients = testIngredients1;
+          }
+        }
+        
+        // Strategy 2: Try with just cartId: null (shared ingredients only) - THIS IS THE KEY!
+        if (ingredients.length === 0) {
+          console.log(`[GET_INGREDIENTS] Trying to get shared ingredients (cartId: null)...`);
+          const testIngredients2 = await Ingredient.find({ 
+            cartId: null,
+            isActive: { $ne: false } // Include active and undefined
+          })
+            .populate("preferredSupplierId", "name")
+            .populate("cartId", "name cafeName")
+            .sort({ category: 1, name: 1 });
+          console.log(`[GET_INGREDIENTS] Fallback 2 (cartId: null only): ${testIngredients2.length} ingredients`);
+          if (testIngredients2.length > 0) {
+            console.log(`[GET_INGREDIENTS] ✅✅✅ FOUND SHARED INGREDIENTS! Using them.`);
+            ingredients = testIngredients2;
+          } else {
+            // Try without isActive filter at all
+            const testIngredients2b = await Ingredient.find({ cartId: null })
+              .populate("preferredSupplierId", "name")
+              .populate("cartId", "name cafeName")
+              .sort({ category: 1, name: 1 });
+            console.log(`[GET_INGREDIENTS] Fallback 2b (cartId: null, no isActive): ${testIngredients2b.length} ingredients`);
+            if (testIngredients2b.length > 0) {
+              console.log(`[GET_INGREDIENTS] ✅✅✅ FOUND SHARED INGREDIENTS (without isActive filter)!`);
+              // Filter to active only
+              ingredients = testIngredients2b.filter(ing => ing.isActive !== false);
+            }
+          }
+        }
+        
+        // Strategy 2.5: Also get cart-specific ingredients and combine
+        const cartSpecific = await Ingredient.find({ 
+          cartId: userCartIdObj,
+          isActive: { $ne: false }
+        })
+          .populate("preferredSupplierId", "name")
+          .populate("cartId", "name cafeName")
+          .sort({ category: 1, name: 1 });
+        
+        console.log(`[GET_INGREDIENTS] Cart-specific ingredients: ${cartSpecific.length}`);
+        
+        // Combine shared and cart-specific, remove duplicates
+        if (cartSpecific.length > 0) {
+          const allIngredients = [...ingredients, ...cartSpecific];
+          const uniqueMap = new Map();
+          allIngredients.forEach(ing => {
+            const id = ing._id.toString();
+            if (!uniqueMap.has(id)) {
+              uniqueMap.set(id, ing);
+            }
           });
-          
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`[STOCK DEBUG] Cart-specific ingredient ${ingredient.name}:`, {
-              ingredientId: ingredient._id,
-              cartId: ingredient.cartId,
-              outletId: outletId,
-              transactionsWithCartId: cartTransactions.length,
-              allTransactions: allTransactions.length,
-              qtyOnHand: ingredient.qtyOnHand,
-            });
+          ingredients = Array.from(uniqueMap.values());
+          console.log(`[GET_INGREDIENTS] ✅ Combined total: ${ingredients.length} ingredients (${ingredients.length - cartSpecific.length} shared + ${cartSpecific.length} cart-specific)`);
+        }
+        
+        // Strategy 3: Try with ALL ingredients (no cartId filter at all) - just for debugging
+        if (ingredients.length === 0) {
+          const testIngredients3 = await Ingredient.find({})
+            .populate("preferredSupplierId", "name")
+            .populate("cartId", "name cafeName")
+            .sort({ category: 1, name: 1 })
+            .limit(10); // Limit to 10 for debugging
+          console.log(`[GET_INGREDIENTS] Fallback 3 (ALL ingredients, limit 10): ${testIngredients3.length} ingredients`);
+          if (testIngredients3.length > 0) {
+            console.log(`[GET_INGREDIENTS] ⚠️ Found ingredients but query is wrong! Sample:`, testIngredients3.map(ing => ({
+              name: ing.name,
+              cartId: ing.cartId ? (ing.cartId._id || ing.cartId).toString() : 'null'
+            })));
+            // Don't use this as final result, just for debugging
           }
+        }
+      }
+      
+      if (ingredients.length > 0) {
+        console.log(`[GET_INGREDIENTS] ✅ Sample ingredients found:`, ingredients.slice(0, 3).map(ing => ({
+          name: ing.name,
+          cartId: ing.cartId ? (ing.cartId._id || ing.cartId) : null,
+          isActive: ing.isActive
+        })));
+      } else {
+        console.error(`[GET_INGREDIENTS] ❌ NO INGREDIENTS FOUND AFTER ALL ATTEMPTS!`);
+      }
+    } else {
+      // For other roles, use the costingFilter as before
+      ingredients = await Ingredient.find(costingFilter)
+        .populate("preferredSupplierId", "name")
+        .populate("cartId", "name cafeName")
+        .sort({ category: 1, name: 1 });
+    }
+    
+    // CRITICAL: Log final count before processing
+    console.log(`[GET_INGREDIENTS] Final ingredients count before processing: ${ingredients.length}`);
+    
+    // If no ingredients found, log detailed info
+    if (ingredients.length === 0) {
+      console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found!`);
+      console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
+      if (req.user.role === "admin") {
+        const userCartId = req.user._id;
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+          ? new mongoose.Types.ObjectId(userCartId) 
+          : userCartId;
+        
+        // Check database directly
+        const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
+        const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
+        const dbCheck3 = await Ingredient.countDocuments({});
+        
+        console.warn(`[GET_INGREDIENTS] Database check:`);
+        console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
+        console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
+        console.warn(`  - Ingredients with cartId=null: ${dbCheck2}`);
+      }
+    }
 
-          let totalQty = 0;
-          let lastPurchaseCost = 0;
+    // Debug logging for cart admin
+    if (req.user.role === "admin") {
+      console.log(`[GET_INGREDIENTS] Cart admin ${req.user._id} found ${ingredients.length} ingredients`);
+      if (ingredients.length === 0) {
+        // Check if there are any ingredients at all for debugging
+        const allIngredientsCount = await Ingredient.countDocuments({});
+        const cartIngredientsCount = await Ingredient.countDocuments({ cartId: req.user._id });
+        const sharedIngredientsCount = await Ingredient.countDocuments({ cartId: null });
+        console.log(`[GET_INGREDIENTS] Debug - Total ingredients: ${allIngredientsCount}, Cart-specific: ${cartIngredientsCount}, Shared: ${sharedIngredientsCount}`);
+        
+        // Try the query manually to see what's wrong
+        const userCartId = req.user._id;
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+          ? new mongoose.Types.ObjectId(userCartId) 
+          : userCartId;
+        
+        const testQuery1 = { cartId: userCartIdObj };
+        const testQuery2 = { cartId: null };
+        const testQuery3 = { $or: [{ cartId: userCartIdObj }, { cartId: null }, { cartId: { $exists: false } }] };
+        
+        const test1 = await Ingredient.countDocuments(testQuery1);
+        const test2 = await Ingredient.countDocuments(testQuery2);
+        const test3 = await Ingredient.countDocuments(testQuery3);
+        
+        console.log(`[GET_INGREDIENTS] Test queries:`);
+        console.log(`  - Query {cartId: ObjectId("${userCartIdObj}")}: ${test1} results`);
+        console.log(`  - Query {cartId: null}: ${test2} results`);
+        console.log(`  - Query {$or: [...]}: ${test3} results`);
+      } else {
+        // Log sample ingredients to verify they're correct
+        const sample = ingredients.slice(0, 3).map(ing => ({
+          name: ing.name,
+          cartId: ing.cartId ? (ing.cartId._id || ing.cartId) : null,
+          cartIdType: ing.cartId ? typeof ing.cartId : 'null'
+        }));
+        console.log(`[GET_INGREDIENTS] Sample ingredients:`, sample);
+      }
+    }
 
-          // If we have transactions, calculate from them
-          if (cartTransactions.length > 0) {
-            // Find the most recent purchase transaction (IN type) for last purchase cost
-            const purchaseTransactions = cartTransactions
-              .filter(txn => txn.type === "IN")
-              .sort((a, b) => new Date(b.date) - new Date(a.date)); // Sort by date descending
-            
-            if (purchaseTransactions.length > 0) {
-              const lastPurchase = purchaseTransactions[0];
-              const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-              const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-              if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-                lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
-                console.log(`[INVENTORY COST] ${ingredient.name}: Last purchase cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
+    // REDESIGNED: Simple and reliable inventory calculation for Cart Admin
+    // Calculate everything directly from transactions - no complex logic, no database syncing
+    if (req.user.role === "admin") {
+      const cartId = req.user._id;
+      
+      // CRITICAL: Convert cartId to ObjectId for proper matching
+      const cartObjectId = mongoose.Types.ObjectId.isValid(cartId) 
+        ? new mongoose.Types.ObjectId(cartId) 
+        : cartId;
+      const cartIdString = cartId.toString();
+      
+      // DEBUG: First, let's see what transactions actually exist
+      if (process.env.NODE_ENV === 'development') {
+        const allTransactionsSample = await InventoryTransaction.find({}).limit(5).select('cartId ingredientId type qty qtyInBaseUnit').lean();
+        console.log(`[DEBUG] Sample of ALL transactions in database:`, allTransactionsSample.map(t => ({
+          cartId: t.cartId ? (t.cartId.toString ? t.cartId.toString() : String(t.cartId)) : 'null',
+          cartIdType: t.cartId ? (t.cartId.constructor.name) : 'null',
+          ingredientId: t.ingredientId ? t.ingredientId.toString() : 'null',
+          type: t.type,
+          qty: t.qty,
+          qtyInBaseUnit: t.qtyInBaseUnit
+        })));
+        console.log(`[DEBUG] Looking for cartId matching:`, {
+          cartId: cartId.toString(),
+          cartObjectId: cartObjectId.toString(),
+          cartIdString: cartIdString
+        });
+      }
+      
+      // CRITICAL: Get all transactions for this cart
+      // Try multiple query strategies to ensure we find transactions
+      let allCartTransactions = [];
+      
+      // Strategy 1: Direct ObjectId match (most reliable)
+      allCartTransactions = await InventoryTransaction.find({
+        cartId: cartObjectId
+      }).sort({ date: 1 }).lean();
+      
+      // Strategy 2: If no results, try aggregation with string comparison
+      if (allCartTransactions.length === 0) {
+        const aggResults = await InventoryTransaction.aggregate([
+          {
+            $match: {
+              $expr: {
+                $eq: [
+                  { $toString: "$cartId" },
+                  cartIdString
+                ]
               }
             }
-            
-            // Calculate total quantity from all transactions
-            for (const txn of cartTransactions) {
-              const txnQty = txn.qtyInBaseUnit || txn.qty;
-              if (txn.type === "IN" || txn.type === "RETURN") {
-                totalQty += txnQty;
-              } else if (txn.type === "OUT" || txn.type === "WASTE") {
-                totalQty -= txnQty;
-                if (totalQty < 0) totalQty = 0;
-              }
-            }
-            outletSpecificQty = Math.max(0, totalQty);
-            
-            // CRITICAL: Cost MUST be 0 when stock is 0
-            if (outletSpecificQty <= 0) {
-              outletSpecificCost = 0;
-            } else if (lastPurchaseCost > 0) {
-              outletSpecificCost = lastPurchaseCost;
-            } else {
-              // Use database cost only if stock > 0 and no purchase found
-              outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-            }
-          } else {
-            // No transactions found - use ingredient's qtyOnHand and cost directly
-            // This handles cases where stock was set manually or before transaction tracking
-            outletSpecificQty = Number(ingredient.qtyOnHand) || 0;
-            
-            // CRITICAL: If stock is 0, cost MUST be 0 (no exceptions)
-            if (outletSpecificQty <= 0) {
-              outletSpecificCost = 0;
-            } else {
-              // Stock > 0 - use database cost
-              outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-            }
-            
-            if (process.env.NODE_ENV === 'development') {
-              console.log(`[STOCK DEBUG] Cart-specific ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${outletSpecificQty}, cost: ${outletSpecificCost}`);
-            }
+          },
+          { $sort: { date: 1 } }
+        ]);
+        allCartTransactions = aggResults;
+      }
+      
+      // Strategy 3: Try direct string match as last resort
+      if (allCartTransactions.length === 0) {
+        allCartTransactions = await InventoryTransaction.find({
+          cartId: cartIdString
+        }).sort({ date: 1 }).lean();
+      }
+      
+      // Strategy 4: Try null/undefined cartId (legacy transactions)
+      if (allCartTransactions.length === 0) {
+        allCartTransactions = await InventoryTransaction.find({
+          $or: [
+            { cartId: null },
+            { cartId: { $exists: false } }
+          ]
+        }).sort({ date: 1 }).lean();
+      }
+      
+      // If no results, log for debugging
+      if (allCartTransactions.length === 0 && process.env.NODE_ENV === 'development') {
+        const totalTransactions = await InventoryTransaction.countDocuments({});
+        console.warn(`[DEBUG] No transactions found for cartId. Total transactions in DB: ${totalTransactions}`);
+        
+        // Get sample transactions to see what cartIds exist
+        const sampleTransactions = await InventoryTransaction.find({}).limit(10).select('cartId ingredientId type qty qtyInBaseUnit').lean();
+        const uniqueCartIds = [...new Set(sampleTransactions.map(t => t.cartId ? t.cartId.toString() : 'null'))];
+        console.log(`[DEBUG] Sample cartIds in transactions:`, uniqueCartIds);
+        console.log(`[DEBUG] Looking for:`, { cartId: cartId.toString(), cartObjectId: cartObjectId.toString(), cartIdString });
+        
+        // Check if any transactions exist for this ingredient at all
+        if (ingredients.length > 0) {
+          const firstIngId = ingredients[0]._id;
+          const ingTransactions = await InventoryTransaction.find({ ingredientId: firstIngId }).limit(5).select('cartId type qty qtyInBaseUnit').lean();
+          console.log(`[DEBUG] Sample transactions for ingredient ${ingredients[0].name}:`, ingTransactions.map(t => ({
+            cartId: t.cartId ? t.cartId.toString() : 'null',
+            type: t.type,
+            qty: t.qty,
+            qtyInBaseUnit: t.qtyInBaseUnit
+          })));
+        }
+      }
+      
+      // Create a Set of ingredient IDs for fast lookup (convert all to strings)
+      const ingredientIdSet = new Set(
+        ingredients.map(ing => {
+          const id = ing._id;
+          return id ? (id.toString ? id.toString() : String(id)) : null;
+        }).filter(id => id !== null)
+      );
+      
+      // Filter transactions to only include those for ingredients we're showing
+      const filteredTransactions = allCartTransactions.filter(txn => {
+        if (!txn.ingredientId) return false;
+        const txnIngId = txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId);
+        return ingredientIdSet.has(txnIngId);
+      });
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[INVENTORY] Cart admin ${cartId}: Found ${allCartTransactions.length} total transactions, ${filteredTransactions.length} for ${ingredients.length} ingredients`);
+        console.log(`[INVENTORY] Cart admin cartId: ${cartId}, cartObjectId: ${cartObjectId}, cartIdString: ${cartIdString}`);
+        if (allCartTransactions.length === 0) {
+          console.warn(`[INVENTORY] No transactions found for cartId. Checking all transactions...`);
+          // Check what cartIds exist in transactions
+          const sampleTransactions = await InventoryTransaction.find({}).limit(10).select('cartId ingredientId type').lean();
+          console.log(`[INVENTORY] Sample transactions in database:`, sampleTransactions.map(t => ({
+            cartId: t.cartId ? (t.cartId.toString ? t.cartId.toString() : String(t.cartId)) : 'null',
+            cartIdType: typeof t.cartId,
+            ingredientId: t.ingredientId ? (t.ingredientId.toString ? t.ingredientId.toString() : String(t.ingredientId)) : 'null',
+            type: t.type
+          })));
+        } else {
+          // Log sample transaction to verify structure
+          const sampleTxn = allCartTransactions[0];
+          console.log(`[INVENTORY] Sample transaction:`, {
+            cartId: sampleTxn.cartId ? (sampleTxn.cartId.toString ? sampleTxn.cartId.toString() : String(sampleTxn.cartId)) : 'null',
+            cartIdType: typeof sampleTxn.cartId,
+            ingredientId: sampleTxn.ingredientId ? (sampleTxn.ingredientId.toString ? sampleTxn.ingredientId.toString() : String(sampleTxn.ingredientId)) : 'null',
+            type: sampleTxn.type,
+            qty: sampleTxn.qty,
+            qtyInBaseUnit: sampleTxn.qtyInBaseUnit,
+            unitPrice: sampleTxn.unitPrice
+          });
+        }
+      }
+      
+      // Use filtered transactions
+      const allCartTransactionsFiltered = filteredTransactions;
+      
+      // Group transactions by ingredientId for efficient processing
+      // CRITICAL: Handle both ObjectId and string formats for ingredientId matching
+      const transactionsByIngredient = {};
+      for (const txn of allCartTransactionsFiltered) {
+        // Convert ingredientId to string for consistent matching
+        const ingId = txn.ingredientId 
+          ? (txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId))
+          : null;
+        if (ingId) {
+          if (!transactionsByIngredient[ingId]) {
+            transactionsByIngredient[ingId] = [];
           }
-
-          // Update ingredient values
-          ingredient.qtyOnHand = outletSpecificQty;
-          
-          // CRITICAL: Set cost - MUST be 0 when stock is 0 (absolute rule)
-          // This check happens AFTER all cost calculations to ensure it's never overridden
-          if (outletSpecificQty <= 0) {
-            // Stock is 0 - cost MUST be 0 (no exceptions)
-            ingredient.currentCostPerBaseUnit = 0;
+          transactionsByIngredient[ingId].push(txn);
+        }
+      }
+      
+      // Process each ingredient
+      for (const ingredient of ingredients) {
+        // CRITICAL: Convert ingredient._id to string for matching
+        const ingredientId = ingredient._id 
+          ? (ingredient._id.toString ? ingredient._id.toString() : String(ingredient._id))
+          : null;
+        const transactions = ingredientId ? (transactionsByIngredient[ingredientId] || []) : [];
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[INVENTORY] ${ingredient.name} (${ingredientId}): Processing ${transactions.length} transactions`);
+          if (transactions.length > 0) {
+            console.log(`[INVENTORY] ${ingredient.name}: Transaction details:`, transactions.map(t => ({
+              type: t.type,
+              qty: t.qty,
+              uom: t.uom,
+              qtyInBaseUnit: t.qtyInBaseUnit,
+              unitPrice: t.unitPrice,
+              costAllocated: t.costAllocated,
+              cartId: t.cartId ? (t.cartId.toString ? t.cartId.toString() : String(t.cartId)) : 'null'
+            })));
           } else {
-            // Stock > 0 - use calculated cost
-            ingredient.currentCostPerBaseUnit = outletSpecificCost;
+            // Check if ingredientId exists in transactionsByIngredient keys
+            const allIngredientIds = Object.keys(transactionsByIngredient);
+            console.log(`[INVENTORY] ${ingredient.name}: No transactions found. Available ingredientIds in transactions:`, allIngredientIds.slice(0, 5));
+            console.log(`[INVENTORY] ${ingredient.name}: Using stored values - qtyOnHand=${ingredient.qtyOnHand}, currentCostPerBaseUnit=${ingredient.currentCostPerBaseUnit}`);
           }
+        }
+        
+        // FALLBACK: If no transactions found, use stored values from ingredient
+        if (transactions.length === 0) {
+          // Use stored values from ingredient model
+          ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
+          ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
+          ingredient.lastPurchaseUnitPrice = 0;
+          ingredient.lastPurchaseUom = ingredient.uom;
           
-          // Final safety check - ensure cost is 0 if stock is 0 (absolute guarantee)
-          // This is a redundant check to catch any edge cases
+          // If stock is 0, ensure cost is 0
           if (ingredient.qtyOnHand <= 0) {
             ingredient.currentCostPerBaseUnit = 0;
+            ingredient.lastPurchaseUnitPrice = 0;
           }
           
-          ingredient.markModified("qtyOnHand");
-          ingredient.markModified("currentCostPerBaseUnit");
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
+          }
+          continue; // Skip transaction-based calculation
+        }
+        
+        // SIMPLE STOCK CALCULATION: Sum all IN/RETURN, subtract all OUT/WASTE
+        let stock = 0;
+        let stockDetails = { in: 0, return: 0, out: 0, waste: 0 };
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[INVENTORY STOCK] ${ingredient.name}: Starting stock calculation with ${transactions.length} transactions`);
+        }
+        
+        for (const txn of transactions) {
+          // CRITICAL: Use qtyInBaseUnit (always in base unit) for accurate calculation
+          // If qtyInBaseUnit is missing or 0, try to convert from qty and uom
+          let qty = Number(txn.qtyInBaseUnit);
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[INVENTORY STOCK] ${ingredient.name}: Transaction ${txn.type} - qtyInBaseUnit=${txn.qtyInBaseUnit}, qty=${txn.qty}, uom=${txn.uom}, baseUnit=${ingredient.baseUnit}`);
+          }
+          
+          if (!qty || qty === 0 || isNaN(qty)) {
+            // Fallback: convert from qty and uom if qtyInBaseUnit is missing
+            if (txn.qty && txn.uom) {
+              try {
+                // Try using ingredient's convertToBaseUnit method first
+                if (ingredient && typeof ingredient.convertToBaseUnit === 'function') {
+                  qty = ingredient.convertToBaseUnit(Number(txn.qty), txn.uom);
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log(`[INVENTORY STOCK] ${ingredient.name}: Converted ${txn.qty} ${txn.uom} to ${qty} ${ingredient.baseUnit} using ingredient method`);
+                  }
+                } else {
+                  // Fallback: manual conversion using standard factors
+                  qty = convertQtyToBaseUnit(Number(txn.qty), txn.uom, ingredient.baseUnit);
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log(`[INVENTORY STOCK] ${ingredient.name}: Converted ${txn.qty} ${txn.uom} to ${qty} ${ingredient.baseUnit} using manual conversion`);
+                  }
+                }
+              } catch (error) {
+                console.error(`[INVENTORY STOCK ERROR] ${ingredient.name}: Cannot convert ${txn.qty} ${txn.uom} to ${ingredient.baseUnit}:`, error.message);
+                // Last resort: try manual conversion
+                try {
+                  qty = convertQtyToBaseUnit(Number(txn.qty), txn.uom, ingredient.baseUnit);
+                } catch (e) {
+                  qty = 0;
+                }
+              }
+            } else {
+              qty = Number(txn.qty) || 0;
+              if (process.env.NODE_ENV === 'development' && qty > 0) {
+                console.warn(`[INVENTORY STOCK] ${ingredient.name}: Using raw qty=${qty} (no uom conversion available)`);
+              }
+            }
+          }
+          
+          // Ensure qty is a valid number
+          if (isNaN(qty) || !isFinite(qty)) {
+            console.error(`[INVENTORY STOCK ERROR] ${ingredient.name}: Invalid qty=${qty} for transaction ${txn.type}, skipping`);
           continue;
         }
 
-        // For shared ingredients, calculate outlet-specific values from transactions
+          if (txn.type === "IN") {
+            stock += qty;
+            stockDetails.in += qty;
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY STOCK] ${ingredient.name}: IN transaction - added ${qty}, stock now = ${stock}`);
+            }
+          } else if (txn.type === "RETURN") {
+            stock += qty;
+            stockDetails.return += qty;
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY STOCK] ${ingredient.name}: RETURN transaction - added ${qty}, stock now = ${stock}`);
+            }
+          } else if (txn.type === "OUT") {
+            stock -= qty;
+            stockDetails.out += qty;
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY STOCK] ${ingredient.name}: OUT transaction - subtracted ${qty}, stock now = ${stock}`);
+            }
+          } else if (txn.type === "WASTE") {
+            stock -= qty;
+            stockDetails.waste += qty;
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY STOCK] ${ingredient.name}: WASTE transaction - subtracted ${qty}, stock now = ${stock}`);
+            }
+          }
+        }
+        stock = Math.max(0, stock); // Never negative
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[INVENTORY] ${ingredient.name}: FINAL Calculated stock = ${stock} ${ingredient.baseUnit} (IN: ${stockDetails.in}, RETURN: ${stockDetails.return}, OUT: ${stockDetails.out}, WASTE: ${stockDetails.waste})`);
+          if (stock === 0 && transactions.length > 0) {
+            console.warn(`[INVENTORY] ${ingredient.name}: WARNING - Stock is 0 but has ${transactions.length} transactions!`);
+          }
+        }
+        
+        // SIMPLE COST: Use EXACT purchase unitPrice (same as purchase time)
+        let lastPurchaseUnitPrice = 0; // Exact unitPrice from purchase (per display unit)
+        let lastPurchaseUom = ingredient.uom; // Unit from purchase
+        let costPerBaseUnit = 0; // Cost per base unit (for total value calculation)
+        
+        if (stock <= 0) {
+          lastPurchaseUnitPrice = 0;
+          costPerBaseUnit = 0;
+        } else if (transactions.length > 0) {
+          // Find most recent purchase (IN transaction)
+          const purchases = transactions
+            .filter(t => t.type === "IN")
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
+          
+          if (purchases.length > 0) {
+            const lastPurchase = purchases[0];
+            
+            // CRITICAL: Use exact unitPrice from purchase (per display unit - SAME as purchase)
+            if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+              // Use exact unitPrice as-is (per purchase uom) - NO CONVERSION
+              lastPurchaseUnitPrice = Number(lastPurchase.unitPrice);
+              lastPurchaseUom = lastPurchase.uom || ingredient.uom;
+              
+              // Convert to base unit ONLY for internal calculations (total value)
+              try {
+                // CRITICAL: convertToBaseUnit(1, "kg") returns how many base units (g) are in 1 kg = 1000
+                // So if unitPrice is ₹200/kg, cost per gram = 200 / 1000 = ₹0.2/g
+                // Example: convertToBaseUnit(1, "kg") when baseUnit="g" returns 1000
+                //          So 1 kg = 1000 g
+                //          unitPrice ₹200/kg means ₹200 per 1000g = ₹0.2 per gram
+                const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchaseUom);
+                
+                if (conversionFactor > 0 && isFinite(conversionFactor)) {
+                  // Formula: costPerBaseUnit = unitPrice / conversionFactor
+                  // Example: ₹200/kg / 1000 (g per kg) = ₹0.2/g ✓
+                  costPerBaseUnit = Number((lastPurchaseUnitPrice / conversionFactor).toFixed(6));
+                  
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log(`[INVENTORY COST] ${ingredient.name}: Calculated costPerBaseUnit = ₹${costPerBaseUnit}/${ingredient.baseUnit} (from ₹${lastPurchaseUnitPrice}/${lastPurchaseUom} / ${conversionFactor})`);
+                  }
+                  
+                  // CRITICAL: Validate the calculated cost is reasonable
+                  // If cost per base unit seems too high, there might be a conversion error
+                  // For g/ml, reasonable cost per gram/ml is usually < ₹1000
+                  if (costPerBaseUnit > 10000 && (ingredient.baseUnit === 'g' || ingredient.baseUnit === 'ml')) {
+                    console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Calculated cost per ${ingredient.baseUnit} is very high: ₹${costPerBaseUnit}. This suggests a conversion error. unitPrice=₹${lastPurchaseUnitPrice}/${lastPurchaseUom}, conversionFactor=${conversionFactor}`);
+                    // Try fallback calculation using costAllocated
+                    const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
+                    const costAllocated = Number(lastPurchase.costAllocated) || 0;
+                    if (qty > 0 && costAllocated > 0) {
+                      const fallbackCost = Number((costAllocated / qty).toFixed(6));
+                      console.log(`[INVENTORY COST] ${ingredient.name}: Using fallback cost calculation: ₹${fallbackCost}/${ingredient.baseUnit} (from costAllocated ₹${costAllocated} / qty ${qty})`);
+                      costPerBaseUnit = fallbackCost;
+                      // Also recalculate unitPrice from fallback
+                      const displayQty = Number(lastPurchase.qty) || 0;
+                      if (displayQty > 0) {
+                        // Convert fallback cost back to display unit
+                        const displayConversionFactor = ingredient.convertToBaseUnit(1, lastPurchaseUom);
+                        lastPurchaseUnitPrice = Number((fallbackCost * displayConversionFactor).toFixed(2));
+                        console.log(`[INVENTORY COST] ${ingredient.name}: Recalculated unitPrice = ₹${lastPurchaseUnitPrice}/${lastPurchaseUom}`);
+                      }
+                    }
+                  }
+                } else {
+                  // Fallback: use costAllocated / qtyInBaseUnit if conversion fails
+                  const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
+                  const costAllocated = Number(lastPurchase.costAllocated) || 0;
+                  if (qty > 0 && costAllocated > 0) {
+                    costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
+                    const displayQty = Number(lastPurchase.qty) || 0;
+                    if (displayQty > 0) {
+                      lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
+                    }
+                    if (process.env.NODE_ENV === 'development') {
+                      console.warn(`[INVENTORY COST] ${ingredient.name}: Using fallback cost calculation - costAllocated=${costAllocated}, qtyInBaseUnit=${qty}, costPerBaseUnit=${costPerBaseUnit}`);
+                    }
+                  }
+                }
+              } catch (error) {
+                console.error(`[INVENTORY COST ERROR] ${ingredient.name}:`, error);
+                // Fallback: calculate from costAllocated
+                const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
+                const costAllocated = Number(lastPurchase.costAllocated) || 0;
+                if (qty > 0 && costAllocated > 0) {
+                  costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
+                  const displayQty = Number(lastPurchase.qty) || 0;
+                  if (displayQty > 0) {
+                    lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
+                  }
+                }
+              }
+            } else {
+              // Fallback: calculate from costAllocated if unitPrice not available
+              const qty = Number(lastPurchase.qtyInBaseUnit) || 0;
+              const costAllocated = Number(lastPurchase.costAllocated) || 0;
+              if (qty > 0) {
+                costPerBaseUnit = Number((costAllocated / qty).toFixed(6));
+                const displayQty = Number(lastPurchase.qty) || 0;
+                if (displayQty > 0) {
+                  lastPurchaseUnitPrice = Number((costAllocated / displayQty).toFixed(2));
+                  lastPurchaseUom = lastPurchase.uom || ingredient.uom;
+                }
+              }
+            }
+          }
+        }
+        
+        // CRITICAL: Final check - if stock is 0, cost MUST be 0 (no exceptions)
+        if (stock <= 0) {
+          lastPurchaseUnitPrice = 0;
+          costPerBaseUnit = 0;
+        }
+        
+        // CRITICAL: Final validation before setting values
+        // Ensure stock is a valid number
+        if (isNaN(stock) || !isFinite(stock)) {
+          console.error(`[INVENTORY ERROR] ${ingredient.name}: Invalid stock=${stock}, resetting to 0`);
+          stock = 0;
+        }
+        stock = Math.max(0, stock); // Ensure non-negative
+        
+        // Ensure cost is valid
+        if (isNaN(costPerBaseUnit) || !isFinite(costPerBaseUnit)) {
+          console.error(`[INVENTORY ERROR] ${ingredient.name}: Invalid costPerBaseUnit=${costPerBaseUnit}, resetting to 0`);
+          costPerBaseUnit = 0;
+        }
+        costPerBaseUnit = Math.max(0, costPerBaseUnit);
+        
+        // ABSOLUTE RULE: If stock is 0, cost MUST be 0
+        if (stock <= 0) {
+          costPerBaseUnit = 0;
+          lastPurchaseUnitPrice = 0;
+        }
+        
+        // CRITICAL: Update ingredient object with calculated values
+        // Round stock to 4 decimal places to avoid floating point issues
+        const finalStock = Number(stock.toFixed(4));
+        const finalCost = Number(costPerBaseUnit.toFixed(6));
+        const finalUnitPrice = Number(lastPurchaseUnitPrice.toFixed(2));
+        
+        // ABSOLUTE FINAL CHECK: Ensure cost is 0 when stock is 0 (double-check)
+        const finalStockValue = finalStock <= 0 ? 0 : finalStock;
+        const finalCostValue = finalStockValue <= 0 ? 0 : finalCost;
+        const finalUnitPriceValue = finalStockValue <= 0 ? 0 : finalUnitPrice;
+        
+        // Set values directly on ingredient object (works for both Mongoose documents and plain objects)
+        ingredient.qtyOnHand = finalStockValue;
+        ingredient.currentCostPerBaseUnit = finalCostValue;
+        ingredient.lastPurchaseUnitPrice = finalUnitPriceValue;
+        ingredient.lastPurchaseUom = lastPurchaseUom || ingredient.uom || 'pcs';
+        
+        // Mark as modified to ensure values are included in response (only if Mongoose document)
+        if (ingredient.markModified && typeof ingredient.markModified === 'function') {
+          ingredient.markModified('qtyOnHand');
+          ingredient.markModified('currentCostPerBaseUnit');
+          ingredient.markModified('lastPurchaseUnitPrice');
+          ingredient.markModified('lastPurchaseUom');
+        }
+        
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`[INVENTORY] ${ingredient.name}: FINAL VALUES - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, unitPrice=₹${ingredient.lastPurchaseUnitPrice}/${ingredient.lastPurchaseUom}, costPerBaseUnit=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}, transactions=${transactions.length}`);
+          if (transactions.length > 0 && stock === 0) {
+            console.warn(`[INVENTORY] ${ingredient.name}: Has ${transactions.length} transactions but stock is 0. Transaction types:`, transactions.map(t => `${t.type}:${t.qtyInBaseUnit || t.qty}`));
+          }
+        }
+      }
+    }
+    
+    // For franchise/super admin viewing shared ingredients with cart filter
+    const cartIdParamForInventory = req.query.cartId || req.query.outletId; // Backward compatibility
+    if ((req.user.role === "franchise_admin" || req.user.role === "super_admin") && cartIdParamForInventory) {
+      const cartId = cartIdParamForInventory;
+      
+      // Get all transactions for this cart in one query
+      const allCartTransactions = await InventoryTransaction.find({
+        cartId: cartId,
+      }).sort({ date: 1 }).lean();
+      
+      // Group transactions by ingredientId
+      const transactionsByIngredient = {};
+      for (const txn of allCartTransactions) {
+        if (!transactionsByIngredient[txn.ingredientId]) {
+          transactionsByIngredient[txn.ingredientId] = [];
+        }
+        transactionsByIngredient[txn.ingredientId].push(txn);
+      }
+      
+      // Process each ingredient
+      for (const ingredient of ingredients) {
+        const ingredientId = ingredient._id.toString();
+        const transactions = transactionsByIngredient[ingredientId] || [];
+        
+        // Calculate stock from transactions
+        let stock = 0;
+        for (const txn of transactions) {
+          const qty = txn.qtyInBaseUnit || txn.qty || 0;
+          if (txn.type === "IN" || txn.type === "RETURN") {
+            stock += qty;
+          } else if (txn.type === "OUT" || txn.type === "WASTE") {
+            stock -= qty;
+          }
+        }
+        stock = Math.max(0, stock);
+        
+        // Calculate cost from last purchase
+        let cost = 0;
+        if (stock > 0 && transactions.length > 0) {
+          const purchases = transactions
+            .filter(t => t.type === "IN")
+            .sort((a, b) => new Date(b.date) - new Date(a.date));
+          
+          if (purchases.length > 0) {
+            const lastPurchase = purchases[0];
+            
+            if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+              try {
+                const purchaseUom = lastPurchase.uom || ingredient.uom;
+                const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+                
+                if (conversionFactor > 0 && isFinite(conversionFactor)) {
+                  cost = lastPurchase.unitPrice / conversionFactor;
+                } else {
+                  const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
+                  const costAllocated = lastPurchase.costAllocated || 0;
+                  if (qty > 0) {
+                    cost = costAllocated / qty;
+                  }
+                }
+              } catch (error) {
+                const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
+                const costAllocated = lastPurchase.costAllocated || 0;
+                if (qty > 0) {
+                  cost = costAllocated / qty;
+                }
+              }
+            } else {
+              const qty = lastPurchase.qtyInBaseUnit || lastPurchase.qty || 0;
+              const costAllocated = lastPurchase.costAllocated || 0;
+              if (qty > 0) {
+                cost = costAllocated / qty;
+              }
+            }
+          }
+        }
+        
+        ingredient.qtyOnHand = stock;
+        ingredient.currentCostPerBaseUnit = cost;
+      }
+    } else if (req.user.role === "franchise_admin" || req.user.role === "super_admin") {
+      // For shared ingredients without cart filter, use existing logic
+      const cartIdParamForShared = req.query.cartId || req.query.outletId; // Backward compatibility
+      
+      for (const ingredient of ingredients) {
+        let cartSpecificQty = 0;
+        let cartSpecificCost = 0;
+
+        // For shared ingredients, calculate cart-specific values from transactions
         // This uses weighted average costing (same as BOM calculation)
         // IMPORTANT: For shared ingredients, we need to check BOTH:
-        // 1. Outlet-specific transactions (cartId = outletId)
+        // 1. Cart-specific transactions (cartId = cartIdParamForShared)
         // 2. Global transactions (cartId = null or missing) - for shared ingredients purchased globally
         const cartTransactions = await InventoryTransaction.find({
-          ingredientId: ingredient._id,
+              ingredientId: ingredient._id,
           $or: [
-            { cartId: outletId },
+            { cartId: cartIdParamForShared },
             { cartId: null }, // Global transactions
             { cartId: { $exists: false } } // Also check for missing cartId field
           ]
         }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
 
         // Debug: Check transaction counts
-        const outletSpecificTransactions = await InventoryTransaction.find({
+        const cartSpecificTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
-          cartId: outletId,
+          cartId: cartIdParamForShared,
         });
         const globalTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
@@ -433,8 +1221,8 @@ exports.getIngredients = async (req, res) => {
           console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name}:`, {
             ingredientId: ingredient._id,
             cartId: ingredient.cartId,
-            outletId: outletId,
-            outletSpecificTransactions: outletSpecificTransactions.length,
+              cartIdParam: cartIdParamForShared,
+            cartSpecificTransactions: cartSpecificTransactions.length,
             globalTransactions: globalTransactions.length,
             totalTransactions: cartTransactions.length,
             allTransactions: allTransactions.length,
@@ -457,16 +1245,68 @@ exports.getIngredients = async (req, res) => {
           if (purchaseTransactions.length > 0) {
             const lastPurchase = purchaseTransactions[0];
             const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-            const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-            if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-              lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
-              console.log(`[INVENTORY COST] ${ingredient.name}: Last purchase cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
+            
+            // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+            // This ensures inventory price matches purchase price exactly
+            if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+              // Use exact purchase price - convert to base unit if needed
+              const purchaseUom = lastPurchase.uom || ingredient.uom;
+              
+              // IMPORTANT: unitPrice is stored per display unit (uom), need to convert to base unit
+              // Example: If unitPrice = ₹200/kg and baseUnit = g:
+              //   conversionFactor = convertToBaseUnit(1, "kg") = 1000 (grams in 1 kg)
+              //   lastPurchaseCost = 200 / 1000 = 0.2 per gram
+              const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+              
+              // Validate conversion factor
+              if (conversionFactor <= 0 || isNaN(conversionFactor) || !isFinite(conversionFactor)) {
+                console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Invalid conversion factor ${conversionFactor} for ${purchaseUom} to ${ingredient.baseUnit}`);
+                // Fallback to costAllocated calculation
+                const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+                if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+                  lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
+                  console.log(`[INVENTORY COST] ${ingredient.name}: Using fallback calculation = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}`);
+                }
+              } else {
+                // Convert unitPrice (per display unit) to base unit
+                // Example: ₹200/kg → ₹0.2/g (if baseUnit is g)
+                lastPurchaseCost = lastPurchase.unitPrice / conversionFactor;
+                
+                // Validate the result is reasonable
+                if (lastPurchaseCost <= 0 || !isFinite(lastPurchaseCost)) {
+                  console.error(`[INVENTORY COST ERROR] ${ingredient.name}: Invalid calculated cost ${lastPurchaseCost} from unitPrice=${lastPurchase.unitPrice}, conversionFactor=${conversionFactor}`);
+                  // Fallback to costAllocated
+                  const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+                  if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+                    lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
+                  }
+                }
+              }
+              
+              console.log(`[INVENTORY COST] ${ingredient.name}: unitPrice=₹${lastPurchase.unitPrice}/${purchaseUom}, conversionFactor=${conversionFactor}, baseUnit=${ingredient.baseUnit}, lastPurchaseCost=₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}, qtyInBaseUnit=${lastPurchaseQty}`);
+            } else {
+              // Fallback: calculate from costAllocated
+              const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+              if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+                lastPurchaseCost = lastPurchaseCostAllocated / lastPurchaseQty;
+                console.log(`[INVENTORY COST] ${ingredient.name}: Calculated cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit} (from transaction dated ${lastPurchase.date}, costAllocated=${lastPurchaseCostAllocated}, qty=${lastPurchaseQty})`);
+              }
             }
           }
           
           // Calculate total quantity from all transactions
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[STOCK CALC] ${ingredient.name}: Processing ${cartTransactions.length} transactions for stock calculation`);
+          }
+          
           for (const txn of cartTransactions) {
-            const txnQty = txn.qtyInBaseUnit || txn.qty;
+            const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
+            const txnType = txn.type;
+            
+            if (process.env.NODE_ENV === 'development' && txnQty > 0) {
+              console.log(`[STOCK CALC] ${ingredient.name}: ${txnType} transaction - qty=${txnQty} ${ingredient.baseUnit}, date=${txn.date}, cartId=${txn.cartId}`);
+            }
+            
             if (txn.type === "IN" || txn.type === "RETURN") {
               totalQty += txnQty;
             } else if (txn.type === "OUT" || txn.type === "WASTE") {
@@ -474,57 +1314,61 @@ exports.getIngredients = async (req, res) => {
               if (totalQty < 0) totalQty = 0;
             }
           }
-          console.log(`[INVENTORY COST] ${ingredient.name}: Final calculated cost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}, total qty = ${totalQty} ${ingredient.baseUnit}`);
-          outletSpecificQty = Math.max(0, totalQty);
+          
+          cartSpecificQty = Math.max(0, totalQty);
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[STOCK CALC] ${ingredient.name}: Final calculated stock = ${cartSpecificQty} ${ingredient.baseUnit}, lastPurchaseCost = ₹${lastPurchaseCost.toFixed(6)}/${ingredient.baseUnit}`);
+          }
         } else {
           // No transactions found for shared ingredient
           // For shared ingredients, if there are no transactions at all, use the ingredient's qtyOnHand
           // This handles cases where stock was set manually or before transaction tracking
-          // OR if the ingredient has global stock that should be visible to all outlets
-          outletSpecificQty = Number(ingredient.qtyOnHand) || 0;
+          // OR if the ingredient has global stock that should be visible to all carts
+          cartSpecificQty = Number(ingredient.qtyOnHand) || 0;
           lastPurchaseCost = 0;
           
           if (process.env.NODE_ENV === 'development') {
-            console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${outletSpecificQty}`);
+            console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${cartSpecificQty}`);
           }
         }
         
         // CRITICAL: For inventory value calculation, cost MUST be 0 when stock is 0
         // This is the most important rule - no exceptions
         // Check stock FIRST before calculating cost
-        if (outletSpecificQty <= 0) {
+        if (cartSpecificQty <= 0) {
           // Stock is 0 - cost MUST be 0 regardless of any other factors
           // This is the absolute rule - no exceptions, no fallbacks
-          outletSpecificCost = 0;
+          cartSpecificCost = 0;
         } else {
           // Stock > 0 - use last purchase cost
           if (lastPurchaseCost > 0) {
             // We have a last purchase - use its cost
-            outletSpecificCost = lastPurchaseCost;
+            cartSpecificCost = lastPurchaseCost;
           } else {
             // No purchase found - use ingredient's cost from database
             // This handles cases where stock exists but no transactions were recorded
-            outletSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+            cartSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
           }
         }
         
         // ABSOLUTE FINAL CHECK: If stock is 0, cost MUST be 0 (no exceptions)
         // This overrides any previous cost calculation
-        if (outletSpecificQty <= 0) {
-          outletSpecificCost = 0;
+        if (cartSpecificQty <= 0) {
+          cartSpecificCost = 0;
         }
 
-        // Override qtyOnHand and currentCostPerBaseUnit with outlet-specific values
-        ingredient.qtyOnHand = outletSpecificQty;
+        // Override qtyOnHand and currentCostPerBaseUnit with cart-specific values
+        ingredient.qtyOnHand = cartSpecificQty;
         
         // CRITICAL: Set cost - MUST be 0 when stock is 0 (absolute rule)
         // This check happens AFTER all cost calculations to ensure it's never overridden
-        if (outletSpecificQty <= 0) {
+        if (cartSpecificQty <= 0) {
           // Stock is 0 - cost MUST be 0 (no exceptions)
           ingredient.currentCostPerBaseUnit = 0;
         } else {
           // Stock > 0 - use calculated cost
-          ingredient.currentCostPerBaseUnit = outletSpecificCost;
+          ingredient.currentCostPerBaseUnit = cartSpecificCost;
         }
         
         // Final safety check: ensure cost is 0 if stock is 0 (absolute guarantee)
@@ -552,13 +1396,13 @@ exports.getIngredients = async (req, res) => {
         // #region agent log
         logDebug(
           "costingController.js:395",
-          "Updated ingredient with outlet-specific values",
+          "Updated ingredient with cart-specific values",
           {
             ingredientId: ingredient._id,
             ingredientName: ingredient.name,
-            outletId: outletId,
-            outletSpecificQty: outletSpecificQty,
-            outletSpecificCost: outletSpecificCost,
+            cartId: cartIdParamForShared,
+            cartSpecificQty: cartSpecificQty,
+            cartSpecificCost: cartSpecificCost,
             originalQtyOnHand: ingredient.qtyOnHand,
             originalCost: ingredient.currentCostPerBaseUnit,
           },
@@ -613,38 +1457,108 @@ exports.getIngredients = async (req, res) => {
     // ABSOLUTE FINAL CHECK: Before sending response, ensure cost = 0 when stock = 0
     // Convert to plain objects and verify one last time
     const sanitizedIngredients = ingredients.map((ing) => {
-      const qty = Math.abs(Number(ing.qtyOnHand) || 0);
-      let cost = Math.abs(Number(ing.currentCostPerBaseUnit) || 0);
+      // CRITICAL: First convert to plain object to ensure we can access all properties
+      const plainIng = ing.toObject ? ing.toObject({ getters: true, virtuals: false }) : { ...ing };
+      
+      // Extract values from plain object
+      let qty = Number(plainIng.qtyOnHand) || 0;
+      let cost = Number(plainIng.currentCostPerBaseUnit) || 0;
+      let lastPurchaseUnitPrice = Number(plainIng.lastPurchaseUnitPrice) || 0;
+      let lastPurchaseUom = plainIng.lastPurchaseUom || plainIng.uom || 'pcs';
+      
+      // Ensure qty is non-negative and valid
+      qty = Math.max(0, qty);
+      if (isNaN(qty) || !isFinite(qty)) qty = 0;
       
       // CRITICAL: If stock is 0, cost MUST be 0 (absolute rule)
       if (qty < 0.0001) {
         cost = 0;
+        lastPurchaseUnitPrice = 0;
       }
       
-      // Convert to plain object and set cost explicitly
-      const plainIng = ing.toObject ? ing.toObject() : ing;
+      // Ensure cost is valid
+      if (isNaN(cost) || !isFinite(cost)) cost = 0;
+      if (isNaN(lastPurchaseUnitPrice) || !isFinite(lastPurchaseUnitPrice)) lastPurchaseUnitPrice = 0;
       
-      // CRITICAL: Force cost to 0 if stock is 0 (no exceptions)
-      if (qty < 0.0001) {
-        plainIng.currentCostPerBaseUnit = 0;
-        cost = 0; // Ensure local variable is also 0
-      } else {
-        // Stock > 0 - use the calculated cost
-        plainIng.currentCostPerBaseUnit = cost;
-      }
+      // CRITICAL: Explicitly set ALL calculated values in the response
+      // Round values appropriately
+      plainIng.qtyOnHand = Number(qty.toFixed(4)); // Round to 4 decimal places
+      plainIng.currentCostPerBaseUnit = Number(cost.toFixed(6)); // Round to 6 decimal places
+      plainIng.lastPurchaseUnitPrice = Number(lastPurchaseUnitPrice.toFixed(2)); // Round to 2 decimal places
+      plainIng.lastPurchaseUom = lastPurchaseUom;
       
       // Debug logging for cart admin in development
-      if (process.env.NODE_ENV === 'development' && req.user.role === 'admin' && qty < 0.0001 && cost > 0) {
-        console.error(`[SANITIZATION ERROR] ${ing.name}: qty=${qty}, cost=${cost} - forcing cost to 0`);
-        plainIng.currentCostPerBaseUnit = 0;
+      if (process.env.NODE_ENV === 'development' && req.user.role === 'admin') {
+        console.log(`[RESPONSE] ${ing.name}: qtyOnHand=${plainIng.qtyOnHand}, currentCostPerBaseUnit=${plainIng.currentCostPerBaseUnit}, lastPurchaseUnitPrice=${plainIng.lastPurchaseUnitPrice}/${plainIng.lastPurchaseUom}`);
+        if (qty < 0.0001 && cost > 0) {
+          console.error(`[SANITIZATION ERROR] ${ing.name}: qty=${qty}, cost=${cost} - forcing cost to 0`);
+          plainIng.currentCostPerBaseUnit = 0;
+          plainIng.lastPurchaseUnitPrice = 0;
+        }
       }
       
       return plainIng;
     });
 
-    res.json({ success: true, data: sanitizedIngredients });
+    // Final summary log for cart admin
+    if (process.env.NODE_ENV === 'development' && req.user.role === 'admin') {
+      const totalStock = sanitizedIngredients.reduce((sum, ing) => sum + (Number(ing.qtyOnHand) || 0), 0);
+      const itemsWithStock = sanitizedIngredients.filter(ing => (Number(ing.qtyOnHand) || 0) > 0).length;
+      console.log(`[RESPONSE SUMMARY] Cart admin ${req.user._id}: Sending ${sanitizedIngredients.length} ingredients, ${itemsWithStock} with stock > 0, total stock = ${totalStock}`);
+      if (itemsWithStock === 0 && sanitizedIngredients.length > 0) {
+        console.warn(`[RESPONSE WARNING] All ingredients have 0 stock! Check transaction queries.`);
+        // Log first 3 ingredients as sample
+        sanitizedIngredients.slice(0, 3).forEach(ing => {
+          console.log(`  - ${ing.name}: qtyOnHand=${ing.qtyOnHand}, currentCostPerBaseUnit=${ing.currentCostPerBaseUnit}`);
+        });
+      }
+    }
+
+    // CRITICAL: Log final response before sending
+    if (process.env.NODE_ENV === 'development' && req.user.role === 'admin') {
+      console.log(`[RESPONSE FINAL] Sending response with ${sanitizedIngredients.length} ingredients`);
+      // Log first 5 ingredients to verify data
+      sanitizedIngredients.slice(0, 5).forEach(ing => {
+        const stockValue = (Number(ing.qtyOnHand) || 0) * (Number(ing.currentCostPerBaseUnit) || 0);
+        console.log(`[RESPONSE FINAL] ${ing.name}:`, {
+          qtyOnHand: ing.qtyOnHand,
+          currentCostPerBaseUnit: ing.currentCostPerBaseUnit,
+          lastPurchaseUnitPrice: ing.lastPurchaseUnitPrice,
+          lastPurchaseUom: ing.lastPurchaseUom,
+          baseUnit: ing.baseUnit,
+          uom: ing.uom,
+          stockValue: stockValue.toFixed(2)
+        });
+      });
+      
+      // Calculate total value from response
+      const totalValue = sanitizedIngredients.reduce((sum, ing) => {
+        const qty = Number(ing.qtyOnHand) || 0;
+        const cost = Number(ing.currentCostPerBaseUnit) || 0;
+        return sum + (qty * cost);
+      }, 0);
+      console.log(`[RESPONSE FINAL] Total inventory value: ₹${totalValue.toFixed(2)}`);
+    }
+
+    // CRITICAL: Always return success with data array, even if empty
+    console.log(`[GET_INGREDIENTS] ✅ Sending response: ${sanitizedIngredients.length} ingredients`);
+    res.json({ 
+      success: true, 
+      data: sanitizedIngredients || [],
+      count: sanitizedIngredients.length,
+      message: sanitizedIngredients.length === 0 
+        ? "No ingredients found. Super admin should create ingredients with cartId: null first." 
+        : `Found ${sanitizedIngredients.length} ingredients`
+    });
   } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
+    console.error(`[GET_INGREDIENTS ERROR]`, error);
+    console.error(`[GET_INGREDIENTS ERROR] Stack:`, error.stack);
+    console.error(`[GET_INGREDIENTS ERROR] User:`, req.user?.role, req.user?._id);
+    res.status(500).json({ 
+      success: false, 
+      message: error.message || "Failed to fetch ingredients",
+      data: [] // Always return data array
+    });
   }
 };
 
@@ -660,27 +1574,152 @@ exports.createIngredient = async (req, res) => {
       bodyData.category = decodeHtmlEntities(bodyData.category);
     }
 
-    // Ingredients can be shared (outletId optional) or kiosk-specific
+    // Ingredients can be shared (cartId optional) or kiosk-specific
     const data = await setOutletContext(req.user, bodyData, false);
+    
+    // CRITICAL: For super admin, ALWAYS set cartId to null for shared ingredients
+    // This ensures all super admin ingredients are visible to cart admins
+    if (req.user.role === "super_admin") {
+      // Super admin ingredients should ALWAYS be shared (cartId: null)
+      // Unless explicitly setting cartId for a specific cart
+      if (!bodyData.cartId) {
+        data.cartId = null;
+        console.log(`[CREATE_INGREDIENT] Super admin creating shared ingredient - cartId set to null`);
+      }
+    }
+    
+    console.log(`[CREATE_INGREDIENT] Creating ingredient with cartId: ${data.cartId || 'null'}`);
+    
+    // Check if ingredient with same name and cartId already exists
+    // The database has a unique index on name + cartId (legacy) or name + cartId
+    const existingQuery = {
+      name: { $regex: new RegExp(`^${data.name.trim()}$`, 'i') }, // Case-insensitive match
+    };
+    
+    // Add cartId to query if it exists, otherwise check for null
+    if (data.cartId) {
+      existingQuery.cartId = data.cartId;
+    } else {
+      // For shared ingredients (cartId: null), check for null or missing cartId
+      existingQuery.$or = [
+        { cartId: null },
+        { cartId: { $exists: false } }
+      ];
+    }
+    
+    const existingIngredient = await Ingredient.findOne(existingQuery);
+    
+    if (existingIngredient) {
+      // Return existing ingredient with a warning instead of error
+      await existingIngredient.populate("cartId", "name cafeName");
+      await existingIngredient.populate("preferredSupplierId", "name");
+      
+      // Convert to plain object to ensure all fields are included
+      const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
+      
+      const isShared = !data.cartId || data.cartId === null;
+      console.log(`[CREATE_INGREDIENT] Returning existing ingredient: ${ingredientData.name} (ID: ${ingredientData._id})`);
+      
+      return res.status(200).json({
+        success: true,
+        message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
+        warning: 'INGREDIENT_ALREADY_EXISTS',
+        data: ingredientData,
+        isExisting: true
+      });
+    }
+    
     const ingredient = new Ingredient(data);
-    await ingredient.save();
+    
+    try {
+      await ingredient.save();
+    } catch (saveError) {
+      // Handle duplicate key error (unique index violation)
+      if (saveError.code === 11000 || saveError.name === 'MongoServerError') {
+        // Extract the duplicate key from error message
+        const duplicateKeyMatch = saveError.message.match(/dup key: \{ (.+?) \}/);
+        const duplicateKey = duplicateKeyMatch ? duplicateKeyMatch[1] : 'unknown';
+        
+        // Check if it's a shared ingredient (cartId: null or cartId: null)
+        const isShared = duplicateKey.includes('cartId: null') || duplicateKey.includes('cartId: null') || !data.cartId;
+        
+        // Try to find the existing ingredient to return it
+        let existingIngredient = null;
+        try {
+          const findQuery = { name: data.name.trim() };
+          if (isShared) {
+            findQuery.$or = [
+              { cartId: null },
+              { cartId: { $exists: false } }
+            ];
+          } else {
+            findQuery.cartId = data.cartId;
+          }
+          existingIngredient = await Ingredient.findOne(findQuery)
+            .populate("cartId", "name cafeName")
+            .populate("preferredSupplierId", "name");
+        } catch (findError) {
+          console.error('[CREATE_INGREDIENT] Error finding existing ingredient:', findError);
+        }
+        
+        // Return existing ingredient with warning instead of error
+        if (existingIngredient) {
+          // Convert to plain object to ensure all fields are included
+          const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
+          console.log(`[CREATE_INGREDIENT] Returning existing ingredient from duplicate key error: ${ingredientData.name} (ID: ${ingredientData._id})`);
+          
+          return res.status(200).json({
+            success: true,
+            message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
+            warning: 'INGREDIENT_ALREADY_EXISTS',
+            data: ingredientData,
+            isExisting: true
+          });
+        } else {
+          // If we can't find it, still return success with warning
+          return res.status(200).json({
+            success: true,
+            message: `Ingredient "${data.name}" may already exist. Please check the ingredients list.`,
+            warning: 'POSSIBLE_DUPLICATE',
+            duplicateKey: duplicateKey
+          });
+        }
+      }
+      // Re-throw if it's not a duplicate key error
+      throw saveError;
+    }
+    
     await ingredient.populate("cartId", "name cafeName");
+    await ingredient.populate("preferredSupplierId", "name");
+
+    // Convert to plain object to ensure all fields are included in response
+    const ingredientData = ingredient.toObject ? ingredient.toObject({ getters: true, virtuals: false }) : ingredient;
+    
+    console.log(`[CREATE_INGREDIENT] ✅ Successfully created ingredient: ${ingredientData.name} (ID: ${ingredientData._id}, cartId: ${ingredientData.cartId || 'null'})`);
 
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.outletId) {
+    if (ingredient.cartId) {
       emitToCafe(
         io,
-        ingredient.outletId.toString(),
+        ingredient.cartId.toString(),
         "ingredient:created",
-        ingredient
+        ingredientData
       );
     }
 
-    res.status(201).json({ success: true, data: ingredient });
+    res.status(201).json({ 
+      success: true, 
+      data: ingredientData,
+      message: `Ingredient "${ingredientData.name}" created successfully`
+    });
   } catch (error) {
-    res.status(400).json({ success: false, message: error.message });
+    console.error(`[CREATE_INGREDIENT ERROR]`, error);
+    res.status(400).json({ 
+      success: false, 
+      message: error.message || "Failed to create ingredient" 
+    });
   }
 };
 
@@ -701,8 +1740,8 @@ exports.updateIngredient = async (req, res) => {
     // Check access control - cart admins can only update their own ingredients
     if (req.user.role === "admin") {
       if (
-        existingIngredient.outletId &&
-        existingIngredient.outletId.toString() !== req.user._id.toString()
+        existingIngredient.cartId &&
+        existingIngredient.cartId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -734,10 +1773,10 @@ exports.updateIngredient = async (req, res) => {
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.outletId) {
+    if (ingredient.cartId) {
       emitToCafe(
         io,
-        ingredient.outletId.toString(),
+        ingredient.cartId.toString(),
         "ingredient:updated",
         ingredient
       );
@@ -759,7 +1798,7 @@ exports.updateIngredient = async (req, res) => {
           await linkedInventory.save();
           emitToCafe(
             io,
-            ingredient.outletId.toString(),
+            ingredient.cartId.toString(),
             "inventory:updated",
             linkedInventory
           );
@@ -799,10 +1838,10 @@ exports.deleteIngredient = async (req, res) => {
 
     // Check access control
     if (req.user.role === "admin") {
-      // If ingredient has outletId, it must match the cart admin's ID
+      // If ingredient has cartId, it must match the cart admin's ID
       if (
-        ingredient.outletId &&
-        ingredient.outletId.toString() !== req.user._id.toString()
+        ingredient.cartId &&
+        ingredient.cartId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -810,8 +1849,8 @@ exports.deleteIngredient = async (req, res) => {
             "Access denied: You can only delete ingredients belonging to your cart",
         });
       }
-      // If ingredient is shared (outletId is null), cart admin cannot delete it
-      if (!ingredient.outletId) {
+      // If ingredient is shared (cartId is null), cart admin cannot delete it
+      if (!ingredient.cartId) {
         return res.status(403).json({
           success: false,
           message: "Access denied: You cannot delete shared ingredients",
@@ -819,8 +1858,8 @@ exports.deleteIngredient = async (req, res) => {
       }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin can delete ingredients from their franchise carts
-      if (ingredient.outletId) {
-        const outlet = await User.findById(ingredient.outletId);
+      if (ingredient.cartId) {
+        const outlet = await User.findById(ingredient.cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -885,8 +1924,8 @@ exports.deleteIngredient = async (req, res) => {
     // Emit socket event for real-time sync
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (ingredient.outletId) {
-      emitToCafe(io, ingredient.outletId.toString(), "ingredient:deleted", {
+    if (ingredient.cartId) {
+      emitToCafe(io, ingredient.cartId.toString(), "ingredient:deleted", {
         id: ingredient._id,
       });
     }
@@ -918,8 +1957,8 @@ exports.getFIFOLayers = async (req, res) => {
     // Check access control - cart admins can only view FIFO for their own ingredients
     if (req.user.role === "admin") {
       if (
-        ingredient.outletId &&
-        ingredient.outletId.toString() !== req.user._id.toString()
+        ingredient.cartId &&
+        ingredient.cartId.toString() !== req.user._id.toString()
       ) {
         return res.status(403).json({
           success: false,
@@ -949,12 +1988,12 @@ exports.getFIFOLayers = async (req, res) => {
  */
 exports.getPurchases = async (req, res) => {
   try {
-    const { status, supplierId, from, to, outletId } = req.query;
+    const { status, supplierId, from, to, cartId } = req.query;
     const filter = {};
 
     if (status) filter.status = status;
     if (supplierId) filter.supplierId = supplierId;
-    if (outletId) filter.cartId = outletId;
+    if (cartId) filter.cartId = cartId;
     if (from || to) {
       filter.date = {};
       if (from) filter.date.$gte = new Date(from);
@@ -1079,15 +2118,27 @@ exports.receivePurchase = async (req, res) => {
       // Always log purchase cost calculation for debugging
       console.log(`[PURCHASE] ${ingredient.name}: unitPrice=₹${item.unitPrice}/${item.uom}, baseUnit=${ingredient.baseUnit}, conversionFactor=${conversionFactor}, unitCostInBaseUnit=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
 
-      // Update weighted average cost
-      // Use cartId for weighted average calculation
+      // SIMPLE: Update stock with exact purchase price (no weighted average)
+      // Use cartId for stock update
       const cartId = purchase.cartId || null;
-      const weightedAvgResult = await WeightedAverageService.updateWeightedAverage(
+      
+      // Log before update for debugging
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Updating stock - qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, exactPurchasePrice=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}, cartId=${cartId}`);
+      }
+      
+      // Update stock and store exact purchase price (no averaging)
+      const stockUpdateResult = await WeightedAverageService.updateWeightedAverage(
         item.ingredientId,
         qtyInBaseUnit,
-        unitCostInBaseUnit,
+        unitCostInBaseUnit, // Exact purchase price per base unit
         cartId
       );
+      
+      // Log after update for debugging
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Stock updated - previousQty=${stockUpdateResult.previousQty}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, exactPrice=₹${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
+      }
 
       // Calculate cost allocated using the actual purchase cost (not weighted average)
       // The transaction should record the actual cost of this purchase
@@ -1108,20 +2159,45 @@ exports.receivePurchase = async (req, res) => {
       }
 
       // Create inventory transaction
+      // CRITICAL: Ensure qtyInBaseUnit is correctly calculated and stored
+      // This is used for stock calculation in getIngredients
+      // IMPORTANT: Store exact unitPrice to match purchase price in inventory
+      // CRITICAL: Ensure cartId is stored correctly (ObjectId format)
+      // Convert to ObjectId if it's a string to ensure consistent matching
+      let transactionCartId = purchase.cartId || null;
+      if (transactionCartId && mongoose.Types.ObjectId.isValid(transactionCartId)) {
+        transactionCartId = new mongoose.Types.ObjectId(transactionCartId);
+      }
+      
       const transaction = new InventoryTransaction({
         ingredientId: item.ingredientId,
         type: "IN",
-        qty: item.qty, // Original quantity
-        uom: item.uom, // Original unit
-        qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit
+        qty: item.qty, // Original quantity (for display)
+        uom: item.uom, // Original unit (for display)
+        qtyInBaseUnit: qtyInBaseUnit, // Quantity in base unit (CRITICAL for stock calculation)
         refType: "purchase",
         refId: purchase._id,
         date: new Date(),
-        costAllocated: costAllocated, // Use weighted average cost
+        costAllocated: costAllocated, // Total cost for this transaction
+        unitPrice: item.unitPrice, // CRITICAL: Store exact purchase price per unit to match inventory display
         recordedBy: req.user._id,
-        cartId: purchase.cartId || null,
+        cartId: transactionCartId, // CRITICAL: Must match purchase.cartId for proper stock tracking (stored as ObjectId)
       });
+      
+      // Validate transaction before saving
+      if (qtyInBaseUnit <= 0) {
+        throw new Error(`Invalid qtyInBaseUnit for ${ingredient.name}: ${qtyInBaseUnit}. Original qty: ${item.qty} ${item.uom}`);
+      }
+      if (costAllocated < 0) {
+        throw new Error(`Invalid costAllocated for ${ingredient.name}: ${costAllocated}`);
+      }
+      
       await transaction.save();
+      
+      // Log transaction creation for debugging
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Transaction created - qty=${item.qty} ${item.uom}, qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, costAllocated=₹${costAllocated.toFixed(2)}, unitPrice=₹${item.unitPrice}/${item.uom}, cartId=${transactionCartId ? transactionCartId.toString() : 'null'}`);
+      }
       // #region agent log
       logDebug(
         "costingController.js:776",
@@ -1130,7 +2206,7 @@ exports.receivePurchase = async (req, res) => {
           transactionId: transaction._id,
           ingredientId: item.ingredientId,
           ingredientName: ingredient.name,
-          outletId: purchase.cartId,
+          cartId: purchase.cartId,
           purchaseId: purchase._id,
           qty: qtyInBaseUnit,
           costAllocated: transaction.costAllocated,
@@ -1158,16 +2234,29 @@ exports.receivePurchase = async (req, res) => {
         "Recalculating BOMs after purchase",
         {
           purchaseId: purchase._id,
-          outletId: purchase.cartId,
+          cartId: purchase.cartId,
           ingredientIds: purchasedIngredientIds,
         },
         "B"
       );
       // #endregion
       // Find all recipes that use any of the purchased ingredients
-      const affectedRecipes = await Recipe.find({
+      // For cart-specific purchases, also include global recipes (cartId: null) that might use these ingredients
+      const recipeFilter = {
         "ingredients.ingredientId": { $in: purchasedIngredientIds },
-      });
+      };
+      
+      // If this is a cart-specific purchase, also recalculate global recipes
+      // This ensures global BOMs reflect the latest purchase prices
+      if (purchase.cartId) {
+        recipeFilter.$or = [
+          { cartId: purchase.cartId }, // Cart-specific recipes
+          { cartId: null }, // Global recipes
+          { cartId: { $exists: false } }, // Legacy recipes
+        ];
+      }
+      
+      const affectedRecipes = await Recipe.find(recipeFilter);
 
       // #region agent log
       logDebug(
@@ -1183,9 +2272,9 @@ exports.receivePurchase = async (req, res) => {
 
       // Recalculate costs for each affected recipe
       for (const recipe of affectedRecipes) {
-        // Use outletId from purchase to recalculate outlet-specific costs
-        const outletIdForRecalc = purchase.cartId || null;
-        await recipe.calculateCost(outletIdForRecalc);
+        // Use cartId from purchase to recalculate outlet-specific costs
+        const cartIdForRecalc = purchase.cartId || null;
+        await recipe.calculateCost(cartIdForRecalc);
         await recipe.save();
         // #region agent log
         logDebug(
@@ -1196,7 +2285,7 @@ exports.receivePurchase = async (req, res) => {
             recipeName: recipe.name,
             totalCost: recipe.totalCostCached,
             costPerPortion: recipe.costPerPortion,
-            outletId: outletIdForRecalc,
+            cartId: cartIdForRecalc,
           },
           "B"
         );
@@ -1221,7 +2310,7 @@ exports.receivePurchase = async (req, res) => {
  */
 exports.consumeInventory = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, refType, refId, outletId } = req.body;
+    const { ingredientId, qty, uom, refType, refId, cartId } = req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1230,35 +2319,35 @@ exports.consumeInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own outletId
-    // For franchise admin and super admin, use provided outletId or validate
-    let finalOutletId = outletId;
+    // For cart admin, always use their own cartId
+    // For franchise admin and super admin, use provided cartId or validate
+    let finalOutletId = cartId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide outletId
-      if (!outletId) {
+      // Franchise admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for franchise admin",
+          message: "cartId is required for franchise admin",
         });
       }
-      if (!(await validateOutletAccess(req.user, outletId))) {
+      if (!(await validateOutletAccess(req.user, cartId))) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this kiosk" });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     } else if (req.user.role === "super_admin") {
-      // Super admin - must provide outletId
-      if (!outletId) {
+      // Super admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for super admin",
+          message: "cartId is required for super admin",
         });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     }
 
     // Convert to base unit
@@ -1302,7 +2391,7 @@ exports.consumeInventory = async (req, res) => {
  */
 exports.returnToInventory = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, refType, refId, originalTransactionId, outletId, notes } = req.body;
+    const { ingredientId, qty, uom, refType, refId, originalTransactionId, cartId, notes } = req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -1311,35 +2400,35 @@ exports.returnToInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own outletId
-    // For franchise admin and super admin, use provided outletId or validate
-    let finalOutletId = outletId;
+    // For cart admin, always use their own cartId
+    // For franchise admin and super admin, use provided cartId or validate
+    let finalOutletId = cartId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide outletId
-      if (!outletId) {
+      // Franchise admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for franchise admin",
+          message: "cartId is required for franchise admin",
         });
       }
-      if (!(await validateOutletAccess(req.user, outletId))) {
+      if (!(await validateOutletAccess(req.user, cartId))) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this kiosk" });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     } else if (req.user.role === "super_admin") {
-      // Super admin - must provide outletId
-      if (!outletId) {
+      // Super admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for super admin",
+          message: "cartId is required for super admin",
         });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     }
 
     // Convert to base unit
@@ -1385,7 +2474,7 @@ exports.returnToInventory = async (req, res) => {
  */
 exports.getInventoryTransactions = async (req, res) => {
   try {
-    const { ingredientId, type, from, to, outletId } = req.query;
+    const { ingredientId, type, from, to, cartId } = req.query;
     const filter = {};
 
     if (ingredientId) filter.ingredientId = ingredientId;
@@ -1402,9 +2491,9 @@ exports.getInventoryTransactions = async (req, res) => {
       filter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (outletId) {
+      if (cartId) {
         // Validate outlet belongs to their franchise
-        const outlet = await User.findById(outletId);
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -1414,7 +2503,7 @@ exports.getInventoryTransactions = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.cartId = outletId;
+        filter.cartId = cartId;
       } else {
         // Get all kiosks under franchise
         const outlets = await User.find({
@@ -1426,10 +2515,10 @@ exports.getInventoryTransactions = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - can filter by outlet or see all
-      if (outletId) {
-        filter.cartId = outletId;
+      if (cartId) {
+        filter.cartId = cartId;
       }
-      // If no outletId specified, show all transactions
+      // If no cartId specified, show all transactions
     }
 
     const transactions = await InventoryTransaction.find(filter)
@@ -1454,43 +2543,43 @@ exports.getCostingInventory = async (req, res) => {
     const Employee = require("../../models/employeeModel");
 
     // Get cafeId for mobile users (waiter, cook, captain, manager)
-    let outletId = null;
+    let cartId = null;
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
       // Mobile users - get cafeId from user or employee record
       if (req.user.cafeId) {
-        outletId = req.user.cafeId;
+        cartId = req.user.cafeId;
       } else {
         // Fallback: find employee by email
         const employee = await Employee.findOne({
           email: req.user.email?.toLowerCase(),
         }).lean();
         if (employee && employee.cafeId) {
-          outletId = employee.cafeId;
+          cartId = employee.cafeId;
         }
       }
 
-      if (!outletId) {
+      if (!cartId) {
         return res.status(403).json({
           success: false,
           message: "No cafe associated with this user",
         });
       }
     } else if (req.user.role === "admin") {
-      // Cart admin - use their own ID as outletId
-      outletId = req.user._id;
+      // Cart admin - use their own ID as cartId
+      cartId = req.user._id;
     }
 
     // Build filter for ingredients
     const filter = { isActive: true };
-    if (outletId) {
-      filter.outletId = outletId;
+    if (cartId) {
+      filter.cartId = cartId;
     }
 
     // Apply role-based filtering
     const shouldSkipOutletFilter =
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
-      !outletId;
+      !cartId;
     const costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipOutletFilter,
     });
@@ -1520,14 +2609,14 @@ exports.getCostingInventory = async (req, res) => {
       minStock: ing.reorderLevel || 0,
       ingredientId: ing._id,
       // Add cafeId for filtering
-      cafeId: outletId || ing.outletId,
+      cafeId: cartId || ing.cartId,
     }));
 
     console.log(
       "[COSTING] getCostingInventory - Found items:",
       inventoryItems.length,
-      "for outletId:",
-      outletId
+      "for cartId:",
+      cartId
     );
 
     res.json({
@@ -1547,8 +2636,8 @@ exports.getCostingInventory = async (req, res) => {
 exports.getLowStock = async (req, res) => {
   try {
     // Apply role-based filtering
-    // For cart admins, only show low stock items from their cart (filter by outletId)
-    // For franchise/super admins, can see all low stock items or filter by outletId
+    // For cart admins, only show low stock items from their cart (filter by cartId)
+    // For franchise/super admins, can see all low stock items or filter by cartId
     const shouldSkipOutletFilter =
       req.user.role === "franchise_admin" || req.user.role === "super_admin";
     const filter = await buildCostingQuery(
@@ -1560,7 +2649,7 @@ exports.getLowStock = async (req, res) => {
     // Log filtering for debugging
     if (req.user.role === "admin") {
       console.log(
-        "[GET_LOW_STOCK] Cart admin filter - outletId:",
+        "[GET_LOW_STOCK] Cart admin filter - cartId:",
         req.user._id.toString()
       );
     }
@@ -1584,7 +2673,7 @@ exports.getLowStock = async (req, res) => {
  */
 exports.recordWaste = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, reason, reasonDetails, outletId } =
+    const { ingredientId, qty, uom, reason, reasonDetails, cartId } =
       req.body;
 
     const ingredient = await Ingredient.findById(ingredientId);
@@ -1594,35 +2683,35 @@ exports.recordWaste = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own outletId
-    // For franchise admin and super admin, use provided outletId or validate
-    let finalOutletId = outletId;
+    // For cart admin, always use their own cartId
+    // For franchise admin and super admin, use provided cartId or validate
+    let finalOutletId = cartId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide outletId
-      if (!outletId) {
+      // Franchise admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for franchise admin",
+          message: "cartId is required for franchise admin",
         });
       }
-      if (!(await validateOutletAccess(req.user, outletId))) {
-        return res
-          .status(403)
-          .json({ success: false, message: "Access denied to this kiosk" });
+      if (!(await validateOutletAccess(req.user, cartId))) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Access denied to this kiosk" });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     } else if (req.user.role === "super_admin") {
-      // Super admin - must provide outletId
-      if (!outletId) {
+      // Super admin - must provide cartId
+      if (!cartId) {
         return res.status(400).json({
           success: false,
-          message: "outletId is required for super admin",
+          message: "cartId is required for super admin",
         });
       }
-      finalOutletId = outletId;
+      finalOutletId = cartId;
     }
 
     // Convert to base unit
@@ -1700,7 +2789,7 @@ exports.recordWaste = async (req, res) => {
  */
 exports.getWaste = async (req, res) => {
   try {
-    const { ingredientId, from, to, outletId } = req.query;
+    const { ingredientId, from, to, cartId } = req.query;
     const filter = {};
 
     if (ingredientId) filter.ingredientId = ingredientId;
@@ -1716,9 +2805,9 @@ exports.getWaste = async (req, res) => {
       filter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (outletId) {
+      if (cartId) {
         // Validate outlet belongs to their franchise
-        const outlet = await User.findById(outletId);
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -1728,7 +2817,7 @@ exports.getWaste = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.cartId = outletId;
+        filter.cartId = cartId;
       } else {
         // Get all kiosks under franchise
         const outlets = await User.find({
@@ -1740,10 +2829,10 @@ exports.getWaste = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - can filter by outlet or see all
-      if (outletId) {
-        filter.cartId = outletId;
+      if (cartId) {
+        filter.cartId = cartId;
       }
-      // If no outletId specified, show all waste records
+      // If no cartId specified, show all waste records
     }
 
     const waste = await Waste.find(filter)
@@ -1774,65 +2863,91 @@ exports.getRecipes = async (req, res) => {
       "A"
     );
     // #endregion
-    const { isActive, search, outletId } = req.query;
+    const { isActive, search, cartId } = req.query;
     const filter = {};
 
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (outletId) filter.cartId = outletId;
+    // Only set cartId from cartId for franchise/super admins, not for cart admins
+    // Cart admins should see both their own recipes (cartId = their _id) AND shared recipes (cartId = null)
+    if (cartId && req.user.role !== "admin") {
+      filter.cartId = cartId;
+    }
 
     // Apply role-based filtering (recipes can be shared or cart-specific)
     // For cart admin: only show recipes for their own cart OR global recipes (cartId: null)
     // For franchise_admin: show recipes for their franchise carts OR global recipes
-    // For super_admin: only show global BOMs (cartId: null) unless filtering by specific outletId
+    // For super_admin: only show global BOMs (cartId: null) unless filtering by specific cartId
     let costingFilter = { ...filter };
     if (req.user.role === "admin") {
+      console.log(`[GET_RECIPES] ========================================`);
+      console.log(`[GET_RECIPES] CART ADMIN REQUEST - User ID: ${req.user._id}`);
+      console.log(`[GET_RECIPES] ========================================`);
+      
       // Cart admin: only their own cart's recipes OR global recipes (cartId: null)
       // Remove cartId from filter if it was set, as we'll use $or instead
       delete costingFilter.cartId;
       
-      // Build $or conditions: cart-specific recipes OR global recipes
-      const orConditions = [
-        { cartId: req.user._id }, // Cart-specific recipes
-        { cartId: null }, // Global recipes (super admin BOMs)
-        { cartId: { $exists: false } }, // Legacy recipes without cartId
-      ];
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
       
-      // If cart admin has a franchiseId, we need to handle franchiseId filtering carefully:
-      // - For cart-specific recipes (cartId: req.user._id), match franchiseId
-      // - For global recipes (cartId: null), allow regardless of franchiseId
-      if (req.user.franchiseId) {
-        // Use $and with $or to handle both cart-specific and global recipes
-        costingFilter.$and = [
-          {
-            $or: [
-              // Cart-specific recipes: must match cartId AND franchiseId
-              {
-                $and: [
-                  { cartId: req.user._id },
-                  { franchiseId: req.user.franchiseId },
-                ],
-              },
-              // Global recipes: cartId is null, franchiseId can be null or match
-              {
-                $and: [
-                  { $or: [{ cartId: null }, { cartId: { $exists: false } }] },
-                  {
-                    $or: [
-                      { franchiseId: null },
-                      { franchiseId: { $exists: false } },
-                      { franchiseId: req.user.franchiseId },
-                    ],
-                  },
-                ],
-              },
-            ],
-          },
-        ];
-      } else {
-        // No franchiseId: simple $or for cartId
-        costingFilter.$or = orConditions;
+      // Check database state
+      const totalInDB = await Recipe.countDocuments({});
+      const withCartIdNull = await Recipe.countDocuments({ cartId: null });
+      const withCartIdUser = await Recipe.countDocuments({ cartId: userCartIdObj });
+      const withNoCartId = await Recipe.countDocuments({ cartId: { $exists: false } });
+      
+      console.log(`[GET_RECIPES] ========== DATABASE STATE ==========`);
+      console.log(`[GET_RECIPES] Total recipes in DB: ${totalInDB}`);
+      console.log(`[GET_RECIPES] Recipes with cartId=null: ${withCartIdNull}`);
+      console.log(`[GET_RECIPES] Recipes with cartId=${userCartIdObj}: ${withCartIdUser}`);
+      console.log(`[GET_RECIPES] Recipes without cartId field: ${withNoCartId}`);
+      console.log(`[GET_RECIPES] =====================================`);
+      
+      // Build base query for shared + cart-specific recipes
+      // Use $or to get both shared (cartId: null) and cart-specific (cartId: userCartId) recipes
+      const baseQuery = {
+        $or: [
+          { cartId: null },
+          { cartId: userCartIdObj },
+          { cartId: { $exists: false } }
+        ]
+      };
+      
+      // Apply isActive filter if provided
+      if (filter.isActive !== undefined) {
+        if (filter.isActive === true) {
+          baseQuery.isActive = { $ne: false };
+        } else {
+          baseQuery.isActive = false;
+        }
       }
+      
+      // Apply other filters (name/search)
+      const otherFilters = {};
+      if (filter.name) {
+        if (filter.name.$regex) {
+          otherFilters.name = filter.name;
+        } else {
+          otherFilters.name = { $regex: filter.name, $options: "i" };
+        }
+      }
+      
+      // Combine all filters
+      if (Object.keys(otherFilters).length > 0) {
+        costingFilter = {
+          $and: [
+            baseQuery,
+            otherFilters
+          ]
+        };
+      } else {
+        costingFilter = baseQuery;
+      }
+      
+      console.log(`[GET_RECIPES] Final query:`, JSON.stringify(costingFilter, null, 2));
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin: recipes for their franchise carts OR global recipes
       const franchiseCarts = await User.find({
@@ -1851,35 +2966,69 @@ exports.getRecipes = async (req, res) => {
       costingFilter.franchiseId = req.user._id;
     } else if (req.user.role === "super_admin") {
       // Super admin: only global BOMs (cartId: null) unless filtering by specific outlet
-      if (!outletId) {
+      if (!cartId) {
         costingFilter.cartId = null;
       } else {
-        costingFilter.cartId = outletId;
+        costingFilter.cartId = cartId;
       }
     }
 
-    const recipes = await Recipe.find(costingFilter)
+    let recipes = await Recipe.find(costingFilter)
       .populate(
         "ingredients.ingredientId",
         "name uom baseUnit currentCostPerBaseUnit"
       )
       .populate("cartId", "name cafeName")
-      .sort({ name: 1 });
+      .sort({ name: 1 })
+      .lean(); // Use lean() for better performance
 
-    // For Cart Admin, recalculate costs dynamically using their outletId
+    // For Cart Admin, recalculate costs dynamically using their cartId
     // This ensures costs are based on outlet-specific purchases, not cached global values
     if (req.user.role === "admin") {
+      console.log(`[GET_RECIPES] ✅ Query executed - Found ${recipes.length} recipes`);
+      
+      // Log sample results
+      if (recipes.length > 0) {
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(req.user._id) 
+          ? new mongoose.Types.ObjectId(req.user._id) 
+          : req.user._id;
+        
+        console.log(`[GET_RECIPES] Sample recipes:`, recipes.slice(0, 5).map(rec => ({
+          name: rec.name,
+          cartId: rec.cartId ? (rec.cartId._id || rec.cartId).toString() : 'null',
+          isActive: rec.isActive
+        })));
+        
+        // Count shared vs cart-specific
+        const sharedCount = recipes.filter(rec => !rec.cartId || rec.cartId === null).length;
+        const cartSpecificCount = recipes.filter(rec => rec.cartId && rec.cartId.toString() === userCartIdObj.toString()).length;
+        console.log(`[GET_RECIPES] Breakdown: ${sharedCount} shared + ${cartSpecificCount} cart-specific = ${recipes.length} total`);
+      } else {
+        console.error(`[GET_RECIPES] ❌ NO RECIPES FOUND!`);
+        console.error(`[GET_RECIPES] Check if super admin has created recipes with cartId: null`);
+      }
+      
       // #region agent log
       logDebug(
         "costingController.js:1200",
         "Cart Admin - recalculating BOM costs",
-        { outletId: req.user._id, recipeCount: recipes.length },
+        { cartId: req.user._id, recipeCount: recipes.length },
         "A"
       );
       // #endregion
-      for (const recipe of recipes) {
-        // Recalculate cost using Cart Admin's outletId
+      
+      // Recalculate costs for each recipe
+      // Convert lean objects back to Mongoose documents for calculateCost method
+      const RecipeModel = Recipe;
+      for (let i = 0; i < recipes.length; i++) {
+        const recipeData = recipes[i];
+        const recipe = new RecipeModel(recipeData);
+        // Recalculate cost using Cart Admin's cartId
         await recipe.calculateCost(req.user._id);
+        // Update the recipe data with recalculated costs
+        recipes[i].totalCostCached = recipe.totalCostCached;
+        recipes[i].costPerPortion = recipe.costPerPortion;
+        recipes[i].lastCostUpdate = recipe.lastCostUpdate;
         // #region agent log
         logDebug(
           "costingController.js:1205",
@@ -1889,13 +3038,15 @@ exports.getRecipes = async (req, res) => {
             recipeName: recipe.name,
             totalCost: recipe.totalCostCached,
             costPerPortion: recipe.costPerPortion,
-            outletId: req.user._id,
+            cartId: req.user._id,
           },
           "A"
         );
         // #endregion
         // Don't save - just recalculate for display (saves are done on explicit recalculate action)
       }
+      
+      console.log(`[GET_RECIPES] ================================================`);
     }
 
     res.json({ success: true, data: recipes });
@@ -1918,7 +3069,7 @@ exports.getRecipes = async (req, res) => {
  */
 exports.createRecipe = async (req, res) => {
   try {
-    // Set outlet context (recipes can be shared, so outletId is optional)
+    // Set outlet context (recipes can be shared, so cartId is optional)
     const data = await setOutletContext(req.user, { ...req.body }, false);
 
     // Check for duplicate BOM name for the same cart before creating
@@ -1948,6 +3099,31 @@ exports.createRecipe = async (req, res) => {
       "name uom baseUnit currentCostPerBaseUnit"
     );
     await recipe.populate("cartId", "name cafeName");
+
+    // Auto-link menu item if it exists (for cart admin)
+    if (req.user.role === "admin" && data.cartId) {
+      try {
+        // Find menu item with matching name and cartId
+        const menuItem = await MenuItem.findOne({
+          name: recipe.name.trim(),
+          cartId: data.cartId,
+        });
+
+        if (menuItem) {
+          // Link the recipe to the menu item
+          menuItem.recipeId = recipe._id;
+          const cartIdForCost = req.user.role === "admin" ? req.user._id : (data.cartId || null);
+          await recipe.calculateCost(cartIdForCost);
+          await recipe.save();
+          menuItem.calculateMetrics(recipe.costPerPortion);
+          await menuItem.save();
+          console.log(`[CREATE_RECIPE] Auto-linked recipe "${recipe.name}" to menu item ${menuItem._id}`);
+        }
+      } catch (linkError) {
+        console.error("[CREATE_RECIPE] Error auto-linking menu item:", linkError);
+        // Don't fail recipe creation if linking fails
+      }
+    }
 
     res.status(201).json({ success: true, data: recipe });
   } catch (error) {
@@ -1996,6 +3172,46 @@ exports.updateRecipe = async (req, res) => {
       { recipeId: recipe._id },
       { $set: { lastCostUpdate: new Date() } }
     );
+
+    // Auto-link menu item if it exists and not already linked (for cart admin)
+    if (req.user.role === "admin" && recipe.cartId) {
+      try {
+        // Find menu item with matching name and cartId that doesn't have a recipe linked
+        const menuItem = await MenuItem.findOne({
+          name: recipe.name.trim(),
+          cartId: recipe.cartId,
+          $or: [
+            { recipeId: null },
+            { recipeId: { $exists: false } }
+          ]
+        });
+
+        if (menuItem) {
+          // Link the recipe to the menu item
+          menuItem.recipeId = recipe._id;
+          menuItem.calculateMetrics(recipe.costPerPortion);
+          await menuItem.save();
+          console.log(`[UPDATE_RECIPE] Auto-linked recipe "${recipe.name}" to menu item ${menuItem._id}`);
+        } else {
+          // Check if there's a menu item with matching name that should be linked
+          const existingMenuItem = await MenuItem.findOne({
+            name: recipe.name.trim(),
+            cartId: recipe.cartId,
+          });
+
+          if (existingMenuItem && existingMenuItem.recipeId?.toString() !== recipe._id.toString()) {
+            // Update the existing menu item to link to this recipe
+            existingMenuItem.recipeId = recipe._id;
+            existingMenuItem.calculateMetrics(recipe.costPerPortion);
+            await existingMenuItem.save();
+            console.log(`[UPDATE_RECIPE] Updated menu item ${existingMenuItem._id} to link to recipe "${recipe.name}"`);
+          }
+        }
+      } catch (linkError) {
+        console.error("[UPDATE_RECIPE] Error auto-linking menu item:", linkError);
+        // Don't fail recipe update if linking fails
+      }
+    }
 
     res.json({ success: true, data: recipe });
   } catch (error) {
@@ -2120,13 +3336,13 @@ exports.deleteRecipe = async (req, res) => {
  */
 exports.getMenuItems = async (req, res) => {
   try {
-    const { category, isActive, search, outletId } = req.query;
+    const { category, isActive, search, cartId } = req.query;
     const filter = {};
 
     if (category) filter.category = category;
     if (isActive !== undefined) filter.isActive = isActive === "true";
     if (search) filter.name = { $regex: search, $options: "i" };
-    if (outletId) filter.cartId = outletId;
+    if (cartId) filter.cartId = cartId;
 
     // Apply role-based filtering (menu items are kiosk-specific)
     const costingFilter = await buildCostingQuery(req.user, filter);
@@ -2335,8 +3551,8 @@ exports.deleteMenuItem = async (req, res) => {
 
     // Verify that the menu item belongs to the cart admin's outlet
     if (
-      menuItem.outletId &&
-      menuItem.outletId.toString() !== req.user._id.toString()
+      menuItem.cartId &&
+      menuItem.cartId.toString() !== req.user._id.toString()
     ) {
       return res.status(403).json({
         success: false,
@@ -2365,10 +3581,13 @@ exports.getDefaultMenuItems = async (req, res) => {
       const userId = req.user._id;
       const userIdStr = userId.toString();
 
-      // Cart admins use MenuItem model with cafeId = their _id
+      // Cart admins use MenuItem model with cartId = their _id
       // Get menu items for this cart admin
       const operationalMenuItems = await OperationalMenuItem.find({
-        cafeId: userId,
+        $or: [
+          { cartId: userId }, // New field name
+          { cafeId: userId }  // Backward compatibility
+        ]
       })
         .populate("category", "name")
         .sort({ sortOrder: 1, name: 1 })
@@ -2379,7 +3598,12 @@ exports.getDefaultMenuItems = async (req, res) => {
       );
 
       // Get all categories for this cart admin to map IDs to names
-      const categories = await MenuCategory.find({ cafeId: userId })
+      const categories = await MenuCategory.find({ 
+        $or: [
+          { cartId: userId }, // New field name
+          { cafeId: userId }  // Backward compatibility
+        ]
+      })
         .select("_id name")
         .lean();
       const categoryMap = new Map();
@@ -2466,7 +3690,7 @@ exports.getDefaultMenuItems = async (req, res) => {
  */
 exports.importFromDefaultMenu = async (req, res) => {
   try {
-    const { items, recipeId, outletId } = req.body; // items: array of {name, category, franchiseId}
+    const { items, recipeId, cartId } = req.body; // items: array of {name, category, franchiseId}
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res
@@ -2475,7 +3699,7 @@ exports.importFromDefaultMenu = async (req, res) => {
     }
 
     // Set outlet context
-    const outletData = await setOutletContext(req.user, { outletId });
+    const outletData = await setOutletContext(req.user, { cartId });
 
     // Get default menu to fetch prices
     const franchiseId = items[0]?.franchiseId || null;
@@ -2508,13 +3732,13 @@ exports.importFromDefaultMenu = async (req, res) => {
             ? {
                 name: item.name,
                 category: item.category,
-                outletId: outletData.outletId,
+                cartId: outletData.cartId,
                 defaultMenuPath: item.defaultMenuPath,
               }
             : {
                 name: item.name,
                 category: item.category,
-                outletId: outletData.outletId,
+                cartId: outletData.cartId,
               }
         );
 
@@ -2538,7 +3762,7 @@ exports.importFromDefaultMenu = async (req, res) => {
               message: "About to create menu item from default",
               data: {
                 userRole: req.user.role,
-                outletId: outletData.outletId,
+                cartId: outletData.cartId,
                 franchiseId: outletData.franchiseId,
                 itemName: item.name,
                 itemCategory: item.category,
@@ -2554,7 +3778,7 @@ exports.importFromDefaultMenu = async (req, res) => {
           name: item.name,
           category: item.category,
           sellingPrice,
-          outletId: outletData.outletId,
+          cartId: outletData.cartId,
           franchiseId: outletData.franchiseId,
           defaultMenuFranchiseId: item.franchiseId || null,
           defaultMenuCategoryName: item.category,
@@ -2736,7 +3960,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get labour costs - filter by date range properly
-        const labourFilter = { outletId: kiosk._id };
+        const labourFilter = { cartId: kiosk._id };
         if (from || to) {
           // Include labour costs that overlap with the date range
           const fromDate = from ? new Date(from) : new Date("1970-01-01");
@@ -2767,7 +3991,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get expenses for this kiosk in the date range
-        const expenseFilter = { outletId: kiosk._id };
+        const expenseFilter = { cartId: kiosk._id };
         if (from || to) {
           expenseFilter.expenseDate = {};
           if (from) {
@@ -2960,10 +4184,10 @@ exports.getHierarchicalCosting = async (req, res) => {
  */
 exports.getLabourCosts = async (req, res) => {
   try {
-    const { from, to, outletId } = req.query;
+    const { from, to, cartId } = req.query;
     const filter = {};
 
-    if (outletId) filter.outletId = outletId;
+    if (cartId) filter.cartId = cartId;
     if (from || to) {
       filter.$or = [
         {
@@ -3013,10 +4237,10 @@ exports.createLabourCost = async (req, res) => {
  */
 exports.getOverheads = async (req, res) => {
   try {
-    const { from, to, outletId, category } = req.query;
+    const { from, to, cartId, category } = req.query;
     const filter = {};
 
-    if (outletId) filter.outletId = outletId;
+    if (cartId) filter.cartId = cartId;
     if (category) filter.category = category;
     if (from || to) {
       filter.$or = [
@@ -3069,7 +4293,7 @@ exports.createOverhead = async (req, res) => {
  */
 exports.getFoodCostReport = async (req, res) => {
   try {
-    const { from, to, outletId } = req.query;
+    const { from, to, cartId } = req.query;
 
     // Log user info for debugging
     console.log("[FOOD_COST_REPORT] User:", {
@@ -3099,8 +4323,8 @@ exports.getFoodCostReport = async (req, res) => {
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        const outlet = await User.findById(outletId);
+      if (cartId) {
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3110,7 +4334,7 @@ exports.getFoodCostReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = outletId;
+        transactionOutletFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
@@ -3121,8 +4345,8 @@ exports.getFoodCostReport = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        transactionOutletFilter.cartId = outletId;
+      if (cartId) {
+        transactionOutletFilter.cartId = cartId;
       }
     }
 
@@ -3156,21 +4380,21 @@ exports.getFoodCostReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const outletIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: outletIds };
+        const cartIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: cartIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       }
     }
 
@@ -3231,7 +4455,7 @@ exports.getFoodCostReport = async (req, res) => {
  */
 exports.getMenuEngineeringReport = async (req, res) => {
   try {
-    const { from, to, limit = 50, outletId } = req.query;
+    const { from, to, limit = 50, cartId } = req.query;
     const orderFilter = {};
 
     if (from || to) {
@@ -3247,21 +4471,21 @@ exports.getMenuEngineeringReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const outletIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: outletIds };
+        const cartIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: cartIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       }
     }
 
@@ -3269,15 +4493,15 @@ exports.getMenuEngineeringReport = async (req, res) => {
     const menuItemFilter = { isActive: true };
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk's menu items
-      menuItemFilter.outletId = req.user._id;
+      menuItemFilter.cartId = req.user._id;
       console.log(
-        "[MENU_ENGINEERING_REPORT] Cart admin filter - outletId:",
+        "[MENU_ENGINEERING_REPORT] Cart admin filter - cartId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        const outlet = await User.findById(outletId);
+      if (cartId) {
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3287,19 +4511,19 @@ exports.getMenuEngineeringReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        menuItemFilter.outletId = outletId;
+        menuItemFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        menuItemFilter.outletId = { $in: outlets.map((o) => o._id) };
+        menuItemFilter.cartId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        menuItemFilter.outletId = outletId;
+      if (cartId) {
+        menuItemFilter.cartId = cartId;
       }
     }
 
@@ -3384,7 +4608,7 @@ exports.getMenuEngineeringReport = async (req, res) => {
  */
 exports.getSupplierPriceHistory = async (req, res) => {
   try {
-    const { supplierId, ingredientId, outletId } = req.query;
+    const { supplierId, ingredientId, cartId } = req.query;
     const filter = { status: "received" };
 
     if (supplierId) filter.supplierId = supplierId;
@@ -3392,15 +4616,15 @@ exports.getSupplierPriceHistory = async (req, res) => {
     // Apply role-based outlet filtering
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      filter.outletId = req.user._id;
+      filter.cartId = req.user._id;
       console.log(
-        "[SUPPLIER_PRICE_HISTORY] Cart admin filter - outletId:",
+        "[SUPPLIER_PRICE_HISTORY] Cart admin filter - cartId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        const outlet = await User.findById(outletId);
+      if (cartId) {
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3410,19 +4634,19 @@ exports.getSupplierPriceHistory = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        filter.outletId = outletId;
+        filter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        filter.outletId = { $in: outlets.map((o) => o._id) };
+        filter.cartId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        filter.outletId = outletId;
+      if (cartId) {
+        filter.cartId = cartId;
       }
     }
 
@@ -3482,7 +4706,7 @@ exports.getSupplierPriceHistory = async (req, res) => {
  */
 exports.getPnLReport = async (req, res) => {
   try {
-    const { from, to, outletId } = req.query;
+    const { from, to, cartId } = req.query;
 
     // Log user info for debugging
     console.log("[PNL_REPORT] User:", {
@@ -3512,8 +4736,8 @@ exports.getPnLReport = async (req, res) => {
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        const outlet = await User.findById(outletId);
+      if (cartId) {
+        const outlet = await User.findById(cartId);
         if (
           !outlet ||
           outlet.franchiseId?.toString() !== req.user._id.toString()
@@ -3523,7 +4747,7 @@ exports.getPnLReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = outletId;
+        transactionOutletFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
@@ -3534,8 +4758,8 @@ exports.getPnLReport = async (req, res) => {
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        transactionOutletFilter.cartId = outletId;
+      if (cartId) {
+        transactionOutletFilter.cartId = cartId;
       }
     }
 
@@ -3580,21 +4804,21 @@ exports.getPnLReport = async (req, res) => {
       orderFilter.cartId = req.user._id;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const outletIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: outletIds };
+        const cartIds = outlets.map((o) => o._id);
+        orderFilter.cartId = { $in: cartIds };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        orderFilter.cartId = outletId;
+      if (cartId) {
+        orderFilter.cartId = cartId;
       }
     }
 
@@ -3631,27 +4855,27 @@ exports.getPnLReport = async (req, res) => {
     const labourFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      labourFilter.outletId = req.user._id;
+      labourFilter.cartId = req.user._id;
       console.log(
-        "[PNL_REPORT] Cart admin labour filter - outletId:",
+        "[PNL_REPORT] Cart admin labour filter - cartId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        labourFilter.outletId = outletId;
+      if (cartId) {
+        labourFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        labourFilter.outletId = { $in: outlets.map((o) => o._id) };
+        labourFilter.cartId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        labourFilter.outletId = outletId;
+      if (cartId) {
+        labourFilter.cartId = cartId;
       }
     }
 
@@ -3695,27 +4919,27 @@ exports.getPnLReport = async (req, res) => {
     const expenseFilter = {};
     if (req.user.role === "admin") {
       // Cart admin - only their own kiosk
-      expenseFilter.outletId = req.user._id;
+      expenseFilter.cartId = req.user._id;
       console.log(
-        "[PNL_REPORT] Cart admin expense filter - outletId:",
+        "[PNL_REPORT] Cart admin expense filter - cartId:",
         req.user._id.toString()
       );
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - specific outlet or all their franchise outlets
-      if (outletId) {
-        expenseFilter.outletId = outletId;
+      if (cartId) {
+        expenseFilter.cartId = cartId;
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        expenseFilter.outletId = { $in: outlets.map((o) => o._id) };
+        expenseFilter.cartId = { $in: outlets.map((o) => o._id) };
       }
     } else if (req.user.role === "super_admin") {
       // Super admin - specific outlet or all
-      if (outletId) {
-        expenseFilter.outletId = outletId;
+      if (cartId) {
+        expenseFilter.cartId = cartId;
       }
     }
 
@@ -3779,17 +5003,17 @@ exports.getPnLReport = async (req, res) => {
  */
 exports.getExpenses = async (req, res) => {
   try {
-    const { from, to, category, outletId, search } = req.query;
+    const { from, to, category, cartId, search } = req.query;
     const query = await buildCostingQuery(req.user, {});
 
-    if (outletId) {
-      const hasAccess = await validateOutletAccess(req.user, outletId);
+    if (cartId) {
+      const hasAccess = await validateOutletAccess(req.user, cartId);
       if (!hasAccess) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this outlet" });
       }
-      query.outletId = outletId;
+      query.cartId = cartId;
     }
 
     if (from || to) {
@@ -3876,7 +5100,7 @@ exports.updateExpense = async (req, res) => {
     }
 
     // Validate access (validateOutletAccess is async)
-    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
+    const hasAccess = await validateOutletAccess(req.user, expense.cartId);
     if (!hasAccess) {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
@@ -3913,7 +5137,7 @@ exports.deleteExpense = async (req, res) => {
     }
 
     // Validate access (validateOutletAccess is async)
-    const hasAccess = await validateOutletAccess(req.user, expense.outletId);
+    const hasAccess = await validateOutletAccess(req.user, expense.cartId);
     if (!hasAccess) {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
@@ -3932,17 +5156,17 @@ exports.deleteExpense = async (req, res) => {
  */
 exports.getExpenseSummary = async (req, res) => {
   try {
-    const { from, to, outletId } = req.query;
+    const { from, to, cartId } = req.query;
     const query = await buildCostingQuery(req.user, {});
 
-    if (outletId) {
-      const hasAccess = await validateOutletAccess(req.user, outletId);
+    if (cartId) {
+      const hasAccess = await validateOutletAccess(req.user, cartId);
       if (!hasAccess) {
         return res
           .status(403)
           .json({ success: false, message: "Access denied to this outlet" });
       }
-      query.outletId = outletId;
+      query.cartId = cartId;
     }
 
     if (from || to) {
@@ -4040,20 +5264,20 @@ exports.createExpenseCategory = async (req, res) => {
  */
 exports.syncMenuItemsFromDefault = async (req, res) => {
   try {
-    const { franchiseId, outletId } = req.body;
+    const { franchiseId, cartId: bodyCartId } = req.body;
     const {
       syncDefaultMenuToCosting,
     } = require("../../services/costing-v2/syncDefaultMenuToCosting");
 
     // For cart admin, sync from their MenuItem collection (cart menu)
     let targetFranchiseId = franchiseId;
-    let cartId = null;
-    let targetOutletId = outletId;
+    let cartId = bodyCartId || null;
+    let targetOutletId = cartId;
 
     if (req.user.role === "admin") {
       // Cart admin: sync from MenuItem collection (cart menu)
       cartId = req.user._id;
-      // If outletId not provided, use cart admin's own kiosk ID
+      // If cartId not provided, use cart admin's own kiosk ID
       if (!targetOutletId) {
         targetOutletId = req.user._id;
       }
@@ -4086,6 +5310,390 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
 };
 
 /**
+ * Internal function to push ingredients and BOMs to cart admins
+ * @param {String|ObjectId} cartId - Optional: specific cart admin ID, or null for all
+ * @returns {Promise<Object>} Results object
+ */
+const pushToCartAdminsInternal = async (cartId = null) => {
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Starting push - cartId: ${cartId || 'ALL'}`);
+  
+  // Get all super admin ingredients (cartId: null)
+  const superAdminIngredients = await Ingredient.find({
+    cartId: null,
+    isActive: true,
+  }).lean();
+  
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Found ${superAdminIngredients.length} super admin ingredients to push`);
+  
+  if (superAdminIngredients.length === 0) {
+    console.warn(`[PUSH_TO_CART_ADMINS_INTERNAL] ⚠️ No super admin ingredients found! Super admin must create ingredients first.`);
+  }
+
+  // Get all super admin recipes/BOMs (cartId: null)
+  const superAdminRecipes = await Recipe.find({
+    cartId: null,
+    isActive: true,
+  })
+    .populate("ingredients.ingredientId", "name uom baseUnit")
+    .lean();
+  
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Found ${superAdminRecipes.length} super admin recipes to push`);
+
+  // Get target cart admins
+  let cartAdmins = [];
+  if (cartId) {
+    // Push to specific cart admin
+    const cartAdmin = await User.findById(cartId);
+    if (!cartAdmin || cartAdmin.role !== "admin") {
+      throw new Error("Cart admin not found");
+    }
+    cartAdmins = [cartAdmin];
+    console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Pushing to specific cart admin: ${cartAdmin.name || cartAdmin.cartName} (${cartAdmin._id})`);
+  } else {
+    // Push to all cart admins
+    cartAdmins = await User.find({ role: "admin", isActive: { $ne: false } });
+    console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Pushing to ${cartAdmins.length} cart admins`);
+  }
+  
+  if (superAdminIngredients.length === 0 && superAdminRecipes.length === 0) {
+    return {
+      success: true,
+      message: `No super admin ingredients or recipes to push. Super admin must create them first.`,
+      data: {
+        ingredients: { created: 0, updated: 0, skipped: 0 },
+        recipes: { created: 0, updated: 0, skipped: 0 },
+        cartAdmins: cartAdmins.map(ca => ({
+          cartAdminId: ca._id.toString(),
+          cartAdminName: ca.name || ca.cartName || "Unknown",
+          ingredients: { created: 0, updated: 0, skipped: 0 },
+          recipes: { created: 0, updated: 0, skipped: 0 },
+        })),
+      },
+    };
+  }
+
+  const results = {
+    ingredients: { created: 0, updated: 0, skipped: 0 },
+    recipes: { created: 0, updated: 0, skipped: 0 },
+    cartAdmins: [],
+  };
+
+  // Process each cart admin
+  for (const cartAdmin of cartAdmins) {
+    const cartAdminId = cartAdmin._id;
+    const cartAdminFranchiseId = cartAdmin.franchiseId;
+    const cartAdminResult = {
+      cartAdminId: cartAdminId.toString(),
+      cartAdminName: cartAdmin.name || cartAdmin.cartName || "Unknown",
+      ingredients: { created: 0, updated: 0, skipped: 0 },
+      recipes: { created: 0, updated: 0, skipped: 0 },
+    };
+
+    // Push ingredients
+    console.log(`[PUSH_TO_CART_ADMINS] Processing ${superAdminIngredients.length} ingredients for cart admin: ${cartAdminResult.cartAdminName} (${cartAdminId})`);
+    
+    for (const superIngredient of superAdminIngredients) {
+        try {
+          console.log(`[PUSH_TO_CART_ADMINS] Processing ingredient: ${superIngredient.name}`);
+          
+          // Check if cart admin already has this ingredient (by name and cartId)
+          let existingIngredient = await Ingredient.findOne({
+            name: superIngredient.name,
+            cartId: cartAdminId,
+          });
+
+          console.log(`[PUSH_TO_CART_ADMINS] Existing cart-specific ingredient: ${existingIngredient ? existingIngredient._id : 'none'}`);
+
+          // Also check for shared ingredient (cartId: null) with same name
+          // This handles cases where a shared ingredient exists and we need to make it cart-specific
+          if (!existingIngredient) {
+            const sharedIngredient = await Ingredient.findOne({
+              name: superIngredient.name,
+              cartId: null,
+            });
+            
+            console.log(`[PUSH_TO_CART_ADMINS] Shared ingredient found: ${sharedIngredient ? sharedIngredient._id : 'none'}`);
+            
+            if (sharedIngredient) {
+              // Update shared ingredient to be cart-specific
+              existingIngredient = sharedIngredient;
+            }
+          }
+
+          if (existingIngredient) {
+            console.log(`[PUSH_TO_CART_ADMINS] Updating existing ingredient: ${existingIngredient._id}`);
+            // Update existing ingredient with super admin data, but preserve cart admin's inventory data
+            const updateData = {
+              category: superIngredient.category,
+              storageLocation: superIngredient.storageLocation,
+              uom: superIngredient.uom,
+              baseUnit: superIngredient.baseUnit,
+              conversionFactors: superIngredient.conversionFactors,
+              shelfTimeDays: superIngredient.shelfTimeDays,
+              // Set cartId to make it cart-specific (if it was shared)
+              cartId: cartAdminId,
+              franchiseId: cartAdminFranchiseId,
+              // Preserve cart admin's own data:
+              // - qtyOnHand (keep existing)
+              // - reorderLevel (keep existing)
+              // - currentCostPerBaseUnit (keep existing - from their purchases)
+              // - fifoLayers (keep existing)
+              // - preferredSupplierId (keep existing)
+              isActive: superIngredient.isActive,
+            };
+
+            const updated = await Ingredient.findByIdAndUpdate(
+              existingIngredient._id,
+              updateData,
+              {
+                runValidators: true,
+                new: true
+              }
+            );
+            
+            console.log(`[PUSH_TO_CART_ADMINS] ✅ Updated ingredient: ${updated.name} (ID: ${updated._id}, cartId: ${updated.cartId})`);
+            cartAdminResult.ingredients.updated++;
+            results.ingredients.updated++;
+          } else {
+            // Create new ingredient for cart admin
+            console.log(`[PUSH_TO_CART_ADMINS] Creating new ingredient: ${superIngredient.name}`);
+            
+            const newIngredient = new Ingredient({
+              name: superIngredient.name,
+              category: superIngredient.category,
+              storageLocation: superIngredient.storageLocation,
+              uom: superIngredient.uom,
+              baseUnit: superIngredient.baseUnit,
+              conversionFactors: superIngredient.conversionFactors,
+              reorderLevel: superIngredient.reorderLevel || 0,
+              shelfTimeDays: superIngredient.shelfTimeDays,
+              currentCostPerBaseUnit: 0, // Will be set when cart admin makes purchases
+              qtyOnHand: 0, // Cart admin starts with 0 inventory
+              fifoLayers: [], // Empty FIFO layers
+              isActive: superIngredient.isActive,
+              cartId: cartAdminId,
+              franchiseId: cartAdminFranchiseId,
+            });
+
+            await newIngredient.save();
+            console.log(`[PUSH_TO_CART_ADMINS] ✅ Created ingredient: ${newIngredient.name} (ID: ${newIngredient._id}, cartId: ${newIngredient.cartId})`);
+            cartAdminResult.ingredients.created++;
+            results.ingredients.created++;
+          }
+        } catch (error) {
+          console.error(`[PUSH_TO_CART_ADMINS] ❌ Error processing ingredient "${superIngredient.name}":`, error.message);
+          console.error(`[PUSH_TO_CART_ADMINS] Error stack:`, error.stack);
+          
+          // Handle duplicate key error gracefully
+          if (error.code === 11000) {
+            console.log(`[PUSH_TO_CART_ADMINS] Duplicate key error - trying to find and update existing ingredient`);
+            // Duplicate key error - ingredient with same name already exists
+            // Try to find and update it instead
+            const duplicateIngredient = await Ingredient.findOne({
+              name: superIngredient.name,
+              $or: [
+                { cartId: cartAdminId },
+                { cartId: null },
+              ],
+            });
+            
+            if (duplicateIngredient) {
+              console.log(`[PUSH_TO_CART_ADMINS] Found duplicate ingredient: ${duplicateIngredient._id}, updating...`);
+              const updateData = {
+                category: superIngredient.category,
+                storageLocation: superIngredient.storageLocation,
+                uom: superIngredient.uom,
+                baseUnit: superIngredient.baseUnit,
+                conversionFactors: superIngredient.conversionFactors,
+                shelfTimeDays: superIngredient.shelfTimeDays,
+                cartId: cartAdminId,
+                franchiseId: cartAdminFranchiseId,
+                isActive: superIngredient.isActive,
+              };
+              
+              await Ingredient.findByIdAndUpdate(
+                duplicateIngredient._id,
+                updateData,
+                { runValidators: true }
+              );
+              console.log(`[PUSH_TO_CART_ADMINS] ✅ Resolved duplicate - updated ingredient: ${duplicateIngredient._id}`);
+              cartAdminResult.ingredients.updated++;
+              results.ingredients.updated++;
+            } else {
+              // Skip if we can't resolve the conflict
+              cartAdminResult.ingredients.skipped++;
+              results.ingredients.skipped++;
+              console.warn(`[PUSH_TO_CART_ADMINS] ⚠️ Skipped ingredient "${superIngredient.name}" for cart ${cartAdminId} due to duplicate key conflict: ${error.message}`);
+            }
+          } else {
+            // Re-throw if it's not a duplicate key error
+            console.error(`[PUSH_TO_CART_ADMINS] ❌ Non-duplicate error, re-throwing:`, error);
+            throw error;
+          }
+        }
+      }
+      
+      console.log(`[PUSH_TO_CART_ADMINS] ✅ Finished pushing ingredients for ${cartAdminResult.cartAdminName}: ${cartAdminResult.ingredients.created} created, ${cartAdminResult.ingredients.updated} updated, ${cartAdminResult.ingredients.skipped} skipped`);
+
+    // Push recipes/BOMs
+    for (const superRecipe of superAdminRecipes) {
+      // Check if cart admin already has this recipe (by name)
+      const existingRecipe = await Recipe.findOne({
+        name: superRecipe.name,
+        cartId: cartAdminId,
+      });
+
+      if (existingRecipe) {
+        // Update existing recipe with super admin data
+        // Map ingredient IDs from super admin to cart admin ingredients
+        const mappedIngredients = [];
+        for (const superIngredient of superRecipe.ingredients || []) {
+          if (superIngredient.ingredientId) {
+            // Get ingredient name - handle both populated and non-populated cases
+            let ingredientName = null;
+            if (
+              typeof superIngredient.ingredientId === "object" &&
+              superIngredient.ingredientId.name
+            ) {
+              // Populated ingredient
+              ingredientName = superIngredient.ingredientId.name;
+            } else {
+              // Not populated - fetch the ingredient to get name
+              const superIngredientDoc = await Ingredient.findById(
+                superIngredient.ingredientId
+              );
+              if (superIngredientDoc) {
+                ingredientName = superIngredientDoc.name;
+              }
+            }
+
+            if (ingredientName) {
+              // Find corresponding ingredient in cart admin's ingredients by name
+              const cartAdminIngredient = await Ingredient.findOne({
+                name: ingredientName,
+                cartId: cartAdminId,
+              });
+
+              if (cartAdminIngredient) {
+                mappedIngredients.push({
+                  ingredientId: cartAdminIngredient._id,
+                  qty: superIngredient.qty,
+                  uom: superIngredient.uom,
+                });
+              }
+            }
+          }
+        }
+
+        const updateData = {
+          yieldPercent: superRecipe.yieldPercent,
+          portions: superRecipe.portions,
+          instructions: superRecipe.instructions,
+          ingredients: mappedIngredients,
+          isActive: superRecipe.isActive,
+        };
+
+        await Recipe.findByIdAndUpdate(existingRecipe._id, updateData, {
+          runValidators: true,
+        });
+
+        // Recalculate cost for updated recipe
+        const updatedRecipe = await Recipe.findById(existingRecipe._id);
+        if (updatedRecipe) {
+          await updatedRecipe.calculateCost(cartAdminId.toString());
+          await updatedRecipe.save();
+        }
+
+        cartAdminResult.recipes.updated++;
+        results.recipes.updated++;
+      } else {
+        // Create new recipe for cart admin
+        // Map ingredient IDs from super admin to cart admin ingredients
+        const mappedIngredients = [];
+        for (const superIngredient of superRecipe.ingredients || []) {
+          if (superIngredient.ingredientId) {
+            // Get ingredient name - handle both populated and non-populated cases
+            let ingredientName = null;
+            if (
+              typeof superIngredient.ingredientId === "object" &&
+              superIngredient.ingredientId.name
+            ) {
+              // Populated ingredient
+              ingredientName = superIngredient.ingredientId.name;
+            } else {
+              // Not populated - fetch the ingredient to get name
+              const superIngredientDoc = await Ingredient.findById(
+                superIngredient.ingredientId
+              );
+              if (superIngredientDoc) {
+                ingredientName = superIngredientDoc.name;
+              }
+            }
+
+            if (ingredientName) {
+              // Find corresponding ingredient in cart admin's ingredients by name
+              const cartAdminIngredient = await Ingredient.findOne({
+                name: ingredientName,
+                cartId: cartAdminId,
+              });
+
+              if (cartAdminIngredient) {
+                mappedIngredients.push({
+                  ingredientId: cartAdminIngredient._id,
+                  qty: superIngredient.qty,
+                  uom: superIngredient.uom,
+                });
+              }
+            }
+          }
+        }
+
+        if (mappedIngredients.length > 0) {
+          const newRecipe = new Recipe({
+            name: superRecipe.name,
+            yieldPercent: superRecipe.yieldPercent,
+            portions: superRecipe.portions,
+            instructions: superRecipe.instructions,
+            ingredients: mappedIngredients,
+            isActive: superRecipe.isActive,
+            cartId: cartAdminId,
+            franchiseId: cartAdminFranchiseId,
+          });
+
+          await newRecipe.save();
+
+          // Calculate cost for new recipe
+          await newRecipe.calculateCost(cartAdminId.toString());
+          await newRecipe.save();
+
+          cartAdminResult.recipes.created++;
+          results.recipes.created++;
+        } else {
+          // Skip if no matching ingredients found
+          cartAdminResult.recipes.skipped++;
+          results.recipes.skipped++;
+        }
+      }
+    }
+
+    results.cartAdmins.push(cartAdminResult);
+  }
+
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ========================================`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ✅ Push completed!`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Total ingredients: ${results.ingredients.created} created, ${results.ingredients.updated} updated, ${results.ingredients.skipped} skipped`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Total recipes: ${results.recipes.created} created, ${results.recipes.updated} updated, ${results.recipes.skipped} skipped`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Cart admins processed: ${results.cartAdmins.length}`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ========================================`);
+
+  return {
+    success: true,
+    message: `Successfully pushed data to ${cartAdmins.length} cart admin(s)`,
+    data: results,
+  };
+};
+
+/**
  * @route   POST /api/costing-v2/push-to-cart-admins
  * @desc    Push super admin ingredients and BOMs to cart admins
  * @access  Super Admin only
@@ -4101,270 +5709,148 @@ exports.pushToCartAdmins = async (req, res) => {
       });
     }
 
-    const { outletId } = req.body; // Optional: push to specific cart admin, or all if not provided
+    const { cartId } = req.body; // Optional: push to specific cart admin, or all if not provided
 
-    // Get all super admin ingredients (cartId: null)
-    const superAdminIngredients = await Ingredient.find({
-      cartId: null,
-      isActive: true,
-    }).lean();
-
-    // Get all super admin recipes/BOMs (cartId: null)
-    const superAdminRecipes = await Recipe.find({
-      cartId: null,
-      isActive: true,
-    })
-      .populate("ingredients.ingredientId", "name uom baseUnit")
-      .lean();
-
-    // Get target cart admins
-    let cartAdmins = [];
-    if (outletId) {
-      // Push to specific cart admin
-      const cartAdmin = await User.findById(outletId);
-      if (!cartAdmin || cartAdmin.role !== "admin") {
-        return res.status(404).json({
-          success: false,
-          message: "Cart admin not found",
-        });
-      }
-      cartAdmins = [cartAdmin];
-    } else {
-      // Push to all cart admins
-      cartAdmins = await User.find({ role: "admin", isActive: { $ne: false } });
-    }
-
-    const results = {
-      ingredients: { created: 0, updated: 0, skipped: 0 },
-      recipes: { created: 0, updated: 0, skipped: 0 },
-      cartAdmins: [],
-    };
-
-    // Process each cart admin
-    for (const cartAdmin of cartAdmins) {
-      const cartAdminId = cartAdmin._id;
-      const cartAdminFranchiseId = cartAdmin.franchiseId;
-      const cartAdminResult = {
-        cartAdminId: cartAdminId.toString(),
-        cartAdminName: cartAdmin.name || cartAdmin.cartName || "Unknown",
-        ingredients: { created: 0, updated: 0, skipped: 0 },
-        recipes: { created: 0, updated: 0, skipped: 0 },
-      };
-
-      // Push ingredients
-      for (const superIngredient of superAdminIngredients) {
-        // Check if cart admin already has this ingredient (by name)
-        const existingIngredient = await Ingredient.findOne({
-          name: superIngredient.name,
-          cartId: cartAdminId,
-        });
-
-        if (existingIngredient) {
-          // Update existing ingredient with super admin data, but preserve cart admin's inventory data
-          const updateData = {
-            category: superIngredient.category,
-            storageLocation: superIngredient.storageLocation,
-            uom: superIngredient.uom,
-            baseUnit: superIngredient.baseUnit,
-            conversionFactors: superIngredient.conversionFactors,
-            shelfTimeDays: superIngredient.shelfTimeDays,
-            // Preserve cart admin's own data:
-            // - qtyOnHand (keep existing)
-            // - reorderLevel (keep existing)
-            // - currentCostPerBaseUnit (keep existing - from their purchases)
-            // - fifoLayers (keep existing)
-            // - preferredSupplierId (keep existing)
-            isActive: superIngredient.isActive,
-          };
-
-          await Ingredient.findByIdAndUpdate(
-            existingIngredient._id,
-            updateData,
-            {
-              runValidators: true,
-            }
-          );
-          cartAdminResult.ingredients.updated++;
-          results.ingredients.updated++;
-        } else {
-          // Create new ingredient for cart admin
-          const newIngredient = new Ingredient({
-            name: superIngredient.name,
-            category: superIngredient.category,
-            storageLocation: superIngredient.storageLocation,
-            uom: superIngredient.uom,
-            baseUnit: superIngredient.baseUnit,
-            conversionFactors: superIngredient.conversionFactors,
-            reorderLevel: superIngredient.reorderLevel || 0,
-            shelfTimeDays: superIngredient.shelfTimeDays,
-            currentCostPerBaseUnit: 0, // Will be set when cart admin makes purchases
-            qtyOnHand: 0, // Cart admin starts with 0 inventory
-            fifoLayers: [], // Empty FIFO layers
-            isActive: superIngredient.isActive,
-            cartId: cartAdminId,
-            franchiseId: cartAdminFranchiseId,
-          });
-
-          await newIngredient.save();
-          cartAdminResult.ingredients.created++;
-          results.ingredients.created++;
-        }
-      }
-
-      // Push recipes/BOMs
-      for (const superRecipe of superAdminRecipes) {
-        // Check if cart admin already has this recipe (by name)
-        const existingRecipe = await Recipe.findOne({
-          name: superRecipe.name,
-          cartId: cartAdminId,
-        });
-
-        if (existingRecipe) {
-          // Update existing recipe with super admin data
-          // Map ingredient IDs from super admin to cart admin ingredients
-          const mappedIngredients = [];
-          for (const superIngredient of superRecipe.ingredients || []) {
-            if (superIngredient.ingredientId) {
-              // Get ingredient name - handle both populated and non-populated cases
-              let ingredientName = null;
-              if (
-                typeof superIngredient.ingredientId === "object" &&
-                superIngredient.ingredientId.name
-              ) {
-                // Populated ingredient
-                ingredientName = superIngredient.ingredientId.name;
-              } else {
-                // Not populated - fetch the ingredient to get name
-                const superIngredientDoc = await Ingredient.findById(
-                  superIngredient.ingredientId
-                );
-                if (superIngredientDoc) {
-                  ingredientName = superIngredientDoc.name;
-                }
-              }
-
-              if (ingredientName) {
-                // Find corresponding ingredient in cart admin's ingredients by name
-                const cartAdminIngredient = await Ingredient.findOne({
-                  name: ingredientName,
-                  cartId: cartAdminId,
-                });
-
-                if (cartAdminIngredient) {
-                  mappedIngredients.push({
-                    ingredientId: cartAdminIngredient._id,
-                    qty: superIngredient.qty,
-                    uom: superIngredient.uom,
-                  });
-                }
-              }
-            }
-          }
-
-          const updateData = {
-            yieldPercent: superRecipe.yieldPercent,
-            portions: superRecipe.portions,
-            instructions: superRecipe.instructions,
-            ingredients: mappedIngredients,
-            isActive: superRecipe.isActive,
-          };
-
-          await Recipe.findByIdAndUpdate(existingRecipe._id, updateData, {
-            runValidators: true,
-          });
-
-          // Recalculate cost for updated recipe
-          const updatedRecipe = await Recipe.findById(existingRecipe._id);
-          if (updatedRecipe) {
-            await updatedRecipe.calculateCost(cartAdminId.toString());
-            await updatedRecipe.save();
-          }
-
-          cartAdminResult.recipes.updated++;
-          results.recipes.updated++;
-        } else {
-          // Create new recipe for cart admin
-          // Map ingredient IDs from super admin to cart admin ingredients
-          const mappedIngredients = [];
-          for (const superIngredient of superRecipe.ingredients || []) {
-            if (superIngredient.ingredientId) {
-              // Get ingredient name - handle both populated and non-populated cases
-              let ingredientName = null;
-              if (
-                typeof superIngredient.ingredientId === "object" &&
-                superIngredient.ingredientId.name
-              ) {
-                // Populated ingredient
-                ingredientName = superIngredient.ingredientId.name;
-              } else {
-                // Not populated - fetch the ingredient to get name
-                const superIngredientDoc = await Ingredient.findById(
-                  superIngredient.ingredientId
-                );
-                if (superIngredientDoc) {
-                  ingredientName = superIngredientDoc.name;
-                }
-              }
-
-              if (ingredientName) {
-                // Find corresponding ingredient in cart admin's ingredients by name
-                const cartAdminIngredient = await Ingredient.findOne({
-                  name: ingredientName,
-                  cartId: cartAdminId,
-                });
-
-                if (cartAdminIngredient) {
-                  mappedIngredients.push({
-                    ingredientId: cartAdminIngredient._id,
-                    qty: superIngredient.qty,
-                    uom: superIngredient.uom,
-                  });
-                }
-              }
-            }
-          }
-
-          if (mappedIngredients.length > 0) {
-            const newRecipe = new Recipe({
-              name: superRecipe.name,
-              yieldPercent: superRecipe.yieldPercent,
-              portions: superRecipe.portions,
-              instructions: superRecipe.instructions,
-              ingredients: mappedIngredients,
-              isActive: superRecipe.isActive,
-              cartId: cartAdminId,
-              franchiseId: cartAdminFranchiseId,
-            });
-
-            await newRecipe.save();
-
-            // Calculate cost for new recipe
-            await newRecipe.calculateCost(cartAdminId.toString());
-            await newRecipe.save();
-
-            cartAdminResult.recipes.created++;
-            results.recipes.created++;
-          } else {
-            // Skip if no matching ingredients found
-            cartAdminResult.recipes.skipped++;
-            results.recipes.skipped++;
-          }
-        }
-      }
-
-      results.cartAdmins.push(cartAdminResult);
-    }
-
-    res.json({
-      success: true,
-      message: `Successfully pushed data to ${cartAdmins.length} cart admin(s)`,
-      data: results,
-    });
+    const result = await pushToCartAdminsInternal(cartId);
+    res.json(result);
   } catch (error) {
     console.error("[PUSH_TO_CART_ADMINS] Error:", error);
     res.status(500).json({
       success: false,
       message: error.message || "Failed to push data to cart admins",
+    });
+  }
+};
+
+// Export internal function for use in other controllers
+exports.pushToCartAdminsInternal = pushToCartAdminsInternal;
+
+/**
+ * @route   GET /api/costing-v2/ingredients/debug
+ * @desc    Debug endpoint to check ingredient database state
+ * @access  Admin only
+ */
+exports.debugIngredients = async (req, res) => {
+  try {
+    if (req.user.role !== "admin" && req.user.role !== "super_admin") {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      });
+    }
+
+    const userId = req.user._id;
+    const userCartId = mongoose.Types.ObjectId.isValid(userId) 
+      ? new mongoose.Types.ObjectId(userId) 
+      : userId;
+
+    // Get counts
+    const totalCount = await Ingredient.countDocuments({});
+    const cartSpecificCount = await Ingredient.countDocuments({ cartId: userCartId });
+    const sharedCount = await Ingredient.countDocuments({ cartId: null });
+    const noCartIdCount = await Ingredient.countDocuments({ cartId: { $exists: false } });
+    const withOtherCartId = await Ingredient.countDocuments({ 
+      cartId: { $ne: null, $exists: true, $ne: userCartId } 
+    });
+    const superAdminCount = await Ingredient.countDocuments({ cartId: null, isActive: true });
+
+    // Get ALL ingredients to see their cartId values
+    const allIngredients = await Ingredient.find({})
+      .select('name cartId isActive createdAt')
+      .lean()
+      .limit(50); // Limit to 50 for performance
+
+    // Group by cartId
+    const byCartId = {};
+    allIngredients.forEach(ing => {
+      const cartIdKey = ing.cartId ? ing.cartId.toString() : 'null';
+      if (!byCartId[cartIdKey]) {
+        byCartId[cartIdKey] = [];
+      }
+      byCartId[cartIdKey].push({
+        name: ing.name,
+        isActive: ing.isActive,
+        createdAt: ing.createdAt
+      });
+    });
+
+    // Get sample ingredients
+    const cartSpecific = await Ingredient.find({ cartId: userCartId }).limit(5).select('name cartId isActive').lean();
+    const shared = await Ingredient.find({ cartId: null }).limit(5).select('name cartId isActive').lean();
+    const withOtherCartIds = await Ingredient.find({ 
+      cartId: { $ne: null, $exists: true, $ne: userCartId } 
+    }).limit(10).select('name cartId isActive').lean();
+
+    // Test the query that should be used
+    const testQuery = {
+      $or: [
+        { cartId: userCartId, isActive: true },
+        { cartId: null, isActive: true },
+        { cartId: { $exists: false }, isActive: true }
+      ],
+    };
+    const testCount = await Ingredient.countDocuments(testQuery);
+    const testResults = await Ingredient.find(testQuery).limit(10).select('name cartId isActive').lean();
+
+    res.json({
+      success: true,
+      data: {
+        user: {
+          id: userId.toString(),
+          role: req.user.role,
+          cartId: userCartId.toString(),
+        },
+        counts: {
+          total: totalCount,
+          cartSpecific: cartSpecificCount,
+          shared: sharedCount,
+          noCartId: noCartIdCount,
+          withOtherCartId: withOtherCartId,
+          superAdminActive: superAdminCount,
+          testQuery: testCount,
+        },
+        issue: sharedCount === 0 
+          ? "⚠️ NO SHARED INGREDIENTS (cartId: null) FOUND! Super admin must create ingredients with cartId: null for cart admins to see them."
+          : testCount === 0 && req.user.role === "admin"
+          ? "⚠️ Query returns 0 ingredients even though shared ingredients exist. Check isActive filter."
+          : "✅ OK",
+        samples: {
+          cartSpecific: cartSpecific.map(i => ({
+            name: i.name,
+            cartId: i.cartId ? i.cartId.toString() : null,
+            isActive: i.isActive,
+          })),
+          shared: shared.map(i => ({
+            name: i.name,
+            cartId: i.cartId ? i.cartId.toString() : null,
+            isActive: i.isActive,
+          })),
+          withOtherCartIds: withOtherCartIds.map(i => ({
+            name: i.name,
+            cartId: i.cartId ? i.cartId.toString() : 'OTHER',
+            isActive: i.isActive,
+          })),
+        },
+        allIngredientsByCartId: byCartId,
+        testQuery: {
+          query: testQuery,
+          count: testCount,
+          results: testResults.map(i => ({
+            name: i.name,
+            cartId: i.cartId ? i.cartId.toString() : null,
+            isActive: i.isActive,
+          })),
+        },
+        fix: sharedCount === 0 
+          ? "To fix: Super admin should create ingredients. They will automatically have cartId: null. Or run MongoDB command: db.ingredientv2s.updateMany({ cartId: { $ne: null } }, { $set: { cartId: null } })"
+          : null,
+      },
+    });
+  } catch (error) {
+    console.error("[DEBUG_INGREDIENTS] Error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to debug ingredients",
     });
   }
 };

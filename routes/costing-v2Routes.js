@@ -12,6 +12,7 @@ const {
   updateIngredient,
   deleteIngredient,
   getFIFOLayers,
+  debugIngredients,
   // Purchases
   getPurchases,
   createPurchase,
@@ -118,6 +119,11 @@ router.get(
   "/ingredients/:id/fifo-layers",
   authorize(["super_admin", "franchise_admin", "admin"]),
   getFIFOLayers
+);
+router.get(
+  "/ingredients/debug",
+  authorize(["super_admin", "admin"]),
+  debugIngredients
 );
 
 // ==================== PURCHASES ====================

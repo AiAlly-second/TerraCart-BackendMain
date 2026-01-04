@@ -7,7 +7,7 @@ const inventoryTransactionSchema = new mongoose.Schema(
       ref: "Ingredient",
       required: true,
     },
-    outletId: {
+    cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User", // Kiosk/Cafe reference
     },
@@ -50,7 +50,7 @@ const inventoryTransactionSchema = new mongoose.Schema(
 
 // Indexes for efficient queries
 inventoryTransactionSchema.index({ ingredientId: 1, createdAt: -1 });
-inventoryTransactionSchema.index({ outletId: 1, createdAt: -1 });
+inventoryTransactionSchema.index({ cartId: 1, createdAt: -1 });
 inventoryTransactionSchema.index({ franchiseId: 1, createdAt: -1 });
 inventoryTransactionSchema.index({ changeType: 1 });
 inventoryTransactionSchema.index({ createdAt: -1 });

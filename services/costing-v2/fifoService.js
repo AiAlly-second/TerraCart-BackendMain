@@ -48,7 +48,7 @@ class FIFOService {
    * @param {String} refType - Reference type (recipe, waste, etc.)
    * @param {String} refId - Reference ID
    * @param {String} userId - User recording the transaction
-   * @param {String} cartId - Optional cart ID (matches outletId in database)
+   * @param {String} cartId - Optional cart ID
    * @returns {Promise<Object>} { costAllocated, remainingQty }
    */
   static async consume(
@@ -65,12 +65,12 @@ class FIFOService {
     }
 
     // For cart-specific consumption, check available quantity from cart's layers only
-    // cartId matches outletId in database (cart admin user ID = outletId)
+    // cartId is the cart admin user ID
     if (cartId) {
       // If ingredient is cart-specific and belongs to this cart, use qtyOnHand directly
       if (
-        ingredient.outletId &&
-        ingredient.outletId.toString() === cartId.toString()
+        ingredient.cartId &&
+        ingredient.cartId.toString() === cartId.toString()
       ) {
         if (ingredient.qtyOnHand < qtyToConsume) {
           throw new Error(
@@ -79,17 +79,17 @@ class FIFOService {
         }
       } else {
         // For shared ingredients, calculate available quantity from this cart's FIFO layers
-        // Check purchases that belong to this cart (cartId = outletId in purchase)
+        // Check purchases that belong to this cart (cartId in purchase)
         let availableQty = 0;
         if (ingredient.fifoLayers && Array.isArray(ingredient.fifoLayers)) {
           for (const layer of ingredient.fifoLayers) {
             if (layer.remainingQty > 0 && layer.purchaseId) {
-              // Check if this purchase belongs to the cart (outletId in purchase = cartId)
+              // Check if this purchase belongs to the cart (cartId in purchase)
               const purchase = await Purchase.findById(layer.purchaseId);
               if (
                 purchase &&
-                purchase.outletId &&
-                purchase.outletId.toString() === cartId.toString()
+                purchase.cartId &&
+                purchase.cartId.toString() === cartId.toString()
               ) {
                 availableQty += layer.remainingQty;
               }
@@ -123,7 +123,6 @@ class FIFOService {
 
     // Consume from oldest layers first (FIFO)
     // If cartId is provided, only consume from layers belonging to that cart
-    // cartId matches outletId in purchases/ingredients
     for (
       let i = 0;
       i < ingredient.fifoLayers.length && remainingToConsume > 0;
@@ -137,17 +136,17 @@ class FIFOService {
       // For cart-specific ingredients, all layers belong to that cart
       if (cartId) {
         if (
-          ingredient.outletId &&
-          ingredient.outletId.toString() === cartId.toString()
+          ingredient.cartId &&
+          ingredient.cartId.toString() === cartId.toString()
         ) {
           // Cart-specific ingredient - all layers belong to this cart
         } else if (layer.purchaseId) {
-          // Shared ingredient - check if purchase belongs to this cart (outletId = cartId)
+          // Shared ingredient - check if purchase belongs to this cart (cartId)
           const purchase = await Purchase.findById(layer.purchaseId);
           if (
             !purchase ||
-            !purchase.outletId ||
-            purchase.outletId.toString() !== cartId.toString()
+            !purchase.cartId ||
+            purchase.cartId.toString() !== cartId.toString()
           ) {
             continue; // Skip layers from other carts
           }
@@ -182,7 +181,6 @@ class FIFOService {
     await ingredient.save();
 
     // Create inventory transaction record
-    // Store cartId as outletId in transaction (cartId = outletId in database)
     const transaction = new InventoryTransaction({
       ingredientId,
       type: "OUT",
@@ -193,7 +191,7 @@ class FIFOService {
       date: new Date(),
       costAllocated: totalCostAllocated,
       recordedBy: userId,
-      outletId: cartId, // cartId stored as outletId in database
+      cartId: cartId, // cartId stored in database
     });
 
     await transaction.save();

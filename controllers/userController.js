@@ -865,6 +865,40 @@ exports.registerCafeAdmin = async (req, res) => {
       // Don't fail user creation if menu push fails - menu will sync when cart admin opens it
     }
 
+    // CRITICAL: Automatically push super admin ingredients and BOMs to new cart admin
+    // This ensures cart admin has access to all master ingredients and recipes from super admin
+    try {
+      const { pushToCartAdminsInternal } = require("./costing-v2/costingController");
+      console.log(`[COSTING PUSH] ========================================`);
+      console.log(
+        `[COSTING PUSH] 🆕 NEW CART ADMIN CREATED: ${user.cartName} (ID: ${user._id})`
+      );
+      console.log(
+        `[COSTING PUSH] Automatically pushing super admin ingredients and BOMs to cart admin...`
+      );
+
+      const result = await pushToCartAdminsInternal(user._id.toString());
+      
+      if (result.success) {
+        console.log(
+          `[COSTING PUSH] ✅ Successfully pushed ingredients and BOMs to cart ${user.cartName}`
+        );
+        console.log(
+          `[COSTING PUSH] Ingredients: ${result.data.ingredients.created} created, ${result.data.ingredients.updated} updated`
+        );
+        console.log(
+          `[COSTING PUSH] BOMs: ${result.data.recipes.created} created, ${result.data.recipes.updated} updated`
+        );
+      } else {
+        console.warn(`[COSTING PUSH] ⚠️ ${result.message}`);
+      }
+      console.log(`[COSTING PUSH] ========================================`);
+    } catch (err) {
+      console.error("[COSTING PUSH] ❌ Failed to push ingredients/BOMs to new cart:", err);
+      console.error("[COSTING PUSH] Error details:", err.message);
+      // Don't fail user creation if push fails - super admin can push manually later
+    }
+
     // Don't send password in response
     const userResponse = user.toObject();
     delete userResponse.password;

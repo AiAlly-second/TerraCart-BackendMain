@@ -551,7 +551,7 @@ exports.getHierarchy = async (req, res) => {
         .sort({ cafeName: 1 });
 
       employees = await Employee.find({})
-        .populate("cafeId", "name cafeName email")
+        .populate("cartId", "name cafeName email") // Changed from cafeId to cartId
         .populate("franchiseId", "name email")
         .populate("userId", "email")
         .sort({ createdAt: -1 })
@@ -603,7 +603,7 @@ exports.getHierarchy = async (req, res) => {
 
         const cafesWithEmployees = franchiseCafes.map(cafe => {
           const cafeEmployees = employees.filter(
-            emp => emp.cafeId && emp.cafeId && emp.cafeId._id && emp.cafeId._id.toString() === cafe._id.toString()
+            emp => emp.cartId && emp.cartId && emp.cartId._id && emp.cartId._id.toString() === cafe._id.toString()
           );
           return {
             ...cafe.toObject(),
@@ -615,7 +615,7 @@ exports.getHierarchy = async (req, res) => {
         const franchiseEmployees = employees.filter(
           emp => emp.franchiseId && 
                  emp.franchiseId._id.toString() === franchise._id.toString() &&
-                 !emp.cafeId
+                 !emp.cartId
         );
 
         return {
@@ -644,7 +644,7 @@ exports.getHierarchy = async (req, res) => {
         .sort({ cafeName: 1 });
 
       employees = await Employee.find({ franchiseId: userId })
-        .populate("cafeId", "name cafeName email")
+        .populate("cartId", "name cafeName email") // Changed from cafeId to cartId
         .populate("franchiseId", "name email")
         .populate("userId", "email")
         .sort({ createdAt: -1 })
@@ -690,7 +690,7 @@ exports.getHierarchy = async (req, res) => {
 
       const cafesWithEmployees = cafes.map(cafe => {
         const cafeEmployees = employees.filter(
-          emp => emp.cafeId && emp.cafeId && emp.cafeId._id && emp.cafeId._id.toString() === cafe._id.toString()
+          emp => emp.cartId && emp.cartId && emp.cartId._id && emp.cartId._id.toString() === cafe._id.toString()
         );
         return {
           ...cafe.toObject(),
@@ -700,7 +700,7 @@ exports.getHierarchy = async (req, res) => {
 
       // Franchise-level employees (no cafe assigned)
       const franchiseEmployees = employees.filter(
-        emp => !emp.cafeId
+        emp => !emp.cartId
       );
 
       hierarchy = [{
@@ -786,7 +786,7 @@ exports.getHierarchy = async (req, res) => {
 
     // Employees with no franchise or cafe (orphaned)
     const orphanEmployees = employees.filter(
-      emp => (!emp.franchiseId || !emp.franchiseId._id) && (!emp.cafeId || !emp.cafeId._id)
+      emp => (!emp.franchiseId || !emp.franchiseId._id) && (!emp.cartId || !emp.cartId._id)
     );
 
     return res.json({

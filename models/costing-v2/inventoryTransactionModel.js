@@ -59,6 +59,12 @@ const inventoryTransactionSchema = new mongoose.Schema(
       min: 0,
       default: 0, // Cost allocated using weighted average
     },
+    // Store exact purchase price per unit (for purchase transactions)
+    // This ensures inventory price matches purchase price exactly
+    unitPrice: {
+      type: Number,
+      default: null, // Only set for purchase transactions (type: "IN", refType: "purchase")
+    },
     notes: {
       type: String,
       default: "",

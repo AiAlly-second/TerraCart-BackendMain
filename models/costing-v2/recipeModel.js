@@ -326,10 +326,19 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       }).sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+        // This ensures BOM cost matches purchase price exactly (same as inventory)
+        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+          // Use exact purchase price - convert to base unit
+          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        } else {
+          // Fallback: calculate from costAllocated
+          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          }
         }
       }
       
@@ -347,10 +356,19 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       }).sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+        // This ensures BOM cost matches purchase price exactly (same as inventory)
+        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+          // Use exact purchase price - convert to base unit
+          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        } else {
+          // Fallback: calculate from costAllocated
+          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          }
         }
       }
       
@@ -367,10 +385,19 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       }).sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-        const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-        if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-          ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+        // This ensures BOM cost matches purchase price exactly (same as inventory)
+        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+          // Use exact purchase price - convert to base unit
+          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        } else {
+          // Fallback: calculate from costAllocated
+          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          }
         }
       }
       
@@ -381,7 +408,10 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
     }
 
     if (ingredientCost <= 0) {
-      hasValidCosts = false;
+      // Ingredient cost is 0 or invalid - skip this ingredient
+      ingredientsWithoutPurchases.push(
+        ingredient.name || item.ingredientId?.toString() + " (cost is 0)"
+      );
       // #region agent log
       logDebug(
         "recipeModel.js:182",
@@ -424,8 +454,32 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
     }
     
     const cost = qtyInBaseUnit * ingredientCost;
+    
+    // Validate cost calculation
+    if (isNaN(cost) || !isFinite(cost) || cost < 0) {
+      console.error(`[BOM COST ERROR] Invalid cost for ingredient ${ingredient.name} in recipe ${this.name}: cost=${cost}, qtyInBaseUnit=${qtyInBaseUnit}, ingredientCost=${ingredientCost}`);
+      ingredientsWithoutPurchases.push(
+        `${ingredient.name} (invalid cost calculation)`
+      );
+      continue; // Skip this ingredient
+    }
+    
     totalCost += cost;
     hasAnyValidCosts = true; // Mark that we have at least one valid cost
+  }
+
+  // Validate totalCost before proceeding
+  if (isNaN(totalCost) || !isFinite(totalCost) || totalCost < 0) {
+    console.error(`[BOM COST ERROR] Invalid totalCost for recipe ${this.name}: ${totalCost}`);
+    this.totalCostCached = 0;
+    this.costPerPortion = 0;
+    this.lastCostUpdate = new Date();
+    return {
+      totalCost: 0,
+      costPerPortion: 0,
+      hasValidCosts: false,
+      ingredientsWithoutPurchases: ingredientsWithoutPurchases,
+    };
   }
 
   // If no valid costs (no purchases made for any ingredients),
@@ -453,13 +507,42 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       totalCost: 0,
       costPerPortion: 0,
       hasValidCosts: false,
+      ingredientsWithoutPurchases: ingredientsWithoutPurchases,
     };
   }
 
   // Apply yield percent only when we have valid costs from purchases
-  const adjustedCost = totalCost / (this.yieldPercent / 100);
+  // Prevent division by zero - if yieldPercent is 0 or invalid, use 100% (no waste)
+  const yieldPercent = this.yieldPercent > 0 && this.yieldPercent <= 100 ? this.yieldPercent : 100;
+  const adjustedCost = totalCost / (yieldPercent / 100);
+  
+  // Validate adjustedCost is a valid number
+  if (isNaN(adjustedCost) || !isFinite(adjustedCost) || adjustedCost < 0) {
+    console.error(`[BOM COST ERROR] Invalid adjustedCost for recipe ${this.name}: ${adjustedCost}. totalCost=${totalCost}, yieldPercent=${yieldPercent}`);
+    this.totalCostCached = 0;
+    this.costPerPortion = 0;
+    this.lastCostUpdate = new Date();
+    return {
+      totalCost: 0,
+      costPerPortion: 0,
+      hasValidCosts: false,
+      ingredientsWithoutPurchases: ingredientsWithoutPurchases,
+    };
+  }
+  
   this.totalCostCached = adjustedCost;
-  this.costPerPortion = adjustedCost / this.portions;
+  
+  // Prevent division by zero for portions
+  const portions = this.portions > 0 ? this.portions : 1;
+  const costPerPortion = adjustedCost / portions;
+  
+  // Validate costPerPortion is a valid number
+  if (isNaN(costPerPortion) || !isFinite(costPerPortion) || costPerPortion < 0) {
+    console.error(`[BOM COST ERROR] Invalid costPerPortion for recipe ${this.name}: ${costPerPortion}. adjustedCost=${adjustedCost}, portions=${portions}`);
+    this.costPerPortion = 0;
+  } else {
+    this.costPerPortion = costPerPortion;
+  }
   this.lastCostUpdate = new Date();
   // #region agent log
   logDebug(
@@ -485,6 +568,7 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
     totalCost: adjustedCost,
     costPerPortion: this.costPerPortion,
     hasValidCosts: true,
+    ingredientsWithoutPurchases: ingredientsWithoutPurchases.length > 0 ? ingredientsWithoutPurchases : [],
   };
 };
 

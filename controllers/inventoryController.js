@@ -170,9 +170,9 @@ exports.createInventoryItem = async (req, res) => {
         itemData.location = ingredient.storageLocation || "Main Storage";
       }
       
-      // Set outlet context from ingredient
-      if (ingredient.outletId) {
-        itemData.cartId = ingredient.outletId; // Inventory model uses cartId, not cafeId
+      // Set cart context from ingredient
+      if (ingredient.cartId) {
+        itemData.cartId = ingredient.cartId; // Inventory model uses cartId
       }
       if (ingredient.franchiseId) {
         itemData.franchiseId = ingredient.franchiseId;
@@ -410,13 +410,13 @@ exports.getAvailableIngredients = async (req, res) => {
     console.log('[INVENTORY] getAvailableIngredients - cartId:', cartId, 'for user:', req.user._id, 'role:', req.user.role);
 
     // Build query to get ingredients for this cart/cafe/kiosk
-    // For mobile users (manager, waiter, cook, captain), explicitly set outletId
+    // For mobile users (manager, waiter, cook, captain), explicitly set cartId
     const filter = { isActive: true };
     
-    // For mobile roles, explicitly set outletId to their cartId
+    // For mobile roles, explicitly set cartId
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      filter.outletId = cartId;
-      console.log('[INVENTORY] getAvailableIngredients - Mobile user, setting outletId:', cartId);
+      filter.cartId = cartId;
+      console.log('[INVENTORY] getAvailableIngredients - Mobile user, setting cartId:', cartId);
     }
     
     // Build costing query (will handle admin, franchise_admin, super_admin)
@@ -426,7 +426,7 @@ exports.getAvailableIngredients = async (req, res) => {
 
     // Get ingredients that are not already in inventory
     const ingredients = await IngredientV2.find(costingFilter)
-      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation outletId franchiseId _id")
+      .select("name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation cartId franchiseId _id")
       .sort({ category: 1, name: 1 })
       .lean();
     
@@ -455,20 +455,20 @@ exports.getAvailableIngredients = async (req, res) => {
       
       // For mobile users, ensure ingredient belongs to their cart
       if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-        // Ingredient should have outletId matching the user's cartId
-        if (ing.outletId) {
-          const ingredientOutletId = ing.outletId.toString();
+        // Ingredient should have cartId matching the user's cartId
+        if (ing.cartId) {
+          const ingredientCartId = ing.cartId.toString();
           const userCartId = cartId.toString();
-          if (ingredientOutletId !== userCartId) {
-            console.log('[INVENTORY] Filtering out ingredient - outletId mismatch:', {
+          if (ingredientCartId !== userCartId) {
+            console.log('[INVENTORY] Filtering out ingredient - cartId mismatch:', {
               ingredientId: ing._id,
-              ingredientOutletId,
+              ingredientCartId,
               userCartId
             });
             return false;
           }
         }
-        // If outletId is null/undefined, it might be a shared ingredient
+        // If cartId is null/undefined, it might be a shared ingredient
         // We'll include it, but you can exclude shared ingredients if needed
       }
       

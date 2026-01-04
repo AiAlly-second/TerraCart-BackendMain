@@ -3,6 +3,7 @@
  * Handles role-based filtering for kiosk-level costing
  */
 
+const mongoose = require("mongoose");
 const User = require("../../models/userModel");
 
 /**
@@ -29,37 +30,77 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
   if (user.role === "admin") {
     // Cart/Kiosk admin
     // When includeShared is true (for global masters like Ingredients / BOM),
-    // also include records where franchiseId is null / not set (global data defined by super admin)
+    // show ingredients with cartId = their cart OR cartId = null (shared)
     // Otherwise, only see their own kiosk's data
     if (includeShared) {
-      // Include global (franchiseId=null) + their own franchise data
-      if (user.franchiseId) {
-        filter.$or = [
-          { franchiseId: user.franchiseId },
-          { franchiseId: null },
-          { franchiseId: { $exists: false } },
-        ];
-      } else {
-        filter.$or = [
-          { franchiseId: null },
-          { franchiseId: { $exists: false } },
-        ];
-      }
-      // For cartId, allow null (global/franchise-level) or their own cart
+      // For cart admins with includeShared, show:
+      // 1. Ingredients with cartId = their cart (pushed ingredients)
+      // 2. Ingredients with cartId = null (shared ingredients)
       if (!skipOutletFilter) {
-        if (!filter.cartId) {
-          // Build $and condition: (franchiseId conditions) AND (cartId conditions)
-          const franchiseConditions = filter.$or;
-          const cartConditions = [
-            { cartId: user._id },
-            { cartId: null },
-            { cartId: { $exists: false } },
+        // For cart admins, always include shared ingredients regardless of filter.cartId
+        // Extract other filters (isActive, category, etc.) to combine with cartId filter
+        const otherFilters = {};
+        Object.keys(filter).forEach(key => {
+          if (key !== 'cartId' && key !== 'franchiseId' && key !== '$or' && key !== '$and') {
+            otherFilters[key] = filter[key];
+          }
+        });
+        
+        // Build cartId conditions - ensure user._id is converted to ObjectId for proper matching
+        const userCartId = mongoose.Types.ObjectId.isValid(user._id) 
+          ? new mongoose.Types.ObjectId(user._id) 
+          : user._id;
+        
+        const cartIdConditions = [
+          { cartId: userCartId }, // Their own cart's ingredients
+          { cartId: null }, // Shared ingredients
+          { cartId: { $exists: false } }, // Legacy: ingredients without cartId field
+        ];
+        
+        // Clear the filter object and rebuild it properly
+        const newFilter = {};
+        
+        // If there are other filters, combine them with $and
+        if (Object.keys(otherFilters).length > 0) {
+          newFilter.$and = [
+            { $or: cartIdConditions },
+            otherFilters,
           ];
-          filter.$and = [
-            { $or: franchiseConditions },
-            { $or: cartConditions },
+        } else {
+          // No other filters, just use $or
+          newFilter.$or = cartIdConditions;
+        }
+        
+        // Replace filter with newFilter
+        Object.keys(filter).forEach(key => delete filter[key]);
+        Object.assign(filter, newFilter);
+        
+        // Debug logging with actual ObjectId values
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId:`, userCartId);
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId type:`, userCartId.constructor.name);
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - otherFilters:`, JSON.stringify(otherFilters, null, 2));
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - cartIdConditions:`, [
+          { cartId: userCartId.toString() },
+          { cartId: null },
+          { cartId: { $exists: false } }
+        ]);
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter:`, JSON.stringify(filter, null, 2));
+        
+        // Also log the actual filter object (not JSON) to see ObjectIds
+        console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter (raw):`, filter);
+      } else {
+        // skipOutletFilter is true - include shared ingredients based on franchiseId
+        if (user.franchiseId) {
+          filter.$or = [
+            { franchiseId: user.franchiseId },
+            { franchiseId: null },
+            { franchiseId: { $exists: false } },
           ];
-          delete filter.$or;
+        } else {
+          filter.$or = [
+            { franchiseId: null },
+            { franchiseId: { $exists: false } },
+          ];
         }
       }
     } else {
@@ -145,19 +186,19 @@ const getAllowedOutlets = async (user) => {
 };
 
 /**
- * Validate outlet access for a user
+ * Validate cart access for a user
  * @param {Object} user - Authenticated user
- * @param {String|ObjectId} outletId - Outlet ID to validate
+ * @param {String|ObjectId} cartId - Cart ID to validate
  * @returns {Promise<Boolean>} True if user has access
  */
-const validateOutletAccess = async (user, outletId) => {
-  if (!outletId) return false;
+const validateOutletAccess = async (user, cartId) => {
+  if (!cartId) return false;
 
   if (user.role === "admin") {
-    return user._id.toString() === outletId.toString();
+    return user._id.toString() === cartId.toString();
   } else if (user.role === "franchise_admin") {
-    const outlet = await User.findById(outletId);
-    return outlet && outlet.franchiseId?.toString() === user._id.toString();
+    const cart = await User.findById(cartId);
+    return cart && cart.franchiseId?.toString() === user._id.toString();
   } else if (user.role === "super_admin") {
     return true;
   }
@@ -200,8 +241,13 @@ const setOutletContext = async (user, data = {}, outletRequired = true) => {
     }
   } else if (user.role === "super_admin") {
     // Super admin - cartId is optional unless required
+    // CRITICAL: If cartId is not provided, explicitly set it to null for shared ingredients
     if (outletRequired && !data.cartId) {
       throw new Error("cartId is required");
+    }
+    if (!data.cartId) {
+      // Super admin creating shared/global ingredient - explicitly set cartId to null
+      data.cartId = null;
     }
     if (data.cartId) {
       const cart = await User.findById(data.cartId);
