@@ -4,19 +4,24 @@ const Employee = require("../models/employeeModel");
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Customer = require("../models/customerModel");
 const User = require("../models/userModel");
+const mongoose = require("mongoose");
 
 // Helper function to build hierarchy query based on user role
 const buildHierarchyQuery = (user) => {
   const query = {};
+  
+  // Convert user._id to ObjectId if it's a string
+  const userId = typeof user._id === 'string' ? new mongoose.Types.ObjectId(user._id) : user._id;
+  
   if (user.role === "admin") {
     // Cart admin - filter by cartId (support both cartId and cafeId for backward compatibility)
     query.$or = [
-      { cartId: user._id },
-      { cafeId: user._id }
+      { cartId: userId },
+      { cafeId: userId }
     ];
   } else if (user.role === "franchise_admin") {
     // Franchise admin - filter by franchiseId
-    query.franchiseId = user._id;
+    query.franchiseId = userId;
   }
   // Super admin sees everything (no filter)
   return query;
