@@ -283,8 +283,8 @@ exports.loginUser = async (req, res) => {
       });
     }
 
-    // For web/admin login, only allow admin roles
-    if (user.role !== "admin") {
+    // For web/admin login, allow admin, franchise_admin, and super_admin roles
+    if (!["admin", "super_admin", "franchise_admin"].includes(user.role)) {
       return res.status(403).json({ message: "Access denied. Admin only." });
     }
 
