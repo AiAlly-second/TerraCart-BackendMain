@@ -111,6 +111,8 @@ app.use("/api/tasks", require("./routes/taskRoutes"));
 app.use("/api/customer-requests", require("./routes/customerRequestRoutes"));
 app.use("/api/compliance", require("./routes/complianceRoutes"));
 app.use("/api/kot", require("./routes/kotRoutes"));
+app.use("/api/analytics", require("./routes/analyticsRoutes"));
+
 
 // Health check endpoint
 app.get("/health", (req, res) => {

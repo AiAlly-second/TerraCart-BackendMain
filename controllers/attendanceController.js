@@ -51,7 +51,11 @@ const getISTDayName = () => {
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cartId = user._id; // EmployeeAttendance model uses cartId, not cafeId
+    // Support both cartId (new) and cafeId (old) during migration
+    query.$or = [
+      { cartId: user._id },
+      { cafeId: user._id }
+    ];
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
@@ -63,7 +67,11 @@ const buildHierarchyQuery = async (user) => {
       employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
     }
     if (employee) {
-      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
+      // Support both cartId (new) and cafeId (old) during migration
+      query.$or = [
+        { cartId: employee.cartId },
+        { cafeId: employee.cartId } // Use cartId value for both fields
+      ];
       // For individual mobile users, only show their own attendance
       query.employeeId = employee._id;
     } else {
@@ -74,7 +82,11 @@ const buildHierarchyQuery = async (user) => {
     // Legacy employee role - look up Employee
     const employee = await Employee.findOne({ userId: user._id }).lean();
     if (employee) {
-      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
+      // Support both cartId (new) and cafeId (old) during migration
+      query.$or = [
+        { cartId: employee.cartId },
+        { cafeId: employee.cartId }
+      ];
       query.employeeId = employee._id;
     } else {
       // If no employee record found, use a query that will return no results
@@ -87,13 +99,21 @@ const buildHierarchyQuery = async (user) => {
     if (!employee && user.email) {
       const employeeByEmail = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
       if (employeeByEmail) {
-        query.cartId = employeeByEmail.cartId; // EmployeeAttendance model uses cartId, not cafeId
+        // Support both cartId (new) and cafeId (old) during migration
+        query.$or = [
+          { cartId: employeeByEmail.cartId },
+          { cafeId: employeeByEmail.cartId }
+        ];
         query.employeeId = employeeByEmail._id;
       } else {
         query.employeeId = { $exists: false }; // No employee record found, return no results
       }
     } else if (employee) {
-      query.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
+      // Support both cartId (new) and cafeId (old) during migration
+      query.$or = [
+        { cartId: employee.cartId },
+        { cafeId: employee.cartId }
+      ];
       query.employeeId = employee._id;
     } else {
       query.employeeId = { $exists: false }; // No employee record found, return no results
