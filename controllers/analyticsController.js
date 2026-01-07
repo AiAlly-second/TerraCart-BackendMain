@@ -554,20 +554,34 @@ exports.getInventoryAnalytics = async (req, res) => {
 exports.exportAnalyticsData = async (req, res) => {
   try {
     const hierarchyQuery = buildHierarchyQuery(req.user);
-    const { start, end } = parseDateRange(req);
     
+    // Check if "all" data is requested
+    const fetchAll = req.query.all === "true";
+    
+    let dateQuery = {};
+    let attendanceDateQuery = {};
+    let start, end;
+
+    if (!fetchAll) {
+      const range = parseDateRange(req);
+      start = range.start;
+      end = range.end;
+      dateQuery = { createdAt: { $gte: start, $lte: end } };
+      attendanceDateQuery = { date: { $gte: start, $lte: end } };
+    }
+
     // Gather all data
     const [orders, menuItems, employees, customers, attendance] = await Promise.all([
       Order.find({
         ...hierarchyQuery,
-        createdAt: { $gte: start, $lte: end },
+        ...dateQuery,
       }).lean(),
       MenuItem.find(hierarchyQuery).lean(),
       Employee.find(hierarchyQuery).lean(),
       Customer.find(hierarchyQuery).lean(),
       EmployeeAttendance.find({
         ...hierarchyQuery,
-        date: { $gte: start, $lte: end },
+        ...attendanceDateQuery,
       }).lean(),
     ]);
     
