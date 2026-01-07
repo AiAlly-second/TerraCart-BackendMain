@@ -81,8 +81,20 @@ const userSchema = new mongoose.Schema(
     gstCertificateExpiry: { type: Date },
     shopActLicenseExpiry: { type: Date },
     fssaiLicenseExpiry: { type: Date },
+    resetPasswordExpire: Date,
+    // API Keys for external integrations (like Fabric)
+    apiKeys: [
+      {
+        key: { type: String, required: true }, // The actual key (e.g. "tc_live_...")
+        name: { type: String, default: "Default" }, // Label (e.g. "Fabric Dashboard")
+        createdAt: { type: Date, default: Date.now },
+        lastUsed: { type: Date },
+      },
+    ],
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
 // Hash password before saving

@@ -2,18 +2,25 @@ const express = require("express");
 const router = express.Router();
 const {
   getAnalyticsSummary,
-  getOrderAnalytics,
-  getMenuAnalytics,
-  getEmployeeAnalytics,
-  getRevenueAnalytics,
-  getCustomerAnalytics,
-  getAttendanceAnalytics,
-  getInventoryAnalytics,
   exportAnalyticsData,
 } = require("../controllers/analyticsController");
 const { protect, authorize } = require("../middleware/authMiddleware");
+const { protectWithApiKey } = require("../middleware/apiKeyMiddleware");
 
-// All analytics routes require authentication and admin/franchise_admin/super_admin role
+// Custom middleware to require EITHER API Key OR Bearer Token
+const requireAuth = async (req, res, next) => {
+  // First try API Key
+  await protectWithApiKey(req, res, async () => {
+    if (req.user) {
+      return next(); // Authenticated via API Key
+    }
+    // If no API Key success, fallback to standard JWT protection
+    protect(req, res, next);
+  });
+};
+
+// Apply auth to all routes
+router.use(requireAuth);
 const adminRoles = ["admin", "franchise_admin", "super_admin"];
 
 // GET /api/analytics/summary - Overall analytics summary
