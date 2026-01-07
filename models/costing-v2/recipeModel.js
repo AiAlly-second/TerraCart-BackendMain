@@ -192,125 +192,31 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       // #endregion
     }
 
+    // RELAXED CHECK: Don't skip if no purchases found. 
+    // We should still calculate cost based on currentCostPerBaseUnit (Opening Stock / Standard Cost)
+    /*
     if (!hasPurchases) {
       // No purchases made for this ingredient (for this outlet) - skip this ingredient
       ingredientsWithoutPurchases.push(
         ingredient.name || item.ingredientId?.toString()
       );
-      // #region agent log
-      logDebug(
-        "recipeModel.js:128",
-        "No purchases found - skipping ingredient",
-        {
-          ingredientId: item.ingredientId,
-          ingredientName: ingredient.name,
-          cartId: cartId,
-        },
-        "C"
-      );
-      // #endregion
+      // ... log ...
       continue; // Skip this ingredient in cost calculation
     }
+    */
 
-    // Check if ingredient has available inventory for this cart
-    // BOM cost should only show if ingredient is actually available in inventory
-    // IMPORTANT: For cart-wise management, each cart should only see their own inventory
-    let hasAvailableInventory = false;
-    let cartSpecificQty = 0;
-
-    if (cartId) {
-      // For cart-specific ingredients, check qtyOnHand directly
-      if (
-        ingredient.cartId &&
-        ingredient.cartId.toString() === cartId.toString()
-      ) {
-        // Ingredient belongs to this cart - use qtyOnHand directly
-        cartSpecificQty = ingredient.qtyOnHand || 0;
-        hasAvailableInventory = cartSpecificQty > 0;
-      } else {
-        // For shared ingredients, calculate cart-specific quantity from transactions
-        // This uses weighted average costing (same as inventory calculation)
-        const cartTransactions = await InventoryTransactionV2.find({
-          ingredientId: item.ingredientId,
-          cartId: cartId,
-        }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
-
-        let totalQty = 0;
-        for (const txn of cartTransactions) {
-          const txnQty = txn.qtyInBaseUnit || txn.qty;
-          if (txn.type === "IN" || txn.type === "RETURN") {
-            totalQty += txnQty;
-          } else if (txn.type === "OUT" || txn.type === "WASTE") {
-            totalQty -= txnQty;
-            if (totalQty < 0) totalQty = 0;
-          }
-        }
-        cartSpecificQty = Math.max(0, totalQty);
-        // Has inventory if there are any purchase transactions (even if stock is now 0)
-        // This allows BOM to show cost based on purchases, not just current stock
-        hasAvailableInventory = cartTransactions.some(txn => txn.type === "IN" && txn.refType === "purchase");
-        // #region agent log
-        logDebug(
-          "recipeModel.js:220",
-          "Checking shared ingredient inventory (cart-specific)",
-          {
-            ingredientId: item.ingredientId,
-            ingredientName: ingredient.name,
-            cartId: cartId,
-            cartSpecificQty: cartSpecificQty,
-            hasAvailableInventory: hasAvailableInventory,
-            globalQtyOnHand: ingredient.qtyOnHand,
-          },
-          "C"
-        );
-        // #endregion
-      }
-      // #region agent log
-      logDebug(
-        "recipeModel.js:235",
-        "Inventory availability check (cart-wise)",
-        {
-          ingredientId: item.ingredientId,
-          ingredientName: ingredient.name,
-          cartId: cartId,
-          ingredientCartId: ingredient.cartId,
-          cartSpecificQty: cartSpecificQty,
-          globalQtyOnHand: ingredient.qtyOnHand,
-          hasAvailableInventory: hasAvailableInventory,
-        },
-        "C"
-      );
-      // #endregion
-    } else {
-      // For global/franchise-level, check qtyOnHand or FIFO layers
-      cartSpecificQty = ingredient.qtyOnHand || 0;
-      hasAvailableInventory =
-        cartSpecificQty > 0 ||
-        (ingredient.fifoLayers &&
-          Array.isArray(ingredient.fifoLayers) &&
-          ingredient.fifoLayers.some((layer) => (layer.remainingQty || 0) > 0));
-    }
-
+    // RELAXED CHECK: Don't skip if no available inventory.
+    // BOM cost should reflect "theoretical cost" even if currently out of stock.
+    /*
     if (!hasAvailableInventory) {
       // Ingredient is not available in inventory - skip this ingredient
       ingredientsWithoutPurchases.push(
         ingredient.name || item.ingredientId?.toString() + " (out of stock)"
       );
-      // #region agent log
-      logDebug(
-        "recipeModel.js:250",
-        "Ingredient not available in inventory - skipping",
-        {
-          ingredientId: item.ingredientId,
-          ingredientName: ingredient.name,
-          cartId: cartId,
-          qtyOnHand: ingredient.qtyOnHand,
-        },
-        "C"
-      );
-      // #endregion
+      // ... log ...
       continue; // Skip this ingredient in cost calculation
     }
+    */
 
     // Get last purchase cost per base unit (matching inventory calculation)
     // This ensures BOM cost matches what's shown in inventory

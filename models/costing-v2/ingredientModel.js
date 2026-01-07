@@ -108,7 +108,6 @@ const ingredientSchema = new mongoose.Schema(
     qtyOnHand: {
       type: Number,
       required: true,
-      min: 0,
       default: 0,
       // Always stored in base unit (g, ml, or pcs)
     },

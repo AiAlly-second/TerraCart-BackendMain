@@ -339,21 +339,18 @@ class WeightedAverageService {
     }
 
     // Validate sufficient stock (unless allowNegativeStock is true for waste tracking)
+    // Relaxed check: Allow consumption for shared ingredients even if local stock is 0
+    // Validate sufficient stock (unless allowNegativeStock is true for waste tracking)
+    // Relaxed check: Allow consumption for shared ingredients even if local stock is 0
     if (availableQty < qtyToConsume && !allowNegativeStock) {
-      let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableQty} ${ingredient.baseUnit}, Required: ${qtyToConsume} ${ingredient.baseUnit}`;
-      
-      if (cartId && availableQty === 0) {
-        // Check if ingredient has global stock but no outlet-specific stock
-        if (ingredient.qtyOnHand > 0 && (!ingredient.cartId || ingredient.cartId.toString() !== cartId.toString())) {
-          errorMessage += `. Note: This is a shared ingredient. You need to make a purchase for your outlet first, or the ingredient may need to be assigned to your outlet.`;
-        } else {
-          errorMessage += `. Please make a purchase for this ingredient first.`;
-        }
-      } else if (availableQty === 0) {
-        errorMessage += `. Please make a purchase for this ingredient first.`;
-      }
-      
-      throw new Error(errorMessage);
+       console.warn(`[WeightedAverage] Insufficient stock for ${ingredient.name}. Available: ${availableQty}, Required: ${qtyToConsume}.`);
+       let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableQty} ${ingredient.baseUnit}, Required: ${qtyToConsume} ${ingredient.baseUnit}`;
+       
+       if (availableQty === 0) {
+         errorMessage += `. Please make a purchase for this ingredient first.`;
+       }
+       
+       throw new Error(errorMessage);
     }
 
     // SIMPLE: Calculate cost allocated using last purchase price (exact price, no averaging)
@@ -361,11 +358,13 @@ class WeightedAverageService {
 
     // Update ingredient stock (validate no negative stock unless allowNegativeStock is true)
     const newQty = availableQty - qtyToConsume;
+    
     if (newQty < 0 && !allowNegativeStock) {
       throw new Error(
         `Stock update would result in negative quantity. Available: ${availableQty} ${ingredient.baseUnit}, Consuming: ${qtyToConsume} ${ingredient.baseUnit}`
       );
-    }
+    } 
+    
 
     // IMPORTANT: Only update ingredient.qtyOnHand for:
     // 1. Cart-specific ingredients (when cartId matches)

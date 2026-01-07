@@ -257,11 +257,17 @@ exports.listMenu = async (req, res) => {
 
     if (categoryIds.length > 0) {
       // Combine category filter with cartId/cafeId filter using $and
-      itemQuery.$and = [
-        { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
-        { category: { $in: categoryIds } } // Add category filter
-      ];
-      delete itemQuery.$or; // Remove $or from root level since it's now in $and
+      // Only add $or filter if it exists (when cartId is set)
+      if (itemQuery.$or) {
+        itemQuery.$and = [
+          { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
+          { category: { $in: categoryIds } } // Add category filter
+        ];
+        delete itemQuery.$or; // Remove $or from root level since it's now in $and
+      } else {
+        // No cartId filter, just filter by category
+        itemQuery.category = { $in: categoryIds };
+      }
     } else {
       itemQuery.category = { $in: [] }; // No categories, so no items
     }

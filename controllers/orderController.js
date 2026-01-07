@@ -1958,9 +1958,9 @@ const getOrderById = async (req, res) => {
       const cachedCafe = getCachedCafe(cartId);
       if (cachedCafe) {
         order.cafe = cachedCafe;
-        console.log(`[INVOICE] Using cached cafe data for ID: ${cartId}`);
+        console.log(`[INVOICE] Using cached cart data for ID: ${cartId}`);
       } else {
-        console.log(`[INVOICE] Fetching cafe data for ID: ${cartId}`);
+        console.log(`[INVOICE] Fetching cart data for ID: ${cartId}`);
         const cafe = await User.findById(cartId)
           .select("address cartName location name")
           .lean();
@@ -1970,12 +1970,12 @@ const getOrderById = async (req, res) => {
             cartName: cafe.cartName || cafe.name,
           };
           setCachedCafe(cartId, order.cafe);
-          console.log(`[INVOICE] Cafe data loaded:`, {
+          console.log(`[INVOICE] Cart data loaded:`, {
             cartName: order.cafe.cartName,
             address: order.cafe.address,
           });
         } else {
-          console.warn(`[INVOICE] Cafe not found for ID: ${cartId}`);
+          console.warn(`[INVOICE] Cart not found for ID: ${cartId}`);
         }
       }
     } else if (order.cartId && order.cafe) {
