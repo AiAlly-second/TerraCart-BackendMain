@@ -143,7 +143,7 @@ const syncCustomersFromOrders = async (user) => {
     }
 
     console.log(
-      "[CUSTOMER_SYNC] Inserting customers from orders:",
+      "[CUSTOMER_SYNC] Inserting customers from order:",
       customersToInsert.length
     );
 

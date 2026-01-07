@@ -9,8 +9,11 @@ const User = require("../models/userModel");
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
-    // Cart admin - filter by cartId
-    query.cartId = user._id;
+    // Cart admin - filter by cartId (support both cartId and cafeId for backward compatibility)
+    query.$or = [
+      { cartId: user._id },
+      { cafeId: user._id }
+    ];
   } else if (user.role === "franchise_admin") {
     // Franchise admin - filter by franchiseId
     query.franchiseId = user._id;
