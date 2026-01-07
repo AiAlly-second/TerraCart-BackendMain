@@ -1,5 +1,5 @@
 const Order = require("../models/orderModel");
-const MenuItem = require("../models/menuItemModel");
+const { MenuItem } = require("../models/menuItemModel");
 const Employee = require("../models/employeeModel");
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Customer = require("../models/customerModel");
