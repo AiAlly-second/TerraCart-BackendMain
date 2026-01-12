@@ -168,7 +168,7 @@ router.use(handlePublicMenuImage);
  * @desc    Generate a signed URL for a file (admin only)
  * @access  Private (requires authentication)
  */
-router.post('/generate-url', protect, (req, res) => {
+router.post('/generate-url', protect, async (req, res) => {
   try {
     const { filePath, expiresInMinutes = 60 } = req.body;
 
@@ -187,7 +187,7 @@ router.post('/generate-url', protect, (req, res) => {
       });
     }
 
-    const result = generateSignedUrl(filePath, expiresInMinutes);
+    const result = await generateSignedUrl(filePath, expiresInMinutes);
     
     if (!result) {
       return res.status(400).json({

@@ -680,24 +680,10 @@ exports.deleteItem = async (req, res) => {
 
 exports.SPICE_LEVELS = SPICE_LEVELS;
 
-const uploadsDir = path.join(__dirname, "..", "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (_req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const ext = path.extname(file.originalname) || ".jpg";
-    cb(null, `${unique}${ext}`);
-  },
-});
+const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
 
 const upload = multer({
-  storage,
+  storage: getStorageCallback("menu"),
   limits: {
     fileSize: 5 * 1024 * 1024,
   },
@@ -716,11 +702,13 @@ exports.uploadMenuImage = [
     if (!req.file) {
       return res.status(400).json({ message: "No image uploaded" });
     }
-    // Return relative URL so it works across different domains/environments
-    const fileUrl = `/uploads/${req.file.filename}`;
+    // Use helper to get URL (handles S3 vs Local)
+    // Pass "menu" as folderName to match storage configuration
+    const fileUrl = getFileUrl(req, req.file, "menu");
+    
     return res.status(201).json({
       url: fileUrl,
-      filename: req.file.filename,
+      filename: req.file.key || req.file.filename, // S3 uses 'key', local uses 'filename'
       size: req.file.size,
     });
   },

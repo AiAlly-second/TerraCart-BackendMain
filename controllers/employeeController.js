@@ -512,13 +512,31 @@ exports.updateEmployee = async (req, res) => {
 exports.deleteEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const query = { _id: id, ...buildHierarchyQuery(req.user) };
+    // Fix: buildHierarchyQuery is async, must await it
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    const query = { _id: id, ...hierarchyQuery };
     
-    const employee = await Employee.findOneAndDelete(query);
+    // First find the employee to get the userId
+    const employee = await Employee.findOne(query);
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
     }
-    return res.json({ message: "Employee deleted successfully" });
+
+    // Delete the associated User account if it exists (Clean up for Admin Panel)
+    if (employee.userId) {
+      try {
+        const userId = typeof employee.userId === 'object' ? employee.userId._id : employee.userId;
+        await User.findByIdAndDelete(userId);
+        console.log(`[DELETE_EMPLOYEE] Deleted associated User account: ${userId}`);
+      } catch (userError) {
+        console.error('[DELETE_EMPLOYEE] Error deleting associated User:', userError.message);
+      }
+    }
+    
+    // Now delete the employee record
+    await Employee.findByIdAndDelete(id);
+    
+    return res.json({ message: "Employee and associated user account deleted successfully" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

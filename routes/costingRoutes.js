@@ -51,27 +51,10 @@ const { checkCostingPermission } = require("../middleware/costingPermissionMiddl
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-
-// Ensure invoices directory exists
-const invoicesDir = path.join(__dirname, "..", "uploads", "invoices");
-if (!fs.existsSync(invoicesDir)) {
-  fs.mkdirSync(invoicesDir, { recursive: true });
-}
-
-// Configure multer for invoice uploads
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, invoicesDir);
-  },
-  filename: (_req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const ext = path.extname(file.originalname) || ".pdf";
-    cb(null, `invoice-${unique}${ext}`);
-  },
-});
+const { getStorageCallback } = require("../config/uploadConfig");
 
 const upload = multer({
-  storage,
+  storage: getStorageCallback("invoices"),
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
   },

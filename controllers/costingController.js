@@ -14,6 +14,7 @@ const User = require("../models/userModel");
 const mongoose = require("mongoose");
 const path = require("path");
 const fs = require("fs");
+const { getFileUrl } = require("../config/uploadConfig");
 
 // ==================== DASHBOARD ====================
 
@@ -230,7 +231,7 @@ exports.createInvestment = async (req, res) => {
     // Handle file upload
     let invoicePath = null;
     if (req.file) {
-      invoicePath = `/uploads/invoices/${req.file.filename}`;
+      invoicePath = getFileUrl(req, req.file, "invoices");
     }
 
     const investment = new Investment({
@@ -303,7 +304,7 @@ exports.updateInvestment = async (req, res) => {
           fs.unlinkSync(oldFilePath);
         }
       }
-      investment.invoicePath = `/uploads/invoices/${req.file.filename}`;
+      investment.invoicePath = getFileUrl(req, req.file, "invoices");
     }
 
     if (title) investment.title = title;
@@ -472,7 +473,7 @@ exports.createExpense = async (req, res) => {
     // Handle file upload
     let invoicePath = null;
     if (req.file) {
-      invoicePath = `/uploads/invoices/${req.file.filename}`;
+      invoicePath = getFileUrl(req, req.file, "invoices");
     }
 
     const expense = new Expense({
@@ -544,7 +545,7 @@ exports.updateExpense = async (req, res) => {
           fs.unlinkSync(oldFilePath);
         }
       }
-      expense.invoicePath = `/uploads/invoices/${req.file.filename}`;
+      expense.invoicePath = getFileUrl(req, req.file, "invoices");
     }
 
     if (expenseCategoryId) expense.expenseCategoryId = expenseCategoryId;

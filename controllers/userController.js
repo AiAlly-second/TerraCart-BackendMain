@@ -10,30 +10,11 @@ const {
 } = require("../utils/codeGenerator");
 const { addSignedUrlsToUser } = require("../utils/signedUrl");
 
+const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
+
 // Configure multer for franchise document uploads
-const franchiseDocsDir = path.join(
-  __dirname,
-  "..",
-  "uploads",
-  "franchise-docs"
-);
-if (!fs.existsSync(franchiseDocsDir)) {
-  fs.mkdirSync(franchiseDocsDir, { recursive: true });
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, franchiseDocsDir);
-  },
-  filename: (_req, file, cb) => {
-    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    const ext = path.extname(file.originalname) || ".pdf";
-    cb(null, `${unique}${ext}`);
-  },
-});
-
-const upload = multer({
-  storage,
+const uploadFranchise = multer({
+  storage: getStorageCallback("franchise-docs"),
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
   },
@@ -55,7 +36,7 @@ const upload = multer({
 });
 
 // Multer middleware for multiple file uploads (for franchise documents)
-const multerFranchiseDocs = upload.fields([
+const multerFranchiseDocs = uploadFranchise.fields([
   { name: "udyamCertificate", maxCount: 1 },
   { name: "aadharCard", maxCount: 1 },
   { name: "panCard", maxCount: 1 },
@@ -72,7 +53,7 @@ exports.uploadFranchiseDocs = (req, res, next) => {
 };
 
 // Multer middleware for multiple file uploads (for cafe admin documents)
-const multerCafeAdminDocs = upload.fields([
+const multerCafeAdminDocs = uploadFranchise.fields([
   { name: "aadharCard", maxCount: 1 },
   { name: "panCard", maxCount: 1 },
   { name: "gstCertificate", maxCount: 1 },
@@ -398,7 +379,7 @@ exports.getUsers = async (req, res) => {
     const users = await User.find(query).select("-password").lean();
 
     // Add signed URLs for documents
-    const usersWithSignedUrls = users.map((user) => addSignedUrlsToUser(user));
+    const usersWithSignedUrls = await Promise.all(users.map((user) => addSignedUrlsToUser(user)));
 
     // For super admin, add effective status for cart admins based on their franchise status
     if (req.user && req.user.role === "super_admin") {
@@ -479,13 +460,13 @@ exports.createUser = async (req, res) => {
     if (req.files) {
       // Process uploaded files
       if (req.files.udyamCertificate && req.files.udyamCertificate[0]) {
-        filePaths.udyamCertificate = `/uploads/franchise-docs/${req.files.udyamCertificate[0].filename}`;
+        filePaths.udyamCertificate = getFileUrl(req, req.files.udyamCertificate[0], "franchise-docs");
       }
       if (req.files.aadharCard && req.files.aadharCard[0]) {
-        filePaths.aadharCard = `/uploads/franchise-docs/${req.files.aadharCard[0].filename}`;
+        filePaths.aadharCard = getFileUrl(req, req.files.aadharCard[0], "franchise-docs");
       }
       if (req.files.panCard && req.files.panCard[0]) {
-        filePaths.panCard = `/uploads/franchise-docs/${req.files.panCard[0].filename}`;
+        filePaths.panCard = getFileUrl(req, req.files.panCard[0], "franchise-docs");
       }
     }
 
@@ -652,25 +633,25 @@ exports.registerCafeAdmin = async (req, res) => {
     if (req.files) {
       // Process uploaded files
       if (req.files.aadharCard && req.files.aadharCard[0]) {
-        filePaths.aadharCard = `/uploads/franchise-docs/${req.files.aadharCard[0].filename}`;
+        filePaths.aadharCard = getFileUrl(req, req.files.aadharCard[0], "franchise-docs");
       }
       if (req.files.panCard && req.files.panCard[0]) {
-        filePaths.panCard = `/uploads/franchise-docs/${req.files.panCard[0].filename}`;
+        filePaths.panCard = getFileUrl(req, req.files.panCard[0], "franchise-docs");
       }
       if (req.files.gstCertificate && req.files.gstCertificate[0]) {
-        filePaths.gstCertificate = `/uploads/franchise-docs/${req.files.gstCertificate[0].filename}`;
+        filePaths.gstCertificate = getFileUrl(req, req.files.gstCertificate[0], "franchise-docs");
       }
       if (req.files.shopActLicense && req.files.shopActLicense[0]) {
-        filePaths.shopActLicense = `/uploads/franchise-docs/${req.files.shopActLicense[0].filename}`;
+        filePaths.shopActLicense = getFileUrl(req, req.files.shopActLicense[0], "franchise-docs");
       }
       if (req.files.fssaiLicense && req.files.fssaiLicense[0]) {
-        filePaths.fssaiLicense = `/uploads/franchise-docs/${req.files.fssaiLicense[0].filename}`;
+        filePaths.fssaiLicense = getFileUrl(req, req.files.fssaiLicense[0], "franchise-docs");
       }
       if (req.files.electricityBill && req.files.electricityBill[0]) {
-        filePaths.electricityBill = `/uploads/franchise-docs/${req.files.electricityBill[0].filename}`;
+        filePaths.electricityBill = getFileUrl(req, req.files.electricityBill[0], "franchise-docs");
       }
       if (req.files.rentAgreement && req.files.rentAgreement[0]) {
-        filePaths.rentAgreement = `/uploads/franchise-docs/${req.files.rentAgreement[0].filename}`;
+        filePaths.rentAgreement = getFileUrl(req, req.files.rentAgreement[0], "franchise-docs");
       }
     }
 
@@ -1341,7 +1322,7 @@ exports.getUserById = async (req, res) => {
     // Super admin can view anyone (no additional check needed)
 
     // Add signed URLs for documents
-    const userWithSignedUrls = addSignedUrlsToUser(user);
+    const userWithSignedUrls = await addSignedUrlsToUser(user);
 
     console.log(
       `[GET_USER_BY_ID] Returning user data with address: ${userWithSignedUrls.address}, location: ${userWithSignedUrls.location}`

@@ -1,24 +1,8 @@
 const PaymentQR = require("../models/paymentQrModel");
+const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
-
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, "../uploads/payment-qr");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-
-// Configure multer for file upload
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, `qr-${uniqueSuffix}${path.extname(file.originalname)}`);
-  },
-});
 
 const fileFilter = (req, file, cb) => {
   // Accept only image files
@@ -30,7 +14,7 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage: storage,
+  storage: getStorageCallback("payment-qr"),
   fileFilter: fileFilter,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB limit
@@ -54,7 +38,8 @@ exports.uploadPaymentQR = async (req, res) => {
     const cafeId = req.user?.franchiseId || req.user?._id;
 
     // Construct image URL
-    const qrImageUrl = `/uploads/payment-qr/${req.file.filename}`;
+    // Use helper to get URL (handles S3 vs Local)
+    const qrImageUrl = getFileUrl(req, req.file, "payment-qr");
 
     // Deactivate existing active QR codes for this cafe/user
     await PaymentQR.updateMany(
