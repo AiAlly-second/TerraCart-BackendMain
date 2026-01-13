@@ -6,6 +6,7 @@ const {
   getRevenueHistory,
   getCurrentRevenue,
   getFranchiseRevenue,
+  getDetailedRevenueExport,
 } = require("../controllers/revenueController");
 const { protect, authorize, franchiseAdmin } = require("../middleware/authMiddleware");
 
@@ -22,6 +23,7 @@ router.post("/calculate/monthly", calculateMonthlyRevenue);
 // Get revenue data
 router.get("/current", getCurrentRevenue);
 router.get("/history", getRevenueHistory);
+router.get("/export", getDetailedRevenueExport);
 
 module.exports = router;
 

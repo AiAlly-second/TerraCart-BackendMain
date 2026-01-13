@@ -725,3 +725,90 @@ exports.getFranchiseRevenue = async (req, res) => {
   }
 };
 
+// export fully detailed revenue data
+exports.getDetailedRevenueExport = async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+    const query = { status: "Paid" };
+
+    if (startDate || endDate) {
+      query.paidAt = {};
+      if (startDate) query.paidAt.$gte = new Date(startDate);
+      if (endDate) query.paidAt.$lte = new Date(endDate);
+    }
+
+    // 1. Fetch orders with populated references
+    const orders = await Order.find(query)
+      .populate("franchiseId", "name")
+      .populate("cartId", "name")
+      .sort({ paidAt: -1 })
+      .lean();
+
+    // 2. Prepare flat data structures for different sheets
+    const ordersData = [];
+    const itemsData = [];
+
+    for (const order of orders) {
+      // Order level calculations
+      const subtotal = (order.kotLines || []).reduce((sum, kot) => sum + (kot.subtotal || 0), 0);
+      const gst = (order.kotLines || []).reduce((sum, kot) => sum + (kot.gst || 0), 0);
+      const totalAmount = (order.kotLines || []).reduce((sum, kot) => sum + (kot.totalAmount || 0), 0);
+
+      // Add to Orders Data
+      ordersData.push({
+        OrderID: order._id,
+        InvoiceNo: `INV-${new Date(order.createdAt).toISOString().slice(0, 10).replace(/-/g, "")}-${(order._id || "").toString().slice(-6).toUpperCase()}`,
+        Date: order.paidAt ? new Date(order.paidAt).toLocaleDateString() : 'N/A',
+        Time: order.paidAt ? new Date(order.paidAt).toLocaleTimeString() : 'N/A',
+        Franchise: order.franchiseId?.name || "Unknown",
+        Cart: order.cartId?.name || "Unknown",
+        ServiceType: order.serviceType,
+        OrderType: order.orderType || "N/A", // Delivery/Pickup
+        CustomerName: order.customerName || "N/A",
+        Mobile: order.customerMobile || "N/A",
+        PaymentMethod: order.paymentMethod || "CASH",
+        Subtotal: subtotal.toFixed(2),
+        GST: gst.toFixed(2),
+        TotalAmount: totalAmount.toFixed(2),
+      });
+
+      // Process Items for Items Data
+      if (order.kotLines) {
+        order.kotLines.forEach((kot) => {
+          if (kot.items) {
+            kot.items.forEach((item) => {
+              itemsData.push({
+                OrderID: order._id,
+                ItemName: item.name,
+                Quantity: item.quantity,
+                UnitPrice: item.price ? (item.price / 100).toFixed(2) : "0.00",
+                TotalPrice: item.price ? ((item.price * item.quantity) / 100).toFixed(2) : "0.00",
+                Isreturned: item.returned ? "Yes" : "No",
+                IsTakeaway: item.convertedToTakeaway ? "Yes" : "No",
+                Franchise: order.franchiseId?.name || "Unknown",
+                Cart: order.cartId?.name || "Unknown",
+              });
+            });
+          }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        orders: ordersData,
+        items: itemsData,
+        generatedAt: new Date(),
+        recordCount: orders.length
+      },
+    });
+
+  } catch (error) {
+    console.error("Error exporting detailed revenue:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};

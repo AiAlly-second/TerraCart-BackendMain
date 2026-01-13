@@ -1348,21 +1348,26 @@ exports.updateUser = async (req, res) => {
     // - Franchise admin: can only update cafe admins under their franchise (cannot change role)
     // - Cafe admin: can only update themselves (cannot change role)
     if (req.user.role === "franchise_admin") {
-      // Franchise admin can only update cafe admins (role: "admin") under their franchise
-      if (user.role !== "admin") {
-        return res.status(403).json({
-          message:
-            "Access denied. You can only update cafe admins under your franchise.",
-        });
-      }
-      if (
-        !user.franchiseId ||
-        user.franchiseId.toString() !== req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          message:
-            "Access denied. This cafe does not belong to your franchise.",
-        });
+      // Allow self-update
+      if (user._id.toString() === req.user._id.toString()) {
+        // Proceed (self update)
+      } else {
+        // Franchise admin can only update cafe admins (role: "admin") under their franchise
+        if (user.role !== "admin") {
+          return res.status(403).json({
+            message:
+              "Access denied. You can only update cafe admins under your franchise.",
+          });
+        }
+        if (
+          !user.franchiseId ||
+          user.franchiseId.toString() !== req.user._id.toString()
+        ) {
+          return res.status(403).json({
+            message:
+              "Access denied. This cafe does not belong to your franchise.",
+          });
+        }
       }
       // Franchise admin cannot change role
       if (req.body.role !== undefined && req.body.role !== user.role) {
