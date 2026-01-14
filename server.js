@@ -238,7 +238,12 @@ const emitToCart = (io, cartId, event, data) => {
     // Emitted to cart room
   }
 };
+// In your server.js or app.js
 
+const healthRoutes = require('./routes/healthRoutes');
+
+// Add this with your other routes
+app.use('/api', healthRoutes);
 // Helper function to emit to kiosk room
 const emitToKiosk = (io, kioskId, event, data) => {
   if (kioskId) {
