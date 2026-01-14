@@ -400,7 +400,18 @@ const getCorsConfig = () => {
   const isProduction = process.env.NODE_ENV === 'production';
   const allowedOrigins = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
-    : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174', 'http://localhost:5175'];
+    : [
+        'http://localhost:3000', 
+        'http://localhost:5173', 
+        'http://localhost:5174', 
+        'http://localhost:5175',
+        // S3 Static Website URLs
+        'http://teracart-customer-app.s3-website.ap-south-1.amazonaws.com',
+        'http://teracart-admin-panel.s3-website.ap-south-1.amazonaws.com',
+        // CloudFront URLs (add your actual CloudFront domains)
+        'https://d1ncz4zbdagpz3.cloudfront.net',  // Replace with your actual CloudFront domain
+        'https://d3sp6r9lbwue9i.cloudfront.net',  // Replace with your actual CloudFront domain
+      ];
 
   // In development, allow all origins
   if (!isProduction) {

@@ -114,9 +114,16 @@ app.use("/api/kot", require("./routes/kotRoutes"));
 app.use("/api/analytics", require("./routes/analyticsRoutes"));
 
 
-// Health check endpoint
+// Health check endpoints (both /health and /api/health for compatibility)
+const healthRoutes = require("./routes/healthRoutes");
+app.use("/api", healthRoutes);
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({ 
+    status: "healthy", 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
 // Static file serving for uploads
