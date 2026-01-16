@@ -91,6 +91,12 @@ const userSchema = new mongoose.Schema(
         lastUsed: { type: Date },
       },
     ],
+    // Printer Configuration for Local Print Agent
+    printerSettings: {
+      ip: { type: String, default: "192.168.1.151" },
+      port: { type: Number, default: 9100 },
+      enabled: { type: Boolean, default: true },
+    },
   },
   {
     timestamps: true,
