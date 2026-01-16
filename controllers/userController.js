@@ -1136,6 +1136,8 @@ exports.getMe = async (req, res) => {
       isActive: user.isActive,
       // Include GST number so franchise admins can inherit it for new carts
       gstNumber: user.gstNumber,
+      // Printer settings for local agent
+      printerSettings: user.printerSettings,
     };
 
     if (user.role === "employee") {
