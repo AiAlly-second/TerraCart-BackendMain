@@ -132,6 +132,14 @@ exports.getAllAttendance = async (req, res) => {
       query.employeeId = employeeId;
     }
 
+    if (req.query.cartId) {
+      query.cartId = req.query.cartId;
+    }
+
+    if (req.query.cartId) {
+      query.cartId = req.query.cartId;
+    }
+
     // Check if querying for today's attendance
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
@@ -207,14 +215,30 @@ exports.getAllAttendance = async (req, res) => {
 
     if (startDate || endDate) {
       query.date = {};
+      // Convert dates to IST boundaries (UTC-5:30)
+      const IST_OFFSET_MINS = 330; // 5.5 hours * 60
+
       if (startDate) {
-        query.date.$gte = new Date(startDate);
+        const d = new Date(startDate);
+        // Calculate Start of Day in IST (00:00 IST), converted to UTC
+        // Default new Date(YYYY-MM-DD) is 00:00 UTC. 
+        // 00:00 IST is 18:30 Prev Day UTC. Subtract 5.5 hours.
+        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
+        query.date.$gte = d;
       }
       if (endDate) {
-        query.date.$lte = new Date(endDate);
+        const d = new Date(endDate);
+        // Calculate End of Day in IST (23:59:59 IST), converted to UTC
+        d.setHours(23, 59, 59, 999);
+        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
+        query.date.$lte = d;
       }
     } else if (isQueryingToday) {
-      // If querying today, ensure date filter is set
+      // If querying today (or no dates provided), ensure date filter is set to today
+      // UNLESS searching for all history (no dates provided) - wait, isQueryingToday logic handles that
+      // If startDate/endDate undefined, isQueryingToday is TRUE.
+      // So default behavior is SHOW TODAY ONLY.
+      // If user wants ALL history, they must provide wide date range or we change default.
       query.date = { $gte: today, $lt: tomorrow };
     }
 
@@ -246,6 +270,10 @@ exports.getTodayAttendance = async (req, res) => {
       ...hierarchyQuery,
       date: { $gte: today, $lt: tomorrow },
     };
+
+    if (req.query.cartId) {
+      query.cartId = req.query.cartId;
+    }
 
     // Get existing attendance records
     // For mobile users, query should already filter by employeeId
@@ -378,6 +406,10 @@ exports.getPastAttendance = async (req, res) => {
 
     if (employeeId) {
       query.employeeId = employeeId;
+    }
+
+    if (req.query.cartId) {
+      query.cartId = req.query.cartId;
     }
 
     const attendance = await EmployeeAttendance.find(query)
@@ -991,13 +1023,25 @@ exports.getAttendanceStats = async (req, res) => {
       query.employeeId = employeeId;
     }
 
+    if (req.query.cartId) {
+      query.cartId = req.query.cartId;
+    }
+
     if (startDate || endDate) {
       query.date = {};
+      // Convert dates to IST boundaries (UTC-5:30)
+      const IST_OFFSET_MINS = 330; 
+
       if (startDate) {
-        query.date.$gte = new Date(startDate);
+        const d = new Date(startDate);
+        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
+        query.date.$gte = d;
       }
       if (endDate) {
-        query.date.$lte = new Date(endDate);
+        const d = new Date(endDate);
+        d.setHours(23, 59, 59, 999);
+        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
+        query.date.$lte = d;
       }
     }
 
