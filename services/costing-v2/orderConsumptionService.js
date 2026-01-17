@@ -19,23 +19,6 @@ const InventoryTransaction = require("../../models/costing-v2/inventoryTransacti
  */
 async function consumeIngredientsForOrder(order, userId) {
   try {
-    // Check if order already has consumption recorded
-    const existingConsumption = await InventoryTransaction.findOne({
-      refType: "order",
-      refId: order._id,
-    });
-
-    if (existingConsumption) {
-      console.log(
-        `[COSTING] Order ${order._id} already has ingredients consumed`
-      );
-      return {
-        success: true,
-        alreadyProcessed: true,
-        message: "Order already processed",
-      };
-    }
-
     // Get cart ID from order - handle both ObjectId and string formats
     let cartId = order.cartId || order.cafeId;
     if (cartId && typeof cartId === "object" && cartId._id) {
@@ -62,6 +45,31 @@ async function consumeIngredientsForOrder(order, userId) {
 
     console.log(`[COSTING] Processing order ${order._id} for cart ${cartId}`);
 
+    // Check existing transactions to determine which KOTs are processed (Idempotency + Incremental)
+    // refId can be mixed, so we query carefully. Using the exact order._id value should work if consistent.
+    const existingTransactions = await InventoryTransaction.find({
+      refType: "order",
+      refId: order._id,
+    }).select('notes').lean();
+
+    const processedKotIds = new Set();
+    let hasLegacyTransactions = false;
+
+    existingTransactions.forEach(t => {
+      if (t.notes && t.notes.startsWith("KOT:")) {
+        const id = t.notes.split(":")[1];
+        if (id) processedKotIds.add(id);
+      } else {
+        hasLegacyTransactions = true;
+      }
+    });
+
+    // Handle legacy transactions (assume KOT 0 is processed if legacy transaction exists)
+    // This allows backward compatibility for orders processed before this update
+    if (hasLegacyTransactions) {
+        processedKotIds.add("0");
+    }
+
     const consumptionSummary = {
       orderId: order._id,
       itemsProcessed: 0,
@@ -79,8 +87,22 @@ async function consumeIngredientsForOrder(order, userId) {
       };
     }
 
-    for (const kotLine of order.kotLines) {
+    let anythingProcessed = false;
+
+    // Iterate through KOTs using index as stable ID (since KOTs are append-only)
+    for (let i = 0; i < order.kotLines.length; i++) {
+      const kotLine = order.kotLines[i];
+      const kotId = i.toString();
+
+      if (processedKotIds.has(kotId)) {
+        // Already processed this KOT
+        continue;
+      }
+
       if (!kotLine.items || kotLine.items.length === 0) continue;
+
+      anythingProcessed = true;
+      console.log(`[COSTING] Processing KOT ${kotId} for order ${order._id}`);
 
       for (const orderItem of kotLine.items) {
         // Skip returned items (takeaway items and converted-to-takeaway items are still processed)
@@ -163,15 +185,7 @@ async function consumeIngredientsForOrder(order, userId) {
             console.warn(
               `[COSTING] Menu item not found in costing: "${itemName}" for cart ${cartId}`
             );
-            console.warn(`[COSTING] Searched for: "${normalizedItemName}"`);
-            console.warn(
-              `[COSTING] Available menu items in costing:`,
-              await MenuItemV2.find({ cartId: cartId, isActive: true })
-                .select("name")
-                .limit(10)
-                .lean()
-                .then((items) => items.map((i) => i.name))
-            );
+            // Log truncated suggestions
             consumptionSummary.errors.push({
               item: itemName,
               error:
@@ -192,10 +206,6 @@ async function consumeIngredientsForOrder(order, userId) {
             });
             continue;
           }
-
-          console.log(
-            `[COSTING] Found menu item: ${menuItem.name} (ID: ${menuItem._id}) for order item: ${itemName}`
-          );
 
           // Get recipe
           const recipe = await RecipeV2.findById(menuItem.recipeId);
@@ -277,17 +287,17 @@ async function consumeIngredientsForOrder(order, userId) {
                 continue;
               }
 
-              // Consume using weighted average - pass cartId (which matches cartId in purchases/ingredients)
+              // Consume using weighted average
               const consumeResult = await WeightedAverageService.consume(
                 recipeIngredient.ingredientId,
                 qtyInBaseUnit,
                 "order",
                 order._id,
                 userId,
-                cartId // cartId from order matches cartId in database
+                cartId
               );
 
-              // Create inventory transaction for order consumption
+              // Create inventory transaction regarding this KOT
               const transaction = new InventoryTransaction({
                 ingredientId: recipeIngredient.ingredientId,
                 type: "OUT",
@@ -300,6 +310,7 @@ async function consumeIngredientsForOrder(order, userId) {
                 costAllocated: consumeResult.costAllocated,
                 recordedBy: userId,
                 cartId: cartId || null,
+                notes: `KOT:${kotId}`, // Mark which KOT this belongs to
               });
               await transaction.save();
 
@@ -336,6 +347,16 @@ async function consumeIngredientsForOrder(order, userId) {
           });
         }
       }
+    }
+
+    if (!anythingProcessed) {
+        console.log(`[COSTING] Order ${order._id} - No new KOTs to process`);
+        return {
+            success: true,
+            alreadyProcessed: true,
+            message: "No new items to process",
+            summary: consumptionSummary
+        };
     }
 
     console.log(`[COSTING] Order ${order._id} consumption complete:`, {

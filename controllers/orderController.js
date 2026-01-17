@@ -1693,6 +1693,16 @@ const finalizeOrder = async (req, res) => {
     order.status = "Finalized";
     await order.save();
 
+    // Consume ingredients for costing
+    if (req.user) {
+      consumeIngredientsForOrder(order, req.user._id)
+        .then(result => {
+           if (result.success) console.log(`[COSTING] Finalized order ${order._id} consumption success`);
+           else console.warn(`[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`);
+        })
+        .catch(err => console.error(`[COSTING] Finalized order ${order._id} consumption error:`, err));
+    }
+
     // Release table when order is finalized
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
@@ -2307,7 +2317,9 @@ const updateOrderStatus = async (req, res) => {
       (status === "Ready" ||
         status === "Paid" ||
         status === "Finalized" ||
-        status === "Completed") &&
+        status === "Completed" ||
+        status === "Served" ||
+        status === "Exit") &&
       req.user;
 
     if (shouldConsumeIngredients) {
@@ -2623,6 +2635,14 @@ const confirmPaymentByCustomer = async (req, res) => {
     order.status = "Paid";
     order.paidAt = new Date();
     await order.save();
+
+    // Consume ingredients for costing (user is "customer" via QR)
+    consumeIngredientsForOrder(order, "customer")
+      .then(result => {
+         if (result.success) console.log(`[COSTING] Customer paid order ${order._id} consumption success`);
+         else console.warn(`[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`);
+      })
+      .catch(err => console.error(`[COSTING] Customer paid order ${order._id} consumption error:`, err));
 
     // Create or update payment record
     const { payment, created } = await ensurePaymentRecord(order, {

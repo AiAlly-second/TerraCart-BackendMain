@@ -21,53 +21,124 @@ const PRINTER_ENABLED = process.env.PRINTER_ENABLED !== "false"; // Default to t
  */
 function formatKOT(order, kot, kotIndex = 0) {
   const lines = [];
+  const time = new Date();
+  const timeStr = time.toLocaleTimeString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  const dateStr = time.toLocaleDateString("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
 
-  // Header
-  lines.push("================================");
-  lines.push("        TERRA CART");
-  lines.push("     KITCHEN ORDER TICKET");
-  lines.push("================================");
+  // Restaurant Header
+  lines.push("=".repeat(32));
+  lines.push("       ** TERRA CART **");
+  lines.push("=".repeat(32));
   lines.push("");
 
-  // Order Information
-  lines.push(`Order ID: ${order._id}`);
-  lines.push(`KOT #: ${kotIndex + 1}`);
-  lines.push(`Table: ${order.tableNumber || "N/A"}`);
-  lines.push(`Service: ${order.serviceType || "DINE_IN"}`);
-  // Show takeaway token for takeaway orders (REQUIRED - main identifier)
+  // KOT Title - Large and Bold
+  lines.push("   -----------------------");
+  lines.push("   | KITCHEN ORDER TICKET |");
+  lines.push("   -----------------------");
+  lines.push("");
+
+  // Critical ID Info
+  lines.push(`   KOT NUMBER: #${String(kotIndex + 1).padStart(3, "0")}`);
+  lines.push("");
+
+  // Service Type Badge
+  const serviceTypeLine = order.serviceType === "TAKEAWAY" 
+    ? "   *** TAKEAWAY ORDER ***" 
+    : "   ~~~ DINE-IN ORDER ~~~";
+  lines.push(serviceTypeLine);
+  lines.push("");
+
+  // Date & Time
+  lines.push(`  Date: ${dateStr}`);
+  lines.push(`  Time: ${timeStr}`);
+  lines.push("-".repeat(32));
+  lines.push("");
+
+  // Table/Token - HIGHLIGHTED
   if (order.serviceType === "TAKEAWAY" && order.takeawayToken) {
-    lines.push(`Token: ${order.takeawayToken}`);
+    lines.push("********************************");
+    lines.push(`**  TOKEN: ${order.takeawayToken.toUpperCase().padEnd(20, " ")}**`);
+    lines.push("********************************");
+  } else if (order.tableNumber) {
+    lines.push("********************************");
+    lines.push(`**  TABLE: ${String(order.tableNumber).padEnd(20, " ")}**`);
+    lines.push("********************************");
   }
-  // Customer info is optional - only show if provided
-  if (order.serviceType === "TAKEAWAY" && order.customerName) {
-    lines.push(`Customer: ${order.customerName}`);
+  lines.push("");
+
+  // Customer Info (Takeaway only)
+  if (order.serviceType === "TAKEAWAY") {
+    if (order.customerName) {
+      lines.push(`  Customer: ${order.customerName}`);
+    }
     if (order.customerMobile) {
-      lines.push(`Mobile: ${order.customerMobile}`);
+      lines.push(`  Mobile: ${order.customerMobile}`);
+    }
+    if (order.customerName || order.customerMobile) {
+      lines.push("");
     }
   }
-  lines.push(
-    `Time: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`
-  );
-  lines.push("--------------------------------");
+
+  // Order Reference
+  const orderId = (order._id || "").toString().slice(-8).toUpperCase();
+  lines.push(`  Order Ref: ${orderId}`);
+  lines.push("");
+  lines.push("=".repeat(32));
   lines.push("");
 
-  // Items
-  lines.push("ITEMS:");
+  // Items Header
+  lines.push("   ITEMS TO PREPARE:");
+  lines.push("");
+  lines.push("-".repeat(32));
+
+  // Items List
   if (kot.items && Array.isArray(kot.items)) {
     kot.items.forEach((item, idx) => {
       if (item.returned) {
-        lines.push(`[RETURNED] ${item.name}`);
+        lines.push("");
+        lines.push(`  X [CANCELLED] ${item.name}`);
+        lines.push("");
       } else {
-        lines.push(`${item.quantity}x ${item.name}`);
+        lines.push("");
+        // Quantity in bold-like format
+        const qtyDisplay = `[${item.quantity}x]`;
+        lines.push(`  ${qtyDisplay} ${item.name}`);
+        
+        // Special instructions if any
+        if (item.specialInstructions) {
+          lines.push(`      Note: ${item.specialInstructions}`);
+        }
       }
     });
   }
 
-  lines.push("--------------------------------");
   lines.push("");
-  lines.push("================================");
-  lines.push("     Thank You!");
-  lines.push("================================");
+  lines.push("-".repeat(32));
+  lines.push("");
+
+  // Total items count
+  const activeItems = (kot.items || []).filter(i => !i.returned);
+  const totalQty = activeItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
+  lines.push(`  Total Items: ${activeItems.length}`);
+  lines.push(`  Total Quantity: ${totalQty}`);
+  lines.push("");
+
+  // Footer
+  lines.push("=".repeat(32));
+  lines.push("   Prepare with care!");
+  lines.push("   Terra Cart Kitchen");
+  lines.push("=".repeat(32));
+  lines.push("");
   lines.push("");
   lines.push(""); // Extra blank lines for cutting
 
