@@ -67,7 +67,8 @@ const userSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true, index: true },
     // Franchise admin specific fields
     mobile: { type: String }, // Mobile number for franchise admin
-    gstNumber: { type: String }, // GST number
+    fssaiNumber: { type: String }, // FSSAI number (replaced GST)
+    gstNumber: { type: String }, // Deprecated: Old GST number, kept for backward compatibility
     udyamCertificate: { type: String }, // File path for Udyam certificate
     aadharCard: { type: String }, // File path for Aadhar card
     panCard: { type: String }, // File path for PAN card

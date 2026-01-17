@@ -480,7 +480,11 @@ exports.createUser = async (req, res) => {
     // Add franchise admin specific fields
     if (role === "franchise_admin") {
       if (mobile) userData.mobile = mobile;
-      if (gstNumber) userData.gstNumber = gstNumber;
+      if (gstNumber) userData.fssaiNumber = gstNumber; // Allow 'gstNumber' from body but save as fssaiNumber if migration is needed, or just rename var.
+      // Better:
+      if (req.body.fssaiNumber) userData.fssaiNumber = req.body.fssaiNumber;
+      if (req.body.gstNumber && !userData.fssaiNumber) userData.fssaiNumber = req.body.gstNumber; // Fallback
+
       if (filePaths.udyamCertificate)
         userData.udyamCertificate = filePaths.udyamCertificate;
       if (filePaths.aadharCard) userData.aadharCard = filePaths.aadharCard;
@@ -617,14 +621,14 @@ exports.registerCafeAdmin = async (req, res) => {
         .json({ message: "Franchise ID is required for registration" });
     }
 
-    // Look up franchise GST number so new carts can inherit it by default
-    let franchiseGstNumber = null;
+    // Look up franchise FSSAI number so new carts can inherit it by default
+    let franchiseFssaiNumber = null;
     if (franchiseId) {
       const franchiseUser = await User.findById(franchiseId).select(
-        "gstNumber"
+        "fssaiNumber gstNumber"
       );
-      if (franchiseUser && franchiseUser.gstNumber) {
-        franchiseGstNumber = franchiseUser.gstNumber;
+      if (franchiseUser) {
+        franchiseFssaiNumber = franchiseUser.fssaiNumber || franchiseUser.gstNumber;
       }
     }
 
@@ -673,12 +677,14 @@ exports.registerCafeAdmin = async (req, res) => {
       franchiseId: franchiseId, // Link to franchise
     };
 
-    // If GST number is provided explicitly for the cart, keep it (editable override).
-    // Otherwise, inherit GST number from the parent franchise (if available).
-    if (req.body.gstNumber && typeof req.body.gstNumber === "string") {
-      userData.gstNumber = req.body.gstNumber;
-    } else if (franchiseGstNumber) {
-      userData.gstNumber = franchiseGstNumber;
+    // If FSSAI number is provided explicitly for the cart, keep it.
+    // Otherwise, inherit from the parent franchise.
+    if (req.body.fssaiNumber) {
+        userData.fssaiNumber = req.body.fssaiNumber;
+    } else if (req.body.gstNumber) {
+        userData.fssaiNumber = req.body.gstNumber; // Fallback
+    } else if (franchiseFssaiNumber) {
+        userData.fssaiNumber = franchiseFssaiNumber;
     }
 
     // #region agent log
@@ -1395,14 +1401,8 @@ exports.updateUser = async (req, res) => {
 
     // Update fields - handle both JSON and FormData
     const {
-      name,
-      email,
-      password,
-      role,
-      cartName,
-      location,
-      phone,
-      address,
+      gstNumber,
+      fssaiNumber,
       ...otherFields
     } = req.body;
 
@@ -1411,6 +1411,16 @@ exports.updateUser = async (req, res) => {
     if (password !== undefined && password.trim() !== "") {
       // Password will be hashed by pre-save hook
       user.password = password;
+    }
+    
+    // Handle FSSAI Number / GST Number update
+    if (fssaiNumber !== undefined) {
+      user.fssaiNumber = fssaiNumber;
+    } else if (gstNumber !== undefined) {
+      // If gstNumber is provided but fssaiNumber is not, use it as fallback for fssaiNumber
+      user.fssaiNumber = gstNumber;
+      // Also update gstNumber for backward compatibility if we want (actually schema handles it)
+      user.gstNumber = gstNumber;
     }
     if (role !== undefined) {
       // Validate role (only super admin can change roles)
