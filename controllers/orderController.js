@@ -2432,7 +2432,7 @@ const updateOrderStatus = async (req, res) => {
 // ---------------- CUSTOMER CANCEL/RETURN ORDER ----------------
 const cancelOrderByCustomer = async (req, res) => {
   try {
-    const { status, sessionToken } = req.body;
+    const { status, sessionToken, reason } = req.body;
     const orderId = req.params.id;
 
     if (!status) return res.status(400).json({ message: "Status required" });
@@ -2519,6 +2519,10 @@ const cancelOrderByCustomer = async (req, res) => {
     const io = req.app.get("io");
 
     order.status = status;
+    if (reason) {
+      order.cancellationReason = reason;
+    }
+
     if (status === "Returned") {
       order.returnedAt = new Date();
       order.paidAt = null;

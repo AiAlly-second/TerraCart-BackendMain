@@ -102,6 +102,7 @@ const orderSchema = new mongoose.Schema(
       ref: "User",
       index: true,
     },
+    cancellationReason: { type: String },
   },
   { timestamps: true }
 );
