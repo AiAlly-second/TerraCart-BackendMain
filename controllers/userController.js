@@ -687,26 +687,7 @@ exports.registerCafeAdmin = async (req, res) => {
         userData.fssaiNumber = franchiseFssaiNumber;
     }
 
-    // #region agent log
-    fetch("http://127.0.0.1:7242/ingest/660a5fbf-4359-420f-956f-3831103456fb", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId: "debug-session",
-        runId: "pre-fix",
-        hypothesisId: "GST-INHERIT-1",
-        location: "backend/controllers/userController.js:registerCafeAdmin",
-        message: "Registering cafe admin with GST inheritance decision",
-        data: {
-          franchiseId: franchiseId ? franchiseId.toString() : null,
-          franchiseGstNumber: franchiseGstNumber || null,
-          cartHasCustomGst: !!req.body.gstNumber,
-          finalCartGstNumber: userData.gstNumber || null,
-        },
-        timestamp: Date.now(),
-      }),
-    }).catch(() => {});
-    // #endregion agent log
+    // Agent log removed for stability
 
     // Generate unique Cart Code (e.g., MAH001, MAH002 - based on franchise shortcut) - REQUIRED
     if (franchiseId) {
