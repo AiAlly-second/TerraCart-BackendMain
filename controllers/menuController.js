@@ -276,6 +276,27 @@ exports.listMenu = async (req, res) => {
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
+    // Helper function to decode HTML entities in image URLs
+    const decodeImageUrl = (imageUrl) => {
+      if (!imageUrl || typeof imageUrl !== "string") return "";
+      return imageUrl
+        .replace(/&amp;#x2F;/g, "/")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#x2F;/g, "/")
+        .replace(/&#39;/g, "'")
+        .trim();
+    };
+
+    // Decode image URLs in items
+    items.forEach((item) => {
+      if (item.image) {
+        item.image = decodeImageUrl(item.image);
+      }
+    });
+
     const itemsByCategory = items.reduce((acc, item) => {
       const key = item.category.toString();
       if (!acc[key]) acc[key] = [];

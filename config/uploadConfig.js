@@ -64,10 +64,12 @@ const getFileUrl = (req, file, folderName = "") => {
     // S3 file object has a 'location' property with the full URL
     return file.location; 
   } else {
-    // Local file
-    // If folderName is provided and not empty, include it in the path
-    const pathPrefix = folderName ? `/uploads/${folderName}` : "/uploads";
-    return `${pathPrefix}/${file.filename}`;
+    // Local file - return relative path only (no leading slash)
+    // Frontend will prepend the API base URL
+    if (folderName) {
+      return `uploads/${folderName}/${file.filename}`;
+    }
+    return `uploads/${file.filename}`;
   }
 };
 
