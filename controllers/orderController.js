@@ -2151,7 +2151,7 @@ const addItemsToOrder = async (req, res) => {
 // ---------------- UPDATE ORDER STATUS ----------------
 const updateOrderStatus = async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, reason } = req.body;
     if (!status) return res.status(400).json({ message: "Status required" });
 
     const order = await Order.findById(req.params.id);
@@ -2270,6 +2270,10 @@ const updateOrderStatus = async (req, res) => {
 
     // Prepare update object for faster atomic update
     const updateData = { status };
+    if (reason) {
+      updateData.cancellationReason = reason;
+    }
+
     if (status === "Paid") {
       updateData.paidAt = new Date();
     } else if (status === "Returned") {

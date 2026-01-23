@@ -1382,16 +1382,37 @@ exports.updateUser = async (req, res) => {
 
     // Update fields - handle both JSON and FormData
     const {
+      name,
+      email,
+      password,
+      role,
+      cartName,
+      location,
+      phone,
+      address,
       gstNumber,
       fssaiNumber,
+      printerSettings,
       ...otherFields
     } = req.body;
+
+    console.log(`[UPDATE_USER] Request body keys: ${Object.keys(req.body).join(", ")}`);
+    console.log(`[UPDATE_USER] Extracted name: ${name}`);
 
     if (name !== undefined) user.name = name;
     if (email !== undefined) user.email = email.toLowerCase().trim();
     if (password !== undefined && password.trim() !== "") {
       // Password will be hashed by pre-save hook
       user.password = password;
+    }
+
+    if (printerSettings !== undefined) {
+      if (!user.printerSettings) user.printerSettings = {};
+      // Merge existing settings with updates
+      user.printerSettings = { 
+        ...user.printerSettings, 
+        ...printerSettings 
+      };
     }
     
     // Handle FSSAI Number / GST Number update
