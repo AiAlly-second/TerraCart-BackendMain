@@ -1759,6 +1759,43 @@ exports.deleteUser = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
+    // === SECURITY CHECKS ===
+
+    // 1. Never allow deleting a Super Admin
+    if (userToDelete.role === "super_admin") {
+      return res.status(403).json({ message: "Super Admin accounts cannot be deleted" });
+    }
+
+    // 2. Only Super Admin can delete Franchise Admin
+    if (userToDelete.role === "franchise_admin" && req.user.role !== "super_admin") {
+      // Allow them to deactivate (which logic is below), but not delete
+      // Actually, the existing logic below allows deactivation for non-super-admins
+      // But we should strictly enforce that only Super Admin can perform the DELETE action
+      // The frontend calls DELETE for deactivation, so we must rely on the logic below for that specific case.
+      // However, we should block any other role (like 'admin' or 'employee') from even touching this.
+      return res.status(403).json({ message: "Only Super Admin can manage Franchise Admins" });
+    }
+
+    // 3. Only Super Admin or the owning Franchise Admin can delete a Cart Admin
+    if (userToDelete.role === "admin") {
+      if (req.user.role === "super_admin") {
+        // Allowed
+      } else if (req.user.role === "franchise_admin") {
+        // Check ownership
+        if (userToDelete.franchiseId?.toString() !== req.user._id.toString()) {
+           return res.status(403).json({ message: "You can only delete carts belonging to your franchise" });
+        }
+      } else {
+        return res.status(403).json({ message: "Unauthorized to delete this cart" });
+      }
+    }
+
+    // 4. Block low-level roles from deleting users entirely
+    const allowedDeleters = ["super_admin", "franchise_admin", "admin"];
+    if (!allowedDeleters.includes(req.user.role)) {
+       return res.status(403).json({ message: "You do not have permission to delete users" });
+    }
+
     // For franchise admins, check if requester is super_admin
     // Super admin can permanently delete, others can only deactivate
     if (userToDelete.role === "franchise_admin") {
@@ -1862,6 +1899,27 @@ exports.deleteUser = async (req, res) => {
         }
 
         // Delete employees belonging to these cafes or franchise
+        const employeesToDelete = await Employee.find({
+          $or: [
+            { cartId: { $in: cartIds } },
+            { franchiseId: userToDelete._id },
+          ],
+        }).select("userId").lean();
+        
+        const employeeUserIds = employeesToDelete
+          .map(e => e.userId)
+          .filter(id => id);
+
+        if (employeeUserIds.length > 0) {
+          await User.deleteMany({ _id: { $in: employeeUserIds } });
+        }
+
+        // AGGRESSIVE CLEANUP: Delete all Users linked to these carts (Waiters, Cooks, etc.)
+        // This catches any users that might be orphaned from their Employee records
+        if (cartIds.length > 0) {
+          await User.deleteMany({ cafeId: { $in: cartIds } });
+        }
+
         await Employee.deleteMany({
           $or: [
             { cartId: { $in: cartIds } },
@@ -1948,6 +2006,19 @@ exports.deleteUser = async (req, res) => {
         const Employee = require("../models/employeeModel");
 
         // Delete franchise-level employees
+        const franchiseEmployees = await Employee.find({ franchiseId: userToDelete._id }).select("userId").lean();
+        const franchiseEmpUserIds = franchiseEmployees
+          .map(e => e.userId)
+          .filter(id => id);
+
+        if (franchiseEmpUserIds.length > 0) {
+          await User.deleteMany({ _id: { $in: franchiseEmpUserIds } });
+        }
+        
+        // AGGRESSIVE CLEANUP: Delete all users linked to this franchise
+        // This covers Franchise Employees and potentially missed Cart Admins
+        await User.deleteMany({ franchiseId: userToDelete._id, role: { $ne: 'franchise_admin' } });
+
         await Employee.deleteMany({ franchiseId: userToDelete._id });
 
         const franchiseAllOrders = await Order.find({
@@ -1994,202 +2065,49 @@ exports.deleteUser = async (req, res) => {
     }
 
     // If deleting a cafe admin, clean up their data
+    // If deleting a cafe admin (not franchise admin), clean up their data
     if (userToDelete.role === "admin") {
-      // Find all cafes (admin users) under this franchise
-      const cafes = await User.find({
-        role: "admin",
-        franchiseId: userToDelete._id,
-      });
-
-      // Delete all cafes under this franchise
-      const cartIds = cafes.map((cafe) => cafe._id);
-
-      // Import models for cleanup (Order already imported above)
+      const cartId = userToDelete._id;
+      // Import models
       const { Table } = require("../models/tableModel");
       const { Payment } = require("../models/paymentModel");
       const { MenuItem } = require("../models/menuItemModel");
       const MenuCategory = require("../models/menuCategoryModel");
       const Waitlist = require("../models/waitlistModel");
+      const Employee = require("../models/employeeModel");
+      
+      // Delete employees associated with this cart
+      // First, find employees to get their linked User accounts
+      const employeesToDelete = await Employee.find({ cartId: cartId }).select("userId").lean();
+      const employeeUserIds = employeesToDelete
+        .map(e => e.userId)
+        .filter(id => id); // Filter out null/undefined
 
-      if (cartIds.length > 0) {
-        // CRITICAL: Protect paid orders - they contain revenue data and must NEVER be deleted
-        // Only delete non-paid orders (Pending, Confirmed, Preparing, Ready, Served, Cancelled, Returned)
-        const nonPaidStatuses = [
-          "Pending",
-          "Confirmed",
-          "Preparing",
-          "Ready",
-          "Served",
-          "Cancelled",
-          "Returned",
-        ];
-
-        // Get all orders (both paid and non-paid) for reporting
-        const allOrders = await Order.find({
-          $or: [
-            { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id },
-          ],
-        })
-          .select("_id status")
-          .lean();
-
-        // Separate paid and non-paid orders
-        const paidOrders = allOrders.filter((o) => o.status === "Paid");
-        const nonPaidOrders = allOrders.filter((o) =>
-          nonPaidStatuses.includes(o.status)
-        );
-        const nonPaidOrderIds = nonPaidOrders.map((o) => o._id);
-
-        // Get all table IDs from these cafes before deleting tables
-        const tablesToDelete = await Table.find({
-          $or: [
-            { cartId: { $in: cartIds } },
-            { franchiseId: userToDelete._id },
-          ],
-        })
-          .select("_id")
-          .lean();
-        const tableIds = tablesToDelete.map((t) => t._id);
-
-        // Delete payments associated with NON-PAID orders only
-        // Paid orders' payments must be preserved for revenue tracking
-        if (nonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({
-            orderId: { $in: nonPaidOrderIds },
-            status: { $ne: "PAID" }, // Extra safety - don't delete PAID payments
-          });
-        }
-
-        // Delete waitlist entries for these tables
-        if (tableIds.length > 0) {
-          await Waitlist.deleteMany({ table: { $in: tableIds } });
-        }
-
-        // Delete menu items belonging to these cafes
-        await MenuItem.deleteMany({ cartId: { $in: cartIds } });
-
-        // Delete menu categories belonging to these cafes
-        await MenuCategory.deleteMany({ cartId: { $in: cartIds } });
-
-        // Delete tables belonging to these cafes
-        await Table.deleteMany({ cartId: { $in: cartIds } });
-
-        // Delete ONLY non-paid orders - paid orders are preserved for revenue tracking
-        if (nonPaidOrderIds.length > 0) {
-          await Order.deleteMany({
-            _id: { $in: nonPaidOrderIds },
-          });
-        }
-
-        // Delete cafes (this removes all cafe login credentials and data)
-        await User.deleteMany({ _id: { $in: cartIds } });
-
-        // Also delete tables and NON-PAID orders directly linked to franchise
-        const franchiseAllOrders = await Order.find({
-          franchiseId: userToDelete._id,
-        })
-          .select("_id status")
-          .lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(
-          (o) => o.status === "Paid"
-        );
-        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
-          nonPaidStatuses.includes(o.status)
-        );
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
-          (o) => o._id
-        );
-
-        if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({
-            orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" },
-          });
-        }
-
-        const franchiseTables = await Table.find({
-          franchiseId: userToDelete._id,
-        })
-          .select("_id")
-          .lean();
-        const franchiseTableIds = franchiseTables.map((t) => t._id);
-        if (franchiseTableIds.length > 0) {
-          await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
-        }
-
-        await Table.deleteMany({ franchiseId: userToDelete._id });
-
-        // Delete ONLY non-paid orders directly linked to franchise
-        if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({
-            _id: { $in: franchiseNonPaidOrderIds },
-          });
-        }
-      } else {
-        // No cafes, but still clean up any tables/orders directly linked to franchise
-        // CRITICAL: Protect paid orders - they contain revenue data
-        const nonPaidStatuses = [
-          "Pending",
-          "Confirmed",
-          "Preparing",
-          "Ready",
-          "Served",
-          "Cancelled",
-          "Returned",
-        ];
-
-        const franchiseAllOrders = await Order.find({
-          franchiseId: userToDelete._id,
-        })
-          .select("_id status")
-          .lean();
-        const franchisePaidOrders = franchiseAllOrders.filter(
-          (o) => o.status === "Paid"
-        );
-        const franchiseNonPaidOrders = franchiseAllOrders.filter((o) =>
-          nonPaidStatuses.includes(o.status)
-        );
-        const franchiseNonPaidOrderIds = franchiseNonPaidOrders.map(
-          (o) => o._id
-        );
-
-        if (franchiseNonPaidOrderIds.length > 0) {
-          await Payment.deleteMany({
-            orderId: { $in: franchiseNonPaidOrderIds },
-            status: { $ne: "PAID" },
-          });
-        }
-
-        const franchiseTables = await Table.find({
-          franchiseId: userToDelete._id,
-        })
-          .select("_id")
-          .lean();
-        const franchiseTableIds = franchiseTables.map((t) => t._id);
-        if (franchiseTableIds.length > 0) {
-          await Waitlist.deleteMany({ table: { $in: franchiseTableIds } });
-        }
-
-        await Table.deleteMany({ franchiseId: userToDelete._id });
-
-        // Delete ONLY non-paid orders
-        if (franchiseNonPaidOrderIds.length > 0) {
-          await Order.deleteMany({
-            _id: { $in: franchiseNonPaidOrderIds },
-          });
-        }
+      // Delete linked User accounts for these employees
+      if (employeeUserIds.length > 0) {
+        await User.deleteMany({ _id: { $in: employeeUserIds } });
       }
-    }
 
-    // If deleting a cafe admin (not franchise admin), protect their paid orders too
-    if (userToDelete.role === "admin") {
-      const { Payment } = require("../models/paymentModel");
+      // AGGRESSIVE CLEANUP: Delete all mobile users linked to this cart (Waiters, Cooks, etc.)
+      await User.deleteMany({ cafeId: cartId });
 
-      // Get all orders for this cafe admin
-      const allCafeOrders = await Order.find({ cartId: userToDelete._id })
-        .select("_id status")
-        .lean();
+      // Then delete the employee records
+      await Employee.deleteMany({ cartId: cartId });
+
+      // Delete menu items and categories
+      await MenuItem.deleteMany({ cartId: cartId });
+      await MenuCategory.deleteMany({ cartId: cartId });
+
+      // Delete tables and waitlist
+      const tablesToDelete = await Table.find({ cartId: cartId }).select("_id").lean();
+      const tableIds = tablesToDelete.map((t) => t._id);
+      
+      if (tableIds.length > 0) {
+        await Waitlist.deleteMany({ table: { $in: tableIds } });
+      }
+      await Table.deleteMany({ cartId: cartId });
+
+      // Handle Orders
       const nonPaidStatuses = [
         "Pending",
         "Confirmed",
@@ -2200,8 +2118,12 @@ exports.deleteUser = async (req, res) => {
         "Returned",
       ];
 
+      // Get all orders for this cafe admin
+      const allCafeOrders = await Order.find({ cartId: cartId })
+        .select("_id status")
+        .lean();
+
       // Separate paid and non-paid orders
-      const cafePaidOrders = allCafeOrders.filter((o) => o.status === "Paid");
       const cafeNonPaidOrders = allCafeOrders.filter((o) =>
         nonPaidStatuses.includes(o.status)
       );
