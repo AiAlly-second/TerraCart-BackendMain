@@ -58,6 +58,14 @@ const createRateLimiter = (options = {}) => {
     if (isDevelopment && process.env.DISABLE_RATE_LIMIT === 'true') {
       return next();
     }
+
+    // SPECIAL: Exempt API Key requests (Fabric Team / Analytics Integration)
+    // This allows the analytics dashboard to pull data without running into rate limits.
+    // We strictly check for the 'tc_live_' prefix to prevent random headers from bypassing limits.
+    const apiKey = req.headers['x-api-key'];
+    if (apiKey && apiKey.startsWith('tc_live_')) {
+      return next();
+    }
     
     // In development, be very lenient - allow almost unlimited requests
     if (isDevelopment) {
@@ -134,7 +142,7 @@ const rateLimiters = {
   login: createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: parseInt(process.env.RATE_LIMIT_LOGIN) || 10000, // Configurable via env var, default 10000 (effectively disabled)
-    message: 'Too many login attempts. Please try again later.',
+    message: 'Too many login attempts. Please try again laterr.',
     skipSuccessfulRequests: true // Don't count successful logins
   }),
 

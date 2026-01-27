@@ -1192,8 +1192,18 @@ exports.logoutUser = async (req, res) => {
 
 exports.getUserById = async (req, res) => {
   try {
+    // Validate ObjectId format to prevent CastError
+    const { ObjectId } = require("mongoose").Types;
+    if (!ObjectId.isValid(req.params.id)) {
+      console.warn(`[GET_USER_BY_ID] Invalid ID format: ${req.params.id}`);
+      return res.status(400).json({ message: "Invalid user ID format" });
+    }
+
     const user = await User.findById(req.params.id).select("-password");
-    if (!user) return res.status(404).json({ message: "User not found" });
+    if (!user) {
+      console.warn(`[GET_USER_BY_ID] User not found for ID: ${req.params.id}`);
+      return res.status(404).json({ message: "User not found" });
+    }
 
     console.log(
       `[GET_USER_BY_ID] Requested user ID: ${req.params.id}, Role: ${user.role}`

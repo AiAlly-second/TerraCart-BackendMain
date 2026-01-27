@@ -22,20 +22,29 @@ const createApiKey = async () => {
       process.exit(1);
     }
 
-    // Generate Key
-    const randomPart = crypto.randomBytes(24).toString("hex");
-    const key = `tc_live_${randomPart}`;
+    // Check if key already exists
+    const existingKey = user.apiKeys && user.apiKeys.find(k => k.name === "Fabric Dashboard Key");
+    let key;
 
-    // Add to user
-    if (!user.apiKeys) user.apiKeys = [];
-    
-    user.apiKeys.push({
-      key: key,
-      name: "Fabric Dashboard Key",
-      createdAt: new Date()
-    });
+    if (existingKey) {
+      key = existingKey.key;
+      console.log("ℹ️  Existing Fabric Key found.");
+    } else {
+      // Generate Key
+      const randomPart = crypto.randomBytes(24).toString("hex");
+      key = `tc_live_${randomPart}`;
 
-    await user.save();
+      // Add to user
+      if (!user.apiKeys) user.apiKeys = [];
+      
+      user.apiKeys.push({
+        key: key,
+        name: "Fabric Dashboard Key",
+        createdAt: new Date()
+      });
+
+      await user.save();
+    }
 
     console.log("\n✅ ========================================================");
     console.log("🎉 API KEY GENERATED SUCCESSFULLY");
