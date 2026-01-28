@@ -112,6 +112,8 @@ app.use("/api/customer-requests", require("./routes/customerRequestRoutes"));
 app.use("/api/compliance", require("./routes/complianceRoutes"));
 app.use("/api/kot", require("./routes/kotRoutes"));
 app.use("/api/analytics", require("./routes/analyticsRoutes"));
+app.use("/api/print", require("./routes/printRoutes")); // Network printer routes
+app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queue for mobile agent
 
 
 // Health check endpoints (both /health and /api/health for compatibility)

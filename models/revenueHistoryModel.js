@@ -36,6 +36,10 @@ const revenueHistorySchema = new mongoose.Schema(
           type: Number,
           default: 0,
         },
+        cartCount: {
+          type: Number,
+          default: 0,
+        },
       },
     ],
     // Revenue breakdown by cart (changed from cafeRevenue to cartRevenue, cafeId to cartId)

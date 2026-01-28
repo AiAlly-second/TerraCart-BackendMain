@@ -138,7 +138,7 @@ exports.calculateDailyRevenue = async (req, res) => {
       cartId: id,
       cartName: cartMapNames.get(id)?.name || "Unknown",
       franchiseId: data.franchiseId,
-      franchiseName: franchiseMapNames.get(data.franchiseId) || "Unknown",
+      franchiseName: franchiseMapNames.get(data.franchiseId?.toString()) || "Unknown",
       revenue: data.revenue,
       orderCount: data.orderCount,
     }));
