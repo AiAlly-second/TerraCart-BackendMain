@@ -248,12 +248,12 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         }
       }
       
-      // Fallback to ingredient's currentCostPerBaseUnit if no purchase found
-      if (ingredientCost <= 0) {
-        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-      }
+      // CART ISOLATION: Do NOT fall back to global cost for cart-specific ingredients
+      // If this cart has no purchases for its own ingredients, cost should remain 0
+      // This ensures strict cart-level cost isolation
     } else if (cartId) {
       // Shared ingredient with cartId - find last purchase for this cart
+      // CRITICAL CART ISOLATION: Only use cart's own purchases, never fall back to global costs
       const lastPurchase = await InventoryTransactionV2.findOne({
         ingredientId: item.ingredientId,
         cartId: cartId,
@@ -278,10 +278,9 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         }
       }
       
-      // Fallback to global cost if no cart-specific purchase found
-      if (ingredientCost <= 0) {
-        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-      }
+      // CART ISOLATION: Do NOT fall back to global cost
+      // If this cart has no purchases, cost should remain 0 (ingredient will be skipped)
+      // This ensures each cart only sees costs from their own purchases
     } else {
       // Global/shared ingredient - find last purchase (any cart)
       const lastPurchase = await InventoryTransactionV2.findOne({

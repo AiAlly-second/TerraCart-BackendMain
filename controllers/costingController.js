@@ -11,6 +11,7 @@ const OutletAsset = require("../models/outletAssetModel");
 const Order = require("../models/orderModel");
 const { MenuItem } = require("../models/menuItemModel");
 const User = require("../models/userModel");
+const InventoryTransactionV2 = require("../models/costing-v2/inventoryTransactionModel");
 const mongoose = require("mongoose");
 const path = require("path");
 const fs = require("fs");
@@ -26,6 +27,8 @@ const { getFileUrl } = require("../config/uploadConfig");
 exports.getDashboard = async (req, res) => {
   try {
     const { startDate, endDate, franchiseId, kioskId } = req.query;
+    const userRole = req.user.role;
+    const userId = req.user._id;
 
     // Build date filter
     const dateFilter = {};
@@ -35,20 +38,51 @@ exports.getDashboard = async (req, res) => {
       if (endDate) dateFilter.createdAt.$lte = new Date(endDate);
     }
 
-    // Build scope filter
+    // Build scope filters
+    // scopeFilter uses 'kioskId' (for Investment, Expense)
+    // cartScopeFilter uses 'cartId' (for Order, InventoryTransaction)
     const scopeFilter = {};
-    if (franchiseId) scopeFilter.franchiseId = franchiseId;
-    if (kioskId) scopeFilter.kioskId = kioskId;
+    const cartScopeFilter = {};
+    
+    if (userRole === "super_admin") {
+      if (franchiseId) {
+        scopeFilter.franchiseId = franchiseId;
+        cartScopeFilter.franchiseId = franchiseId;
+      }
+      if (kioskId) {
+        scopeFilter.kioskId = kioskId;
+        cartScopeFilter.cartId = kioskId;
+      }
+    } else if (userRole === "franchise_admin") {
+      scopeFilter.franchiseId = userId;
+      cartScopeFilter.franchiseId = userId;
+      if (kioskId) {
+        scopeFilter.kioskId = kioskId;
+        cartScopeFilter.cartId = kioskId;
+      }
+    } else if (userRole === "admin" || userRole === "cart_admin") {
+      scopeFilter.kioskId = userId;
+      cartScopeFilter.cartId = userId;
+    }
 
-    // Calculate Total Investment
+    // Calculate Total Investment (Uses kioskId)
     const investmentFilter = { ...scopeFilter, ...dateFilter };
+    if (dateFilter.createdAt) {
+      // Investments use purchaseDate usually, but let's stick to simple createdAt if that's what was used before, 
+      // OR map dateFilter to purchaseDate if previously consistent.
+      // Previous code used createdAt for dateFilter but Investments have purchaseDate.
+      // Let's refine: Investment uses purchaseDate usually for filtering.
+      // But purely for safety, let's look at previous implementation:
+      // It merged query dateFilter (on createdAt) into investmentFilter.
+      // Investment model has createdAt. So this is fine.
+    }
     const totalInvestment = await Investment.aggregate([
       { $match: investmentFilter },
       { $group: { _id: null, total: { $sum: "$amount" } } },
     ]);
     const investmentSum = totalInvestment[0]?.total || 0;
 
-    // Calculate Monthly Expenses
+    // Calculate Monthly Expenses (Uses kioskId)
     const expenseFilter = { ...scopeFilter };
     if (startDate || endDate) {
       expenseFilter.expenseDate = {};
@@ -62,9 +96,8 @@ exports.getDashboard = async (req, res) => {
     const expenseSum = monthlyExpenses[0]?.total || 0;
 
     // Calculate Food Cost % (COGS / Sales * 100)
-    // COGS = Cost of ingredients used in orders
-    // Sales = Total revenue from orders
-    const orderFilter = { ...scopeFilter };
+    // Sales uses cartId (Order model)
+    const orderFilter = { ...cartScopeFilter };
     if (startDate || endDate) {
       orderFilter.createdAt = {};
       if (startDate) orderFilter.createdAt.$gte = new Date(startDate);
@@ -83,16 +116,31 @@ exports.getDashboard = async (req, res) => {
     ]);
     const totalSales = salesData[0]?.totalSales || 0;
 
-    // Calculate COGS from inventory transactions (consumption type)
-    const cogsFilter = { changeType: "consumption" };
+    // Calculate COGS from inventory transactions (Uses cartId)
+    // Must include scope!
+    // V2 Implementation: Sum costAllocated for type='OUT' (consumption) and 'WASTE'
+    const cogsFilter = { 
+      ...cartScopeFilter
+    };
+    
+    // Convert filter for V2 schema if needed
+    // cartScopeFilter uses cartId which matches V2 schema
+    
+    // Date filter
     if (startDate || endDate) {
-      cogsFilter.createdAt = {};
-      if (startDate) cogsFilter.createdAt.$gte = new Date(startDate);
-      if (endDate) cogsFilter.createdAt.$lte = new Date(endDate);
+      cogsFilter.date = {}; // V2 uses 'date', not 'createdAt'
+      if (startDate) cogsFilter.date.$gte = new Date(startDate);
+      if (endDate) cogsFilter.date.$lte = new Date(endDate);
     }
-    const cogsData = await InventoryTransaction.aggregate([
+
+    // Filter for consumption (OUT) and Wastage
+    cogsFilter.type = { $in: ["OUT", "WASTE"] };
+    // Optionally refine by refType if needed, e.g., refType: "order" for pure sales COGS
+    // But generalized COGS usually includes all inventory outflows
+    
+    const cogsData = await InventoryTransactionV2.aggregate([
       { $match: cogsFilter },
-      { $group: { _id: null, total: { $sum: "$cost" } } },
+      { $group: { _id: null, total: { $sum: "$costAllocated" } } },
     ]);
     const cogs = cogsData[0]?.total || 0;
 
@@ -101,7 +149,7 @@ exports.getDashboard = async (req, res) => {
     // Calculate Gross Profit (Sales - COGS - Expenses)
     const grossProfit = totalSales - cogs - expenseSum;
 
-    // Calculate Breakeven months (Total Investment / Average Monthly Net Profit)
+    // Calculate Breakeven months
     const avgMonthlyNetProfit = grossProfit / Math.max(1, getMonthsBetween(startDate, endDate));
     const breakevenMonths = avgMonthlyNetProfit > 0 ? investmentSum / avgMonthlyNetProfit : null;
 
@@ -114,7 +162,7 @@ exports.getDashboard = async (req, res) => {
         grossProfit: Number(grossProfit.toFixed(2)),
         breakevenMonths: breakevenMonths ? Number(breakevenMonths.toFixed(2)) : null,
         totalSales: totalSales,
-        cogs: cogs,
+        cogs: cogs, // Food Cost (COGS)
       },
     });
   } catch (error) {

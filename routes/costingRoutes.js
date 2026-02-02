@@ -76,7 +76,7 @@ const upload = multer({
 // All routes require authentication and costing permission
 router.use(protect);
 router.use(checkCostingPermission);
-router.use(authorize(["super_admin"]));
+router.use(authorize(["super_admin", "franchise_admin", "admin", "cart_admin"]));
 
 // Dashboard
 router.get("/dashboard", getDashboard);

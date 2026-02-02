@@ -24,14 +24,12 @@ exports.checkCostingPermission = (req, res, next) => {
     });
   }
 
-  // Super admin always has access
-  if (req.user.role === 'super_admin') {
+  // Super admin, Franchise Admin, and Cart Admin have access
+  if (['super_admin', 'franchise_admin', 'admin', 'cart_admin'].includes(req.user.role)) {
     return next();
   }
 
   // Check for view_costing permission (if permissions system exists)
-  // For now, only super_admin has access
-  // TODO: Implement permission system if needed
   if (req.user.permissions && req.user.permissions.includes('view_costing')) {
     return next();
   }
