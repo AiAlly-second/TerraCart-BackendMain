@@ -2317,20 +2317,22 @@ exports.getCostingInventory = async (req, res) => {
   try {
     const Employee = require("../../models/employeeModel");
 
-    // Get cafeId for mobile users (waiter, cook, captain, manager)
+    // Get cartId - match inventory controller logic for consistency
     let cartId = null;
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cafeId from user or employee record
-      if (req.user.cafeId) {
+      // Mobile users - prioritize cartId, then cafeId (backward compat)
+      if (req.user.cartId) {
+        cartId = req.user.cartId;
+      } else if (req.user.cafeId) {
         cartId = req.user.cafeId;
       } else {
-        // Fallback: find employee by email
         const employee = await Employee.findOne({
-          email: req.user.email?.toLowerCase(),
+          $or: [
+            { email: req.user.email?.toLowerCase() },
+            { userId: req.user._id },
+          ],
         }).lean();
-        if (employee && employee.cafeId) {
-          cartId = employee.cafeId;
-        }
+        cartId = employee?.cartId || employee?.cafeId;
       }
 
       if (!cartId) {
@@ -2340,50 +2342,161 @@ exports.getCostingInventory = async (req, res) => {
         });
       }
     } else if (req.user.role === "admin") {
-      // Cart admin - use their own ID as cartId
       cartId = req.user._id;
     }
 
-    // Build filter for ingredients
+    // Build filter for ingredients - match getIngredients: include shared (cartId=null)
+    // so mobile sees same items as web costing-v2 Inventory page
     const filter = { isActive: true };
     if (cartId) {
-      filter.cartId = cartId;
+      const cartIdObj = mongoose.Types.ObjectId.isValid(cartId)
+        ? new mongoose.Types.ObjectId(cartId)
+        : cartId;
+      filter.$or = [
+        { cartId: cartIdObj },
+        { cartId: null },
+        { cartId: { $exists: false } },
+      ];
     }
 
-    // Apply role-based filtering
+    // Apply role-based filtering (includeShared for admin to match getIngredients)
     const shouldSkipOutletFilter =
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
       !cartId;
     const costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipOutletFilter,
+      includeShared: true,
     });
 
     // Get ingredients for this cart/cafe/kiosk
-    const ingredients = await Ingredient.find(costingFilter)
+    let ingredients = await Ingredient.find(costingFilter)
       .select(
-        "name category uom qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt"
+        "name category uom baseUnit qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt"
       )
       .sort({ category: 1, name: 1 })
       .lean();
 
-    // Format ingredients as inventory items for the app
+    // CRITICAL: Recalculate qtyOnHand from transactions (match web getIngredients)
+    // Web calculates stock from InventoryTransaction; raw Ingredient.qtyOnHand may be 0/stale
+    if (cartId && ingredients.length > 0) {
+      const cartObjectId = mongoose.Types.ObjectId.isValid(cartId)
+        ? new mongoose.Types.ObjectId(cartId)
+        : cartId;
+      const allCartTransactions = await InventoryTransaction.find({
+        cartId: cartObjectId,
+      })
+        .sort({ date: 1 })
+        .lean();
+
+      const ingredientIdSet = new Set(
+        ingredients.map((ing) => (ing._id ? ing._id.toString() : null)).filter(Boolean)
+      );
+      const filteredTxns = allCartTransactions.filter((txn) => {
+        if (!txn.ingredientId) return false;
+        const id = txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId);
+        return ingredientIdSet.has(id);
+      });
+
+      const transactionsByIngredient = {};
+      for (const txn of filteredTxns) {
+        const ingId = txn.ingredientId ? txn.ingredientId.toString() : null;
+        if (ingId) {
+          if (!transactionsByIngredient[ingId]) transactionsByIngredient[ingId] = [];
+          transactionsByIngredient[ingId].push(txn);
+        }
+      }
+
+      for (const ingredient of ingredients) {
+        const ingredientId = ingredient._id ? ingredient._id.toString() : null;
+        const transactions = ingredientId ? transactionsByIngredient[ingredientId] || [] : [];
+
+        if (transactions.length === 0) {
+          ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
+          ingredient.currentCostPerBaseUnit =
+            ingredient.qtyOnHand <= 0 ? 0 : Number(ingredient.currentCostPerBaseUnit) || 0;
+          continue;
+        }
+
+        let stock = 0;
+        let totalQty = 0;
+        let totalValue = 0;
+        let weightedAvgCost = 0;
+
+        for (const txn of transactions) {
+          let qty = Number(txn.qtyInBaseUnit);
+          if (!qty || isNaN(qty)) {
+            if (txn.qty && txn.uom) {
+              try {
+                qty = safeConvertToBaseUnit(ingredient, Number(txn.qty), txn.uom);
+              } catch {
+                qty = Number(txn.qty) || 0;
+              }
+            } else {
+              qty = Number(txn.qty) || 0;
+            }
+          }
+
+          if (txn.type === "IN" || txn.type === "RETURN") {
+            stock += qty;
+            let txnCostPerBaseUnit = 0;
+            if (txn.unitPrice != null && txn.unitPrice > 0) {
+              const cf = safeConvertToBaseUnit(ingredient, 1, txn.uom || ingredient.uom);
+              txnCostPerBaseUnit = txn.unitPrice / cf;
+            } else if (txn.costAllocated > 0 && qty > 0) {
+              txnCostPerBaseUnit = txn.costAllocated / qty;
+            }
+            if (qty > 0 && txnCostPerBaseUnit > 0) {
+              totalValue += qty * txnCostPerBaseUnit;
+              totalQty += qty;
+              weightedAvgCost = totalQty > 0 ? totalValue / totalQty : 0;
+            }
+          } else if (txn.type === "OUT" || txn.type === "WASTE") {
+            stock -= qty;
+            if (totalQty > 0 && weightedAvgCost > 0) {
+              totalValue = Math.max(0, totalValue - qty * weightedAvgCost);
+            }
+            totalQty -= qty;
+            if (totalQty < 0) {
+              totalQty = 0;
+              totalValue = 0;
+              weightedAvgCost = 0;
+            } else if (totalQty > 0) {
+              weightedAvgCost = totalValue / totalQty;
+            } else {
+              weightedAvgCost = 0;
+            }
+          }
+        }
+
+        stock = Math.max(0, stock);
+        if (stock <= 0) weightedAvgCost = 0;
+        ingredient.qtyOnHand = Number(stock.toFixed(4));
+        ingredient.currentCostPerBaseUnit = Number((weightedAvgCost || 0).toFixed(6));
+      }
+    }
+
+    // Format ingredients as inventory items for the app (match web costing-v2 Inventory)
     const inventoryItems = ingredients.map((ing) => ({
       _id: ing._id,
       name: ing.name,
       category: ing.category,
       quantity: ing.qtyOnHand || 0,
+      qtyOnHand: ing.qtyOnHand || 0,
       unit: ing.uom,
+      uom: ing.uom,
+      baseUnit: ing.baseUnit || (["kg", "g"].includes(ing.uom) ? "g" : ["l", "ml"].includes(ing.uom) ? "ml" : "pcs"),
       minStockLevel: ing.reorderLevel || 0,
+      reorderLevel: ing.reorderLevel || 0,
       unitPrice: ing.currentCostPerBaseUnit || 0,
+      currentCostPerBaseUnit: ing.currentCostPerBaseUnit || 0,
       location: ing.storageLocation || "Main Storage",
+      storageLocation: ing.storageLocation || "Main Storage",
       updatedAt: ing.updatedAt
         ? ing.updatedAt.toISOString()
         : new Date().toISOString(),
-      // Additional fields for compatibility
       minStock: ing.reorderLevel || 0,
       ingredientId: ing._id,
-      // Add cafeId for filtering
       cafeId: cartId || ing.cartId,
     }));
 

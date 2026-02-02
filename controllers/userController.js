@@ -249,6 +249,7 @@ exports.loginUser = async (req, res) => {
             email: user.email,
             role: actualRole, // Use the actual role (waiter, cook, captain, manager)
             cafeId: cafeId || user.cafeId,
+            cartId: cafeId || user.cafeId || user.cartId, // Mobile app uses cartId for socket/inventory
             employeeId: user.employeeId,
             franchiseId: franchiseId || user.franchiseId,
             franchiseCode: user.franchiseCode,
@@ -1116,7 +1117,8 @@ exports.getMe = async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      cafeId: user.cafeId,
+      cafeId: user.cafeId || user.cartId,
+      cartId: user.cartId || user.cafeId, // Mobile app uses cartId for socket/inventory
       franchiseId: user.franchiseId,
       franchiseCode: user.franchiseCode,
       cartCode: user.cartCode,
@@ -1131,7 +1133,7 @@ exports.getMe = async (req, res) => {
       const employee = await Employee.findOne({ userId: user._id }).lean();
       if (employee) {
         userResponse.role = employee.employeeRole; // waiter, cook, captain, manager
-        userResponse.cafeId = employee.cafeId;
+        userResponse.cafeId = employee.cartId || employee.cafeId;
         userResponse.franchiseId = employee.franchiseId;
       }
     }
