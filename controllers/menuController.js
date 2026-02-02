@@ -590,7 +590,6 @@ exports.updateItem = async (req, res) => {
         // Sync only this specific cart's menu to costing
         await syncDefaultMenuToCosting(
           null,
-          itemCartId.toString(),
           itemCartId.toString()
         );
         console.log(

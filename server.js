@@ -61,6 +61,19 @@ const validateEnv = () => {
 
 validateEnv();
 
+// Global error handlers to prevent silent crashes
+process.on("uncaughtException", (err) => {
+  console.error("❌ UNCAUGHT EXCEPTION:", err.message);
+  console.error(err.stack);
+  // Give time for logs to flush before exiting
+  setTimeout(() => process.exit(1), 1000);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("❌ UNHANDLED REJECTION:", reason);
+  // Note: We don't necessarily want to exit on rejection, but we should log it
+});
+
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
@@ -283,13 +296,12 @@ const startServer = async () => {
     await connectDB();
 
     const PORT = process.env.PORT || 5001;
-    // CRITICAL: Bind to 0.0.0.0 for EC2 compatibility (allows external connections)
-    server.listen(PORT, '0.0.0.0', () => {
+    // CRITICAL: Omit host to listen on all interfaces (IPv4 and IPv6)
+    // This resolves 'localhost' resolution issues in some environments
+    server.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);
       console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
-      if (process.env.NODE_ENV === 'production') {
-        console.log(`🌐 Server accessible at: http://0.0.0.0:${PORT}`);
-      }
+      console.log(`🌐 Server accessible locally at: http://localhost:${PORT}`);
     });
   } catch (error) {
     process.exit(1);

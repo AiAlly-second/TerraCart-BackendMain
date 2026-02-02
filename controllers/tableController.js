@@ -494,10 +494,14 @@ exports.listTables = async (req, res) => {
   }
 };
 
-exports.getAvailableTables = async (_req, res) => {
+exports.getAvailableTables = async (req, res) => {
   try {
     await syncTableFields();
-    const tables = await Table.find({ status: "AVAILABLE" })
+    const { cartId } = req.query;
+    const query = { status: "AVAILABLE" };
+    if (cartId) query.cartId = cartId;
+
+    const tables = await Table.find(query)
       .sort({ number: 1 })
       .lean();
     const enriched = await Promise.all(
@@ -507,6 +511,34 @@ exports.getAvailableTables = async (_req, res) => {
     );
     return res.json(enriched);
   } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// Public endpoint to get all tables for a specific cart (for manual selection fallback)
+exports.getPublicTables = async (req, res) => {
+  try {
+    await syncTableFields();
+    const { cartId } = req.query;
+    
+    // CRITICAL: Must have cartId to prevent global table leakage
+    if (!cartId) {
+      return res.status(400).json({ message: "cartId is required for public table listing" });
+    }
+
+    const tables = await Table.find({ cartId })
+      .sort({ number: 1 })
+      .lean();
+
+    const enriched = await Promise.all(
+      tables.map(async (table) =>
+        buildPublicTableResponse(table, await countActiveWaitlist(table._id))
+      )
+    );
+    
+    return res.json(enriched);
+  } catch (err) {
+    console.error("Error in getPublicTables:", err);
     return res.status(500).json({ message: err.message });
   }
 };

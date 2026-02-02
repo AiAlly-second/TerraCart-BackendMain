@@ -3076,12 +3076,36 @@ exports.deleteRecipe = async (req, res) => {
     // If there are linked menu items, unlink them (set recipeId to null and reset cost metrics)
     if (linkedMenuItems.length > 0) {
       for (const menuItem of linkedMenuItems) {
-        menuItem.recipeId = null;
-        menuItem.costPerPortion = 0;
-        menuItem.foodCostPercent = 0;
-        menuItem.contributionMargin = menuItem.sellingPrice; // Margin = selling price when no cost
-        menuItem.lastCostUpdate = new Date();
-        await menuItem.save();
+        try {
+          menuItem.recipeId = null;
+          menuItem.costPerPortion = 0;
+          menuItem.foodCostPercent = 0;
+          menuItem.contributionMargin = menuItem.sellingPrice; // Margin = selling price when no cost
+          menuItem.lastCostUpdate = new Date();
+
+          // Ensure cartId is present (required by schema)
+          if (!menuItem.cartId) {
+            if (recipe.cartId) {
+              menuItem.cartId = recipe.cartId;
+              console.log(
+                `[RECIPE DELETE] Fixed missing cartId for menu item ${menuItem._id} using recipe.cartId`
+              );
+            } else {
+              console.warn(
+                `[RECIPE DELETE] Skipping MenuItemV2 update for ${menuItem._id}: missing cartId and recipe has no cartId`
+              );
+              continue; // Skip saving this invalid item
+            }
+          }
+
+          await menuItem.save();
+        } catch (err) {
+          console.error(
+            `[RECIPE DELETE] Failed to unlink menu item ${menuItem._id}:`,
+            err.message
+          );
+          // Continue with other items despite error
+        }
       }
       console.log(
         `[RECIPE DELETE] Unlinked ${linkedMenuItems.length} menu item(s) from recipe ${recipe.name}`
@@ -5064,8 +5088,7 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
 
     const syncResult = await syncDefaultMenuToCosting(
       targetFranchiseId,
-      cartId,
-      targetOutletId
+      cartId
     );
 
     res.json({

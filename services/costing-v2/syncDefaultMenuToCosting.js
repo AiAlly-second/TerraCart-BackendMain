@@ -118,7 +118,42 @@ async function syncCartMenuToCosting(cartId, filterCartId = null) {
             continue;
           }
 
-          const outletObjectId = cartId || cartId;
+          // Validate cartId is present and valid
+          if (!cartId) {
+            console.error(
+              `[COSTING SYNC] Skipping auto-create for "${itemName}": cartId is required but was ${cartId}`
+            );
+            syncSummary.errors.push({
+              item: itemName,
+              error: `cartId is required but was ${cartId}`,
+            });
+            syncSummary.notFound++;
+            continue;
+          }
+
+          // Ensure cartId is a valid ObjectId
+          const mongoose = require("mongoose");
+          let outletObjectId;
+          try {
+            outletObjectId = mongoose.Types.ObjectId.isValid(cartId)
+              ? (typeof cartId === "string" ? new mongoose.Types.ObjectId(cartId) : cartId)
+              : null;
+            
+            if (!outletObjectId) {
+              throw new Error(`Invalid cartId format: ${cartId}`);
+            }
+          } catch (idError) {
+            console.error(
+              `[COSTING SYNC] Invalid cartId for "${itemName}":`,
+              idError.message
+            );
+            syncSummary.errors.push({
+              item: itemName,
+              error: `Invalid cartId: ${idError.message}`,
+            });
+            syncSummary.notFound++;
+            continue;
+          }
 
           try {
             const newCostingItem = new MenuItemV2({

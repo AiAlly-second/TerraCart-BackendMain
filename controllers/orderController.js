@@ -89,14 +89,14 @@ function buildKot(items) {
   });
 
   const subtotalP = lines.reduce((s, it) => s + it.price * it.quantity, 0);
-  const gstP = Math.round(subtotalP * 0.05); // 5% GST
-  const totalP = subtotalP + gstP;
+  const gstP = 0; // No GST applied
+  const totalP = subtotalP; // Total equals subtotal
 
   return {
     items: lines,
     subtotal: toRupees(subtotalP),
-    gst: toRupees(gstP),
-    totalAmount: toRupees(totalP),
+    gst: 0,
+    totalAmount: toRupees(subtotalP),
   };
 }
 
@@ -2846,12 +2846,12 @@ const returnItems = async (req, res) => {
         }
       });
 
-      const gstP = Math.round(subtotalP * 0.05);
-      const totalP = subtotalP + gstP;
+      const gstP = 0; // No GST applied
+      const totalP = subtotalP; // Total equals subtotal
 
       kot.subtotal = toRupees(subtotalP);
-      kot.gst = toRupees(gstP);
-      kot.totalAmount = toRupees(totalP);
+      kot.gst = 0;
+      kot.totalAmount = toRupees(subtotalP);
     });
 
     order.kotLines = kotLines;
@@ -3010,12 +3010,12 @@ const convertToTakeaway = async (req, res) => {
           }
         });
 
-        const gstP = Math.round(subtotalP * 0.05);
-        const totalP = subtotalP + gstP;
+        const gstP = 0; // No GST applied
+        const totalP = subtotalP; // Total equals subtotal
 
         kot.subtotal = toRupees(subtotalP);
-        kot.gst = toRupees(gstP);
-        kot.totalAmount = toRupees(totalP);
+        kot.gst = 0;
+        kot.totalAmount = toRupees(subtotalP);
       });
 
       order.kotLines = kotLines;

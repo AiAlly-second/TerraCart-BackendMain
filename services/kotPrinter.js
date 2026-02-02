@@ -67,7 +67,7 @@ function formatKOT(order, kot, kotIndex = 0) {
   // Table/Token - HIGHLIGHTED
   if (order.serviceType === "TAKEAWAY" && order.takeawayToken) {
     lines.push("********************************");
-    lines.push(`**  TOKEN: ${order.takeawayToken.toUpperCase().padEnd(20, " ")}**`);
+    lines.push(`**  TOKEN: ${String(order.takeawayToken).toUpperCase().padEnd(20, " ")}**`);
     lines.push("********************************");
   } else if (order.tableNumber) {
     lines.push("********************************");
