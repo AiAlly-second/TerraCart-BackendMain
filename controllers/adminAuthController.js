@@ -2,12 +2,12 @@ const User = require("../models/userModel");
 const jwt = require("jsonwebtoken");
 
 // Generate JWT Token
-const generateToken = (id) => {
+const generateToken = (id, tokenVersion = 0) => {
   const secret = process.env.JWT_SECRET;
   if (!secret || secret === 'your-secret-key' || secret === 'sarva-cafe-secret-key-2025') {
     console.warn('[SECURITY] ⚠️ Using default JWT secret. Set JWT_SECRET in production!');
   }
-  return jwt.sign({ id }, secret || 'your-secret-key', {
+  return jwt.sign({ id, tokenVersion }, secret || 'your-secret-key', {
     expiresIn: "30d",
   });
 };
@@ -106,8 +106,9 @@ const adminLogin = async (req, res) => {
 
     console.log(`[ADMIN_LOGIN] ✅ Password verified for user: ${user.email}`);
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Generate token with current tokenVersion
+    const tokenVersion = user.tokenVersion || 0;
+    const token = generateToken(user._id, tokenVersion);
     
     console.log(`[ADMIN_LOGIN] ✅ Login successful - User: ${user.name} (${user.role})`);
 
@@ -244,7 +245,50 @@ const verifyAdminToken = async (req, res) => {
   }
 };
 
+// Logout from all devices - increments tokenVersion to invalidate all tokens
+const logoutFromAllDevices = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: "Not authenticated",
+      });
+    }
+
+    const userId = req.user._id;
+
+    // Increment tokenVersion to invalidate all existing tokens
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $inc: { tokenVersion: 1 } },
+      { new: true }
+    ).select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    console.log(`[LOGOUT_ALL] User ${user.email} logged out from all devices. New tokenVersion: ${user.tokenVersion}`);
+
+    res.json({
+      success: true,
+      message: "Logged out from all devices successfully",
+      tokenVersion: user.tokenVersion,
+    });
+  } catch (error) {
+    console.error("[LOGOUT_ALL] Error:", error.message);
+    res.status(500).json({
+      success: false,
+      message: "Server error during logout",
+    });
+  }
+};
+
 module.exports = {
   adminLogin,
   verifyAdminToken,
+  logoutFromAllDevices,
 };

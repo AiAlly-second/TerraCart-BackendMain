@@ -477,6 +477,15 @@ exports.createUser = async (req, res) => {
       role,
     };
 
+    // CRITICAL: For cart admin (role: "admin"), set directly approved and active
+    if (role === "admin") {
+      userData.isApproved = true; // Directly approved when cart is created
+      userData.isActive = true; // Directly active when cart is created
+      userData.approvedBy = req.user?._id || null; // Set approved by if user is creating
+      userData.approvedAt = new Date(); // Set approval timestamp
+      console.log(`[CREATE_USER] ✅ Cart admin created with isApproved: true, isActive: true`);
+    }
+
     // Add franchise admin specific fields
     if (role === "franchise_admin") {
       if (mobile) userData.mobile = mobile;
@@ -663,7 +672,7 @@ exports.registerCafeAdmin = async (req, res) => {
     const { gstCertificateExpiry, shopActLicenseExpiry, fssaiLicenseExpiry } =
       req.body;
 
-    // Create cafe admin user (not approved yet)
+    // Create cafe admin user - directly approved and active
     const userData = {
       name,
       email: email.toLowerCase().trim(),
@@ -673,7 +682,10 @@ exports.registerCafeAdmin = async (req, res) => {
       location,
       phone: phone || undefined,
       address: address || undefined,
-      isApproved: false, // Requires franchise admin approval
+      isApproved: true, // Directly approved when cart is created
+      isActive: true, // Directly active when cart is created
+      approvedBy: req.user?._id || null, // Set approved by if user is creating
+      approvedAt: new Date(), // Set approval timestamp
       franchiseId: franchiseId, // Link to franchise
     };
 
@@ -834,7 +846,11 @@ exports.registerCafeAdmin = async (req, res) => {
     }
 
     // CRITICAL: Automatically push super admin ingredients and BOMs to new cart admin
-    // This ensures cart admin has access to all master ingredients and recipes from super admin
+    // ⚠️⚠️⚠️ DISABLED: This was creating DUPLICATE cart-specific BOMs for each new cart
+    // NEW APPROACH: All ingredients and BOMs are SHARED (cartId: null) by default
+    // Cart admins can see all shared ingredients/BOMs without needing cart-specific copies
+    // This prevents duplicates and ensures consistency across all carts
+    /* DISABLED - Causing duplicate BOMs
     try {
       const { pushToCartAdminsInternal } = require("./costing-v2/costingController");
       console.log(`[COSTING PUSH] ========================================`);
@@ -866,6 +882,13 @@ exports.registerCafeAdmin = async (req, res) => {
       console.error("[COSTING PUSH] Error details:", err.message);
       // Don't fail user creation if push fails - super admin can push manually later
     }
+    */
+    
+    console.log(`[COSTING] ========================================`);
+    console.log(`[COSTING] 🆕 NEW CART CREATED: ${user.cartName} (ID: ${user._id})`);
+    console.log(`[COSTING] Cart will automatically see all SHARED ingredients and BOMs`);
+    console.log(`[COSTING] NO cart-specific copies created (prevents duplicates)`);
+    console.log(`[COSTING] ========================================`);
 
     // Don't send password in response
     const userResponse = user.toObject();

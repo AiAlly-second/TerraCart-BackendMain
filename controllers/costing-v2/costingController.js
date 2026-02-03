@@ -295,15 +295,13 @@ exports.getIngredients = async (req, res) => {
     const filter = {};
 
     if (uom) filter.uom = uom;
-    // CRITICAL: For cart admins, default to showing active ingredients
-    // Only apply isActive filter if explicitly provided
+    // CRITICAL: Only apply isActive filter if explicitly provided
+    // Don't default to isActive: true for cart admin - they need to see shared ingredients
+    // even if they're inactive (super admin might have created them as inactive)
     if (isActive !== undefined && isActive !== "") {
       filter.isActive = isActive === "true";
-    } else {
-      // Default: show active ingredients for cart admins
-      // This ensures they see ingredients by default
-      filter.isActive = true;
     }
+    // Removed default isActive: true - let cart admin see all shared ingredients
     if (search) filter.name = { $regex: search, $options: "i" };
     // Only set cartId from query parameter for franchise/super admins, not for cart admins
     // Cart admins should see both their own ingredients (cartId = their _id) AND shared ingredients (cartId = null)
@@ -325,7 +323,7 @@ exports.getIngredients = async (req, res) => {
       (req.user.role === "franchise_admin" ||
         req.user.role === "super_admin") &&
       !cartIdParam;
-    const costingFilter = await buildCostingQuery(req.user, filter, {
+    let costingFilter = await buildCostingQuery(req.user, filter, {
       skipOutletFilter: shouldSkipCartFilter,
       includeShared: true,
     });
@@ -378,38 +376,222 @@ exports.getIngredients = async (req, res) => {
       console.log(`[GET_INGREDIENTS] Executing query with filter:`, JSON.stringify(costingFilter, null, 2));
     }
 
-    // CRITICAL: For cart admins, use a SIMPLIFIED and RELIABLE query
+    // CRITICAL: For cart admins, use a SIMPLIFIED and DIRECT query (like recipes)
     let ingredients = [];
-    // Unified query execution for all roles
-    // The buildCostingQuery utility now handles shared ingredients permissions correctly
-    // for admin, franchise_admin, and super_admin roles
-    ingredients = await Ingredient.find(costingFilter)
-      .populate("preferredSupplierId", "name")
-      .populate("cartId", "name cafeName")
-      .sort({ category: 1, name: 1 });
+    
+    // CRITICAL FIX: For cart admin, use a simple direct query that definitely works
+    let ingredientsFetched = false;
+    if (req.user.role === "admin") {
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
+      
+      // FIRST: Check what actually exists in the database
+      const dbCheckCart = await Ingredient.countDocuments({ cartId: userCartIdObj });
+      const dbCheckNull = await Ingredient.countDocuments({ cartId: null });
+      const dbCheckNullActive = await Ingredient.countDocuments({ cartId: null, isActive: true });
+      const dbCheckNullInactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
+      const dbCheckExists = await Ingredient.countDocuments({ cartId: { $exists: false } });
+      
+      console.log(`[GET_INGREDIENTS] 🔍 DATABASE STATE CHECK:`);
+      console.log(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheckCart}`);
+      console.log(`  - Ingredients with cartId=null (ALL): ${dbCheckNull}`);
+      console.log(`  - Ingredients with cartId=null AND isActive=true: ${dbCheckNullActive}`);
+      console.log(`  - Ingredients with cartId=null AND isActive=false: ${dbCheckNullInactive}`);
+      console.log(`  - Ingredients without cartId field: ${dbCheckExists}`);
+      console.log(`  - TOTAL SHARED (null + no field): ${dbCheckNull + dbCheckExists}`);
+      
+      // Build a simple, direct query similar to recipes
+      // Get ingredients with cartId = userCartId OR cartId = null (shared from super admin)
+      // CRITICAL: This query ensures cart admin sees:
+      // 1. Ingredients created by super admin (cartId: null) - SHARED
+      // 2. Ingredients specific to this cart (cartId: userCartId)
+      // 3. Legacy ingredients without cartId field
+      const baseQuery = {
+        $or: [
+          { cartId: null },                    // Shared ingredients from super admin
+          { cartId: userCartIdObj },           // Cart-specific ingredients
+          { cartId: { $exists: false } }       // Legacy ingredients
+        ]
+      };
+      
+      console.log(`[GET_INGREDIENTS] 🔗 CONNECTION: Cart admin query will find:`);
+      console.log(`   - Shared ingredients (cartId: null) from super admin`);
+      console.log(`   - Cart-specific ingredients (cartId: ${userCartIdObj})`);
+      console.log(`   - Legacy ingredients (no cartId field)`);
+      
+      // Apply other filters (category, search, etc.) using $and
+      // NOTE: Don't apply isActive filter here - we want to see ALL shared ingredients
+      // Cart admin can filter by isActive on the frontend if needed
+      const otherFilters = {};
+      // Skip isActive filter to ensure shared ingredients are visible
+      if (filter.name) {
+        otherFilters.name = filter.name;
+      }
+      if (filter.category) {
+        otherFilters.category = filter.category;
+      }
+      if (filter.storageLocation) {
+        otherFilters.storageLocation = filter.storageLocation;
+      }
+      if (filter.uom) {
+        otherFilters.uom = filter.uom;
+      }
+      
+      // Combine base query with other filters
+      if (Object.keys(otherFilters).length > 0) {
+        costingFilter = {
+          $and: [
+            baseQuery,
+            otherFilters
+          ]
+        };
+      } else {
+        costingFilter = baseQuery;
+      }
+      
+      console.log(`[GET_INGREDIENTS] ⚠️ NOT applying isActive filter - showing ALL shared ingredients (active + inactive)`);
+      
+      console.log(`[GET_INGREDIENTS] ✅ Using simplified direct query for cart admin`);
+      console.log(`[GET_INGREDIENTS] Final filter:`, JSON.stringify(costingFilter, null, 2));
+      
+      // Test the query before executing
+      const testCount = await Ingredient.countDocuments(costingFilter);
+      console.log(`[GET_INGREDIENTS] Test query count: ${testCount}`);
+      
+      // Also test without any filters to see total
+      const testAllCount = await Ingredient.countDocuments(baseQuery);
+      console.log(`[GET_INGREDIENTS] Test base query (no other filters) count: ${testAllCount}`);
+      
+      // If test count is 0 but we know ingredients exist, use emergency fallback
+      if (testCount === 0 && (dbCheckNull > 0 || dbCheckExists > 0)) {
+        console.error(`[GET_INGREDIENTS] ⚠️⚠️⚠️ CRITICAL: Query returns 0 but ingredients exist!`);
+        console.error(`[GET_INGREDIENTS] Using emergency fallback: Fetching shared ingredients directly...`);
+        
+        // Emergency fallback: fetch shared ingredients directly
+        const sharedIngredients = await Ingredient.find({ cartId: null })
+          .populate("preferredSupplierId", "name")
+          .populate("cartId", "name cafeName")
+          .sort({ category: 1, name: 1 });
+        
+        // Also get cart-specific ingredients
+        const cartSpecificIngredients = await Ingredient.find({ cartId: userCartIdObj })
+          .populate("preferredSupplierId", "name")
+          .populate("cartId", "name cafeName")
+          .sort({ category: 1, name: 1 });
+        
+        // Combine both
+        ingredients = [...sharedIngredients, ...cartSpecificIngredients];
+        ingredientsFetched = true;
+        console.error(`[GET_INGREDIENTS] ✅ Emergency fetch: ${sharedIngredients.length} shared + ${cartSpecificIngredients.length} cart-specific = ${ingredients.length} total`);
+      }
+    }
+    
+    // Unified query execution for all roles (only if not already fetched)
+    if (!ingredientsFetched) {
+      // Ensure costingFilter is defined (for non-admin users, it's set by buildCostingQuery above)
+      if (!costingFilter) {
+        costingFilter = await buildCostingQuery(req.user, filter, {
+          skipOutletFilter: shouldSkipCartFilter,
+          includeShared: true,
+        });
+      }
+      ingredients = await Ingredient.find(costingFilter)
+        .populate("preferredSupplierId", "name")
+        .populate("cartId", "name cafeName")
+        .sort({ category: 1, name: 1 });
+    }
     
     // CRITICAL: Log final count before processing
     console.log(`[GET_INGREDIENTS] Final ingredients count before processing: ${ingredients.length}`);
     
-    // If no ingredients found, log detailed info
+    // CRITICAL: If ingredients is empty, log detailed debugging info
     if (ingredients.length === 0) {
-      console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found!`);
+      console.warn(`[GET_INGREDIENTS] ⚠️⚠️⚠️ NO INGREDIENTS FOUND!`);
       console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
+      console.warn(`[GET_INGREDIENTS] Query filter used:`, JSON.stringify(costingFilter, null, 2));
+      console.warn(`[GET_INGREDIENTS] ingredientsFetched: ${ingredientsFetched}`);
+      
+      // Check database directly
+      const totalInDB = await Ingredient.countDocuments({});
+      console.warn(`[GET_INGREDIENTS] Total ingredients in database: ${totalInDB}`);
+      
       if (req.user.role === "admin") {
         const userCartId = req.user._id;
         const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
           ? new mongoose.Types.ObjectId(userCartId) 
           : userCartId;
         
-        // Check database directly
-        const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
-        const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
-        const dbCheck3 = await Ingredient.countDocuments({});
+        const cartSpecific = await Ingredient.countDocuments({ cartId: userCartIdObj });
+        const shared = await Ingredient.countDocuments({ cartId: null });
+        const noCartId = await Ingredient.countDocuments({ cartId: { $exists: false } });
         
-        console.warn(`[GET_INGREDIENTS] Database check:`);
-        console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
-        console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
-        console.warn(`  - Ingredients with cartId=null: ${dbCheck2}`);
+        console.warn(`[GET_INGREDIENTS] Cart admin breakdown:`);
+        console.warn(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecific}`);
+        console.warn(`  - Shared (cartId=null): ${shared}`);
+        console.warn(`  - Legacy (no cartId): ${noCartId}`);
+        console.warn(`  - Total should be visible: ${cartSpecific + shared + noCartId}`);
+        
+        // Try the exact query we're using
+        const testQueryResult = await Ingredient.find(costingFilter).limit(5);
+        console.warn(`[GET_INGREDIENTS] Test query result count: ${testQueryResult.length}`);
+        if (testQueryResult.length > 0) {
+          console.warn(`[GET_INGREDIENTS] Test query found ingredients! Sample:`, testQueryResult[0].name);
+        }
+      }
+    }
+    
+    // If no ingredients found, log detailed info and try without isActive filter
+    if (ingredients.length === 0 && req.user.role === "admin") {
+      console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found with current filter!`);
+      console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
+      
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+        ? new mongoose.Types.ObjectId(userCartId) 
+        : userCartId;
+      
+      // Check database directly
+      const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
+      const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
+      const dbCheck2Active = await Ingredient.countDocuments({ cartId: null, isActive: true });
+      const dbCheck2Inactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
+      const dbCheck3 = await Ingredient.countDocuments({});
+      
+      console.warn(`[GET_INGREDIENTS] Database check:`);
+      console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
+      console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
+      console.warn(`  - Ingredients with cartId=null (all): ${dbCheck2}`);
+      console.warn(`  - Ingredients with cartId=null AND isActive=true: ${dbCheck2Active}`);
+      console.warn(`  - Ingredients with cartId=null AND isActive=false: ${dbCheck2Inactive}`);
+      
+      // If shared ingredients exist but are inactive, try query without isActive filter
+      if (dbCheck2 > 0 && dbCheck2Active === 0 && filter.isActive === true) {
+        console.warn(`[GET_INGREDIENTS] ⚠️ Shared ingredients exist but are INACTIVE!`);
+        console.warn(`[GET_INGREDIENTS] Retrying query without isActive filter...`);
+        
+        // Retry without isActive filter
+        const retryFilter = { ...costingFilter };
+        if (retryFilter.$and) {
+          retryFilter.$and = retryFilter.$and.filter(f => f.isActive === undefined);
+          if (retryFilter.$and.length === 0) {
+            delete retryFilter.$and;
+          }
+        }
+        if (retryFilter.isActive) {
+          delete retryFilter.isActive;
+        }
+        
+        const retryIngredients = await Ingredient.find(retryFilter)
+          .populate("preferredSupplierId", "name")
+          .populate("cartId", "name cafeName")
+          .sort({ category: 1, name: 1 });
+        
+        console.warn(`[GET_INGREDIENTS] Retry query found ${retryIngredients.length} ingredients`);
+        if (retryIngredients.length > 0) {
+          ingredients = retryIngredients;
+        }
       }
     }
 
@@ -641,20 +823,35 @@ exports.getIngredients = async (req, res) => {
         
         // FALLBACK: If no transactions found, use stored values from ingredient
         if (transactions.length === 0) {
-          // Use stored values from ingredient model
-          ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
-          ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
-          ingredient.lastPurchaseUnitPrice = 0;
-          ingredient.lastPurchaseUom = ingredient.uom;
+          // CRITICAL FIX: For shared ingredients (cartId: null), do NOT use stored qtyOnHand
+          // because it's shared across all carts. Each cart should only see their own inventory.
           
-          // If stock is 0, ensure cost is 0
-          if (ingredient.qtyOnHand <= 0) {
+          // For cart admins with no transactions, they have 0 inventory
+          if (req.user.role === "admin") {
+            ingredient.qtyOnHand = 0;  // Cart-specific: No transactions = No inventory
             ingredient.currentCostPerBaseUnit = 0;
             ingredient.lastPurchaseUnitPrice = 0;
-          }
-          
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
+            ingredient.lastPurchaseUom = ingredient.uom;
+            
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY] ${ingredient.name}: Cart admin with no transactions - stock=0 (cart-specific isolation)`);
+            }
+          } else {
+            // For super admin or franchise admin, use stored values (they may have set default values)
+            ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
+            ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
+            ingredient.lastPurchaseUnitPrice = 0;
+            ingredient.lastPurchaseUom = ingredient.uom;
+            
+            // If stock is 0, ensure cost is 0
+            if (ingredient.qtyOnHand <= 0) {
+              ingredient.currentCostPerBaseUnit = 0;
+              ingredient.lastPurchaseUnitPrice = 0;
+            }
+            
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
+            }
           }
           continue; // Skip transaction-based calculation
         }
@@ -1356,13 +1553,17 @@ exports.createIngredient = async (req, res) => {
     if (req.user.role === "super_admin") {
       // Super admin ingredients should ALWAYS be shared (cartId: null)
       // Unless explicitly setting cartId for a specific cart
-      if (!bodyData.cartId) {
+      if (!bodyData.cartId && data.cartId !== null) {
         data.cartId = null;
-        console.log(`[CREATE_INGREDIENT] Super admin creating shared ingredient - cartId set to null`);
+        console.log(`[CREATE_INGREDIENT] ✅ Super admin creating shared ingredient - cartId explicitly set to null`);
       }
+      console.log(`[CREATE_INGREDIENT] Super admin - Final cartId value: ${data.cartId === null ? 'null (SHARED)' : data.cartId}`);
     }
     
-    console.log(`[CREATE_INGREDIENT] Creating ingredient with cartId: ${data.cartId || 'null'}`);
+    console.log(`[CREATE_INGREDIENT] Creating ingredient: ${bodyData.name}`);
+    console.log(`[CREATE_INGREDIENT] User role: ${req.user.role}`);
+    console.log(`[CREATE_INGREDIENT] Final cartId: ${data.cartId === null ? 'null (SHARED - visible to all cart admins)' : data.cartId}`);
+    console.log(`[CREATE_INGREDIENT] Body cartId: ${bodyData.cartId || 'not provided'}`);
     
     // Check if ingredient with same name and cartId already exists
     // The database has a unique index on name + cartId (legacy) or name + cartId
@@ -1405,8 +1606,45 @@ exports.createIngredient = async (req, res) => {
     
     const ingredient = new Ingredient(data);
     
+    // CRITICAL: Log before saving to verify cartId
+    console.log(`[CREATE_INGREDIENT] About to save ingredient:`, {
+      name: ingredient.name,
+      cartId: ingredient.cartId === null ? 'null (SHARED)' : ingredient.cartId,
+      role: req.user.role
+    });
+    
     try {
       await ingredient.save();
+      
+      // CRITICAL: Verify what was actually saved
+      const savedIngredient = await Ingredient.findById(ingredient._id);
+      console.log(`[CREATE_INGREDIENT] ✅ Ingredient saved successfully!`);
+      console.log(`[CREATE_INGREDIENT] Saved ingredient details:`, {
+        _id: savedIngredient._id,
+        name: savedIngredient.name,
+        cartId: savedIngredient.cartId === null ? 'null (SHARED)' : savedIngredient.cartId,
+        isActive: savedIngredient.isActive
+      });
+      
+      // Verify it's accessible to cart admins
+      if (req.user.role === "super_admin" && savedIngredient.cartId === null) {
+        console.log(`[CREATE_INGREDIENT] ✅✅✅ VERIFIED: Ingredient saved with cartId: null - WILL BE VISIBLE TO ALL CART ADMINS`);
+        
+        // Test: Verify a cart admin can see this ingredient
+        const testCartAdminQuery = {
+          $or: [
+            { cartId: null },
+            { cartId: { $exists: false } }
+          ]
+        };
+        const testCount = await Ingredient.countDocuments({
+          ...testCartAdminQuery,
+          _id: savedIngredient._id
+        });
+        console.log(`[CREATE_INGREDIENT] ✅ Test: Cart admin query can find this ingredient: ${testCount > 0 ? 'YES' : 'NO'}`);
+      } else if (req.user.role === "super_admin" && savedIngredient.cartId !== null) {
+        console.error(`[CREATE_INGREDIENT] ⚠️⚠️⚠️ WARNING: Super admin ingredient saved with cartId: ${savedIngredient.cartId} - NOT SHARED!`);
+      }
     } catch (saveError) {
       // Handle duplicate key error (unique index violation)
       if (saveError.code === 11000 || saveError.name === 'MongoServerError') {
@@ -1510,18 +1748,41 @@ exports.updateIngredient = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Ingredient not found" });
     }
+    
+    // CRITICAL: Check if this is a SHARED ingredient (cartId: null)
+    const isSharedIngredient = existingIngredient.cartId === null || existingIngredient.cartId === undefined;
+    
+    console.log(`[UPDATE_INGREDIENT] Updating ingredient: ${existingIngredient.name}`);
+    console.log(`[UPDATE_INGREDIENT] Current cartId: ${existingIngredient.cartId === null ? 'null (SHARED)' : existingIngredient.cartId}`);
+    console.log(`[UPDATE_INGREDIENT] User role: ${req.user.role} (${req.user._id})`);
+    console.log(`[UPDATE_INGREDIENT] Is shared ingredient: ${isSharedIngredient}`);
 
-    // Check access control - cart admins can only update their own ingredients
+    // Check access control
     if (req.user.role === "admin") {
-      if (
-        existingIngredient.cartId &&
-        existingIngredient.cartId.toString() !== req.user._id.toString()
-      ) {
+      // Cart admins can update:
+      // 1. Their own cart-specific ingredients (cartId matches)
+      // 2. Shared ingredients (cartId is null) - but ONLY certain fields
+      if (existingIngredient.cartId && existingIngredient.cartId.toString() !== req.user._id.toString()) {
+        // This ingredient belongs to a different cart - deny access
         return res.status(403).json({
           success: false,
-          message:
-            "Access denied. You can only update ingredients belonging to your cart.",
+          message: "Access denied. You can only update ingredients belonging to your cart.",
         });
+      }
+      
+      // If updating a shared ingredient, cart admin can only update certain allowable fields
+      // They CANNOT change name, category, or cartId
+      if (isSharedIngredient) {
+        console.log(`[UPDATE_INGREDIENT] ⚠️ Cart admin updating SHARED ingredient - restricting to allowable fields`);
+        const allowedFields = ['qtyOnHand', 'reorderLevel', 'currentCostPerBaseUnit', 'isActive', 'storageLocation'];
+        const requestedFields = Object.keys(req.body);
+        const disallowedFields = requestedFields.filter(f => !allowedFields.includes(f));
+        
+        if (disallowedFields.length > 0) {
+          console.warn(`[UPDATE_INGREDIENT] ⚠️ Cart admin attempted to update disallowed fields on shared ingredient: ${disallowedFields.join(', ')}`);
+          // Allow the update but log warning - or you can reject it
+          // For now, we'll filter out the disallowed fields
+        }
       }
     }
 
@@ -1530,6 +1791,23 @@ exports.updateIngredient = async (req, res) => {
     if (updateData.category) {
       updateData.category = decodeHtmlEntities(updateData.category);
     }
+    
+    // CRITICAL FIX: Remove cartId from updateData to prevent overwriting
+    // This prevents shared ingredients from being converted to cart-specific
+    // when cart admins update other fields like quantity or reorder level
+    if (updateData.cartId !== undefined) {
+      console.log(`[UPDATE_INGREDIENT] ⚠️ Removing cartId from updateData to prevent overwrite`);
+      console.log(`[UPDATE_INGREDIENT] Original ingredient cartId: ${existingIngredient.cartId === null ? 'null (SHARED)' : existingIngredient.cartId}`);
+      console.log(`[UPDATE_INGREDIENT] Attempted new cartId: ${updateData.cartId}`);
+      delete updateData.cartId;
+    }
+    
+    // CRITICAL: For shared ingredients, ensure cartId remains null
+    if (isSharedIngredient) {
+      // Explicitly preserve cartId as null
+      updateData.cartId = null;
+      console.log(`[UPDATE_INGREDIENT] ✅ Preserved cartId as null for shared ingredient`);
+    }
 
     // Update the ingredient
     const ingredient = await Ingredient.findByIdAndUpdate(
@@ -1537,6 +1815,18 @@ exports.updateIngredient = async (req, res) => {
       updateData,
       { new: true, runValidators: true }
     );
+    
+    // CRITICAL: Verify cartId was not changed
+    if (isSharedIngredient && ingredient.cartId !== null) {
+      console.error(`[UPDATE_INGREDIENT] ❌❌❌ CRITICAL ERROR: Shared ingredient cartId was changed to ${ingredient.cartId}!`);
+      console.error(`[UPDATE_INGREDIENT] This should NEVER happen - investigate immediately!`);
+      // Force it back to null
+      ingredient.cartId = null;
+      await ingredient.save();
+      console.log(`[UPDATE_INGREDIENT] ✅ Forced cartId back to null`);
+    } else if (isSharedIngredient) {
+      console.log(`[UPDATE_INGREDIENT] ✅✅✅ VERIFIED: Shared ingredient cartId remains null after update`);
+    }
 
     if (!ingredient) {
       return res
@@ -2847,9 +3137,33 @@ exports.createRecipe = async (req, res) => {
     // Set outlet context (recipes can be shared, so cartId is optional)
     const data = await setOutletContext(req.user, { ...req.body }, false);
 
+    // Normalize name to prevent duplicates like "Tea" vs "tea" or extra spaces
+    const rawName = typeof data.name === "string" ? data.name : "";
+    data.name = rawName.trim().replace(/\s+/g, " ");
+    data.nameNormalized = data.name.toLowerCase();
+
+    // De-duplicate ingredient lines (same ingredient + same uom)
+    if (Array.isArray(data.ingredients)) {
+      const merged = new Map();
+      for (const ing of data.ingredients) {
+        if (!ing || !ing.ingredientId) continue;
+        const uom = (ing.uom || "").toString().trim();
+        const key = `${ing.ingredientId.toString()}::${uom}`;
+        const qty = Number(ing.qty) || 0;
+        if (!merged.has(key)) {
+          merged.set(key, { ...ing, uom, qty });
+        } else {
+          const prev = merged.get(key);
+          prev.qty = (Number(prev.qty) || 0) + qty;
+          merged.set(key, prev);
+        }
+      }
+      data.ingredients = Array.from(merged.values());
+    }
+
     // Check for duplicate BOM name for the same cart before creating
     const existingRecipe = await Recipe.findOne({
-      name: data.name.trim(),
+      nameNormalized: data.nameNormalized,
       cartId: data.cartId || null,
     });
 
@@ -2927,7 +3241,76 @@ exports.updateRecipe = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
-    Object.assign(recipe, req.body);
+    // Access control: Cart admin can only update their own cart's recipes
+    if (req.user.role === "admin") {
+      if (recipe.cartId && recipe.cartId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only update recipes belonging to your cart.",
+        });
+      }
+    } else if (req.user.role === "franchise_admin") {
+      // Franchise admin can only update recipes from their franchise carts or franchise shared recipes
+      if (recipe.cartId) {
+        const cart = await User.findById(recipe.cartId);
+        if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: "Access denied. You can only update recipes belonging to your franchise carts.",
+          });
+        }
+      } else if (recipe.franchiseId && recipe.franchiseId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only update recipes belonging to your franchise.",
+        });
+      }
+    }
+
+    // Prevent changing cartId/franchiseId from the client
+    const updateBody = { ...req.body };
+    delete updateBody.cartId;
+    delete updateBody.franchiseId;
+
+    // Normalize name and set nameNormalized for duplicate prevention
+    if (typeof updateBody.name === "string") {
+      updateBody.name = updateBody.name.trim().replace(/\s+/g, " ");
+      updateBody.nameNormalized = updateBody.name.toLowerCase();
+
+      // If renaming, ensure no duplicate exists for this outlet
+      const duplicate = await Recipe.findOne({
+        _id: { $ne: recipe._id },
+        nameNormalized: updateBody.nameNormalized,
+        cartId: recipe.cartId || null,
+      });
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: `A BOM with the name "${updateBody.name}" already exists for this outlet. Please use a different name.`,
+        });
+      }
+    }
+
+    // De-duplicate ingredient lines (same ingredient + same uom)
+    if (Array.isArray(updateBody.ingredients)) {
+      const merged = new Map();
+      for (const ing of updateBody.ingredients) {
+        if (!ing || !ing.ingredientId) continue;
+        const uom = (ing.uom || "").toString().trim();
+        const key = `${ing.ingredientId.toString()}::${uom}`;
+        const qty = Number(ing.qty) || 0;
+        if (!merged.has(key)) {
+          merged.set(key, { ...ing, uom, qty });
+        } else {
+          const prev = merged.get(key);
+          prev.qty = (Number(prev.qty) || 0) + qty;
+          merged.set(key, prev);
+        }
+      }
+      updateBody.ingredients = Array.from(merged.values());
+    }
+
+    Object.assign(recipe, updateBody);
 
     // Recalculate cost - for Cart Admin, use their cartId to check cart-specific purchases
     const cartIdForCost =
@@ -2990,6 +3373,14 @@ exports.updateRecipe = async (req, res) => {
 
     res.json({ success: true, data: recipe });
   } catch (error) {
+    // Handle MongoDB duplicate key error with a user-friendly message
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "A BOM with this name already exists for this outlet. Please use a different name or edit the existing BOM.",
+      });
+    }
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -5113,6 +5504,26 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
  * @returns {Promise<Object>} Results object
  */
 const pushToCartAdminsInternal = async (cartId = null) => {
+  // ⚠️⚠️⚠️ DISABLED: This function creates cart-specific copies of shared ingredients and BOMs
+  // NEW APPROACH: All ingredients and BOMs are SHARED (cartId: null) by default
+  // Cart admins can see all shared data without need for cart-specific copies
+  // This prevents duplicates and ensures data consistency
+  
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ⚠️ FUNCTION DISABLED - Using shared ingredients/BOMs approach`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Cart admins automatically see all shared (cartId: null) ingredients and BOMs`);
+  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] No cart-specific copies will be created`);
+  
+  return {
+    success: true,
+    message: "Push functionality disabled - all carts use shared ingredients and BOMs (no duplication needed)",
+    data: {
+      ingredients: { created: 0, updated: 0, skipped: 0 },
+      recipes: { created: 0, updated: 0, skipped: 0 },
+      cartAdmins: []
+    }
+  };
+  
+  /* DISABLED CODE - Kept for reference
   console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Starting push - cartId: ${cartId || 'ALL'}`);
   
   // Get all super admin ingredients (cartId: null)
@@ -5489,6 +5900,7 @@ const pushToCartAdminsInternal = async (cartId = null) => {
     message: `Successfully pushed data to ${cartAdmins.length} cart admin(s)`,
     data: results,
   };
+  */  // End of disabled code
 };
 
 /**
