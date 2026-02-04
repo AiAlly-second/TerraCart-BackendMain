@@ -15,7 +15,7 @@ const WeightedAverageService = require("./weightedAverageService");
 const InventoryTransactionV2 = require("../../models/costing-v2/inventoryTransactionModel");
 
 /**
- * Consume ingredients for an order when it's marked as Ready, Paid, Finalized, or Completed
+ * Consume ingredients for an order when it's marked as Preparing, Ready, Paid, Finalized, or Completed
  * Processes all items in the order (dine-in, takeaway, and converted-to-takeaway items)
  * Uses ONLY the NEW costing-v2 system (Finances Panel)
  * @param {Object} order - Order document (can be DINE_IN or TAKEAWAY)
@@ -204,12 +204,12 @@ async function consumeIngredientsForOrder(order, userId) {
           // Skip if menu item has no recipe
           if (!menuItem.recipeId) {
             console.warn(
-              `[COSTING] Menu item "${itemName}" has no recipe linked. Skipping consumption.`
+              `[COSTING] Menu item "${itemName}" has no recipe linked. Skipping consumption. (ID: ${menuItem._id})`
             );
             consumptionSummary.errors.push({
               item: itemName,
               error:
-                "Menu item has no recipe linked. Please link a recipe to this menu item in Finances → Menu Items.",
+                `Menu item "${itemName}" exists in Finances but has no recipe linked.`,
             });
             continue;
           }
@@ -284,17 +284,10 @@ async function consumeIngredientsForOrder(order, userId) {
                 }
               }
 
-              // Check if sufficient stock available
-              if (ingredient.qtyOnHand < qtyInBaseUnit) {
-                const errorMsg = `Insufficient stock for ${ingredient.name}. Available: ${ingredient.qtyOnHand} ${ingredient.baseUnit}, Required: ${qtyInBaseUnit} ${ingredient.baseUnit}`;
-                console.error(`[COSTING] ${errorMsg}`);
-                consumptionSummary.errors.push({
-                  item: itemName,
-                  ingredient: ingredient.name,
-                  error: errorMsg,
-                });
-                continue;
-              }
+              // BRUTE FORCE: Skip stock check and force consumption
+              // if (ingredient.qtyOnHand < qtyInBaseUnit) { ... } -> Removed checks
+              
+              console.log(`[COSTING] Consuming ${qtyInBaseUnit} ${ingredient.baseUnit} of ${ingredient.name} (Available: ${ingredient.qtyOnHand}) - Brute force mode`);
 
               // Consume using weighted average
               const consumeResult = await WeightedAverageService.consume(
@@ -303,7 +296,8 @@ async function consumeIngredientsForOrder(order, userId) {
                 "order",
                 order._id,
                 userId,
-                cartId
+                cartId,
+                true // allowNegativeStock: true (Brute Force)
               );
 
               // Create inventory transaction regarding this KOT (V2 system)

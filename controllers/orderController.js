@@ -1756,14 +1756,17 @@ const finalizeOrder = async (req, res) => {
     await order.save();
 
     // Consume ingredients for costing
-    if (req.user) {
-      consumeIngredientsForOrder(order, req.user._id)
-        .then(result => {
-           if (result.success) console.log(`[COSTING] Finalized order ${order._id} consumption success`);
-           else console.warn(`[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`);
-        })
-        .catch(err => console.error(`[COSTING] Finalized order ${order._id} consumption error:`, err));
-    }
+    // We do this even if req.user is missing (using fallback ID) to ensure stock is always accurate
+    const userId = req.user ? req.user._id : "SYSTEM";
+    
+    console.log(`[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`);
+    
+    consumeIngredientsForOrder(order, userId)
+      .then(result => {
+         if (result.success) console.log(`[COSTING] Finalized order ${order._id} consumption success`);
+         else console.warn(`[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`);
+      })
+      .catch(err => console.error(`[COSTING] Finalized order ${order._id} consumption error:`, err));
 
     // Release table when order is finalized
     const io = req.app.get("io");
@@ -2376,31 +2379,45 @@ const updateOrderStatus = async (req, res) => {
     // Update local order object for socket emission
     Object.assign(order, updatedOrder);
 
-    // Automatically consume ingredients when order is marked as Ready, Paid, Finalized, or Completed (for takeaway)
-    // This ensures ingredients are consumed when order is sold, even if it skips "Ready" status
+    // Automatically consume ingredients when order is marked as Preparing, Ready, Paid, Finalized, or Completed
+    // This ensures ingredients are consumed when order starts being prepared
     // Run in background to not block status update response
-    const shouldConsumeIngredients =
-      (status === "Ready" ||
-        status === "Paid" ||
-        status === "Finalized" ||
-        status === "Completed" ||
-        status === "Served" ||
-        status === "Exit") &&
-      req.user;
+    const consumptionTriggerStatuses = [
+      "Preparing", 
+      "Ready", 
+      "Paid", 
+      "Finalized", 
+      "Completed", 
+      "Served", 
+      "Exit"
+    ];
+    
+    const shouldConsumeIngredients = consumptionTriggerStatuses.includes(status);
 
     if (shouldConsumeIngredients) {
+      // Use req.user._id if available, otherwise use "SYSTEM" or fallback
+      const userId = req.user ? req.user._id : "SYSTEM";
+      
+      console.log(`[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`);
+
       // Run ingredient consumption in background (non-blocking)
-      consumeIngredientsForOrder(updatedOrder, req.user._id)
+      consumeIngredientsForOrder(updatedOrder, userId)
         .then((consumptionResult) => {
           if (consumptionResult.success) {
             console.log(
               `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`
             );
           } else {
-            console.warn(
-              `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
-              consumptionResult.error || consumptionResult.message
-            );
+            // It's normal to have "already processed" or "no items" - log as info, not error/warn
+            const isBenign = consumptionResult.alreadyProcessed || consumptionResult.message?.includes("No new items");
+             if (isBenign) {
+                console.log(`[COSTING] ℹ️ Consumption skipped for ${order._id}: ${consumptionResult.message}`);
+             } else {
+                console.warn(
+                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
+                  consumptionResult.error || consumptionResult.message
+                );
+             }
           }
         })
         .catch((consumptionError) => {
