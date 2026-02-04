@@ -34,6 +34,15 @@ const recipeSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // Normalized name for duplicate prevention (case/space insensitive)
+    // Example: "  Milk  Tea " -> "milk tea"
+    nameNormalized: {
+      type: String,
+      required: true,
+      trim: true,
+      lowercase: true,
+      index: true,
+    },
     yieldPercent: {
       type: Number,
       required: true,
@@ -104,8 +113,21 @@ const recipeSchema = new mongoose.Schema(
 // Indexes
 recipeSchema.index({ name: 1 });
 recipeSchema.index({ isActive: 1 });
-// Unique index: prevent duplicate BOM names for the same outlet
-recipeSchema.index({ name: 1, cartId: 1 }, { unique: true });
+// Unique index: prevent duplicate BOM names for the same outlet (case-insensitive via nameNormalized)
+recipeSchema.index({ nameNormalized: 1, cartId: 1 }, { unique: true });
+
+// Keep nameNormalized in sync
+recipeSchema.pre("validate", function (next) {
+  try {
+    const raw = typeof this.name === "string" ? this.name : "";
+    const normalized = raw.trim().replace(/\s+/g, " ").toLowerCase();
+    this.name = raw.trim().replace(/\s+/g, " ");
+    this.nameNormalized = normalized;
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
 // Method to calculate recipe cost
 // @param {String} cartId - Optional cart ID to check for cart-specific purchases
@@ -232,28 +254,45 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       }).sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
-        // This ensures BOM cost matches purchase price exactly (same as inventory)
-        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-          // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        // CRITICAL: Validate purchase has actual cost data AND valid quantity
+        const hasValidQty = (lastPurchase.qty != null && lastPurchase.qty > 0) ||
+                           (lastPurchase.qtyInBaseUnit != null && lastPurchase.qtyInBaseUnit > 0);
+        const hasValidCost = (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) ||
+                             (lastPurchase.costAllocated != null && lastPurchase.costAllocated > 0);
+        
+        if (!hasValidQty || !hasValidCost) {
+          // Purchase transaction exists but has no valid cost or quantity - treat as no purchase
+          console.log(`[BOM COST] Purchase transaction found but invalid (qty: ${hasValidQty}, cost: ${hasValidCost}) for ingredient ${ingredient.name}, cartId: ${cartId}`);
+          ingredientCost = 0;
         } else {
-          // Fallback: calculate from costAllocated
-          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+          // This ensures BOM cost matches purchase price exactly (same as inventory)
+          if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+            // Use exact purchase price - convert to base unit
+            const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } else {
+            // Fallback: calculate from costAllocated
+            const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+            const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+            if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+              ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+            } else {
+              ingredientCost = 0; // Invalid purchase data
+            }
           }
         }
+      } else {
+        // No purchase transaction found - cost remains 0
+        ingredientCost = 0;
       }
       
-      // Fallback to ingredient's currentCostPerBaseUnit if no purchase found
-      if (ingredientCost <= 0) {
-        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-      }
+      // CART ISOLATION: Do NOT fall back to global cost for cart-specific ingredients
+      // If this cart has no purchases for its own ingredients, cost should remain 0
+      // This ensures strict cart-level cost isolation
     } else if (cartId) {
       // Shared ingredient with cartId - find last purchase for this cart
+      // CRITICAL CART ISOLATION: Only use cart's own purchases, never fall back to global costs
       const lastPurchase = await InventoryTransactionV2.findOne({
         ingredientId: item.ingredientId,
         cartId: cartId,
@@ -262,55 +301,106 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       }).sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
-        // This ensures BOM cost matches purchase price exactly (same as inventory)
-        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-          // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        // CRITICAL: Validate purchase has actual cost data AND valid quantity
+        const hasValidQty = (lastPurchase.qty != null && lastPurchase.qty > 0) ||
+                           (lastPurchase.qtyInBaseUnit != null && lastPurchase.qtyInBaseUnit > 0);
+        const hasValidCost = (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) ||
+                             (lastPurchase.costAllocated != null && lastPurchase.costAllocated > 0);
+        
+        if (!hasValidQty || !hasValidCost) {
+          // Purchase transaction exists but has no valid cost or quantity - treat as no purchase
+          console.log(`[BOM COST] Purchase transaction found but invalid (qty: ${hasValidQty}, cost: ${hasValidCost}) for ingredient ${ingredient.name}, cartId: ${cartId}`);
+          ingredientCost = 0;
         } else {
-          // Fallback: calculate from costAllocated
-          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+          // This ensures BOM cost matches purchase price exactly (same as inventory)
+          if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+            // Use exact purchase price - convert to base unit
+            const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } else {
+            // Fallback: calculate from costAllocated
+            const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+            const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+            if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+              ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+            } else {
+              ingredientCost = 0; // Invalid purchase data
+            }
           }
         }
+      } else {
+        // No purchase transaction found - cost remains 0
+        ingredientCost = 0;
       }
       
-      // Fallback to global cost if no cart-specific purchase found
-      if (ingredientCost <= 0) {
-        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
-      }
+      // CART ISOLATION: Do NOT fall back to global cost
+      // If this cart has no purchases, cost should remain 0 (ingredient will be skipped)
+      // This ensures each cart only sees costs from their own purchases
     } else {
-      // Global/shared ingredient - find last purchase (any cart)
-      const lastPurchase = await InventoryTransactionV2.findOne({
+      // Global/shared ingredient - find last purchase
+      // CRITICAL: If cartId is provided (cart admin), only use purchases from that cart
+      // If cartId is null (super admin viewing global), use any purchase
+      const purchaseFilter = {
         ingredientId: item.ingredientId,
         type: "IN",
         refType: "purchase",
-      }).sort({ date: -1 }); // Sort by date descending to get most recent
+      };
+      
+      // For cart admin, only use their own purchases even for shared ingredients
+      if (cartId) {
+        purchaseFilter.cartId = cartId;
+      }
+      
+      const lastPurchase = await InventoryTransactionV2.findOne(purchaseFilter)
+        .sort({ date: -1 }); // Sort by date descending to get most recent
       
       if (lastPurchase) {
-        // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
-        // This ensures BOM cost matches purchase price exactly (same as inventory)
-        if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
-          // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+        // CRITICAL: Validate purchase has actual cost data AND valid quantity
+        const hasValidQty = (lastPurchase.qty != null && lastPurchase.qty > 0) ||
+                           (lastPurchase.qtyInBaseUnit != null && lastPurchase.qtyInBaseUnit > 0);
+        const hasValidCost = (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) ||
+                             (lastPurchase.costAllocated != null && lastPurchase.costAllocated > 0);
+        
+        if (!hasValidQty || !hasValidCost) {
+          // Purchase transaction exists but has no valid cost or quantity - treat as no purchase
+          console.log(`[BOM COST] Purchase transaction found but invalid (qty: ${hasValidQty}, cost: ${hasValidCost}) for ingredient ${ingredient.name}, cartId: ${cartId || 'global'}`);
+          ingredientCost = 0;
         } else {
-          // Fallback: calculate from costAllocated
-          const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
-          const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
-          if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
-            ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+          // CRITICAL: Use exact unitPrice from purchase if available, otherwise calculate from costAllocated
+          // This ensures BOM cost matches purchase price exactly (same as inventory)
+          if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
+            // Use exact purchase price - convert to base unit
+            const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } else {
+            // Fallback: calculate from costAllocated
+            const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
+            const lastPurchaseCostAllocated = lastPurchase.costAllocated || 0;
+            if (lastPurchaseQty > 0 && lastPurchaseCostAllocated > 0) {
+              ingredientCost = lastPurchaseCostAllocated / lastPurchaseQty;
+            } else {
+              ingredientCost = 0; // Invalid purchase data
+            }
           }
         }
+      } else {
+        // No purchase transaction found - cost remains 0
+        ingredientCost = 0;
       }
       
-      // Fallback to ingredient's currentCostPerBaseUnit if no purchase found
-      if (ingredientCost <= 0) {
-        ingredientCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+      // CRITICAL FIX: For cart admin (cartId provided), NEVER use fallback to currentCostPerBaseUnit
+      // Cart admin should only see costs from their own purchases
+      // Only use fallback for super admin viewing global recipes (cartId is null)
+      if (ingredientCost <= 0 && !cartId) {
+        // Only fallback to currentCostPerBaseUnit if no cartId (super admin global view)
+        // But only if ingredient actually has a valid currentCostPerBaseUnit (> 0)
+        const fallbackCost = Number(ingredient.currentCostPerBaseUnit) || 0;
+        if (fallbackCost > 0) {
+          ingredientCost = fallbackCost;
+        }
       }
+      // If cartId is provided and no purchase found, ingredientCost remains 0 (will be skipped)
     }
 
     if (ingredientCost <= 0) {
@@ -390,7 +480,8 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
 
   // If no valid costs (no purchases made for any ingredients),
   // set BOM cost to 0 explicitly
-  if (!hasAnyValidCosts || totalCost === 0) {
+  // Also treat very small costs (< 0.01) as zero to handle floating point precision issues
+  if (!hasAnyValidCosts || totalCost === 0 || totalCost < 0.01) {
     this.totalCostCached = 0;
     this.costPerPortion = 0;
     this.lastCostUpdate = new Date();

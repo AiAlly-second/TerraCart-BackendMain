@@ -2644,13 +2644,30 @@ const confirmPaymentByCustomer = async (req, res) => {
     order.paidAt = new Date();
     await order.save();
 
-    // Consume ingredients for costing (user is "customer" via QR)
-    consumeIngredientsForOrder(order, "customer")
-      .then(result => {
-         if (result.success) console.log(`[COSTING] Customer paid order ${order._id} consumption success`);
-         else console.warn(`[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`);
-      })
-      .catch(err => console.error(`[COSTING] Customer paid order ${order._id} consumption error:`, err));
+    // Consume ingredients for costing (user is "customer" via QR -> attribute to cart admin)
+    // Use cartId as the user, since cartId points to the User (cart admin)
+    const userId = order.cartId || order.cafeId;
+    if (userId) {
+      consumeIngredientsForOrder(order, userId)
+        .then((result) => {
+          if (result.success)
+            console.log(
+              `[COSTING] Customer paid order ${order._id} consumption success`
+            );
+          else
+            console.warn(
+              `[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`
+            );
+        })
+        .catch((err) =>
+          console.error(
+            `[COSTING] Customer paid order ${order._id} consumption error:`,
+            err
+          )
+        );
+    } else {
+        console.warn(`[COSTING] Skipping consumption for customer payment - no cartId on order ${order._id}`);
+    }
 
     // Create or update payment record
     const { payment, created } = await ensurePaymentRecord(order, {

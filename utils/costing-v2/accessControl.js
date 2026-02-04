@@ -71,9 +71,17 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
           newFilter.$or = cartIdConditions;
         }
         
-        // Replace filter with newFilter
+        // CRITICAL: Ensure the filter is properly structured
+        // Replace filter with newFilter completely
         Object.keys(filter).forEach(key => delete filter[key]);
         Object.assign(filter, newFilter);
+        
+        // Additional validation: ensure cartId conditions are always included
+        // This prevents edge cases where the filter might not include shared ingredients
+        if (!filter.$or && !filter.$and) {
+          // Fallback: if somehow the filter is empty, set it to cartId conditions
+          filter.$or = cartIdConditions;
+        }
         
         // Debug logging with actual ObjectId values
         console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId:`, userCartId);

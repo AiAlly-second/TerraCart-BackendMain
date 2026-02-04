@@ -27,6 +27,18 @@ exports.protect = async (req, res, next) => {
         });
       }
 
+      // Check token version - if tokenVersion in token doesn't match user's current tokenVersion,
+      // the token was invalidated by "logout from all devices"
+      const tokenVersion = decoded.tokenVersion !== undefined ? decoded.tokenVersion : 0;
+      const userTokenVersion = req.user.tokenVersion !== undefined ? req.user.tokenVersion : 0;
+      
+      if (tokenVersion !== userTokenVersion) {
+        return res.status(401).json({ 
+          message: 'Session invalidated. Please login again.',
+          code: 'TOKEN_VERSION_MISMATCH'
+        });
+      }
+
       // For mobile app users, populate cafeId and employeeId if not already set
       if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
         // If cafeId is not set, try to get it from employeeId or Employee lookup
@@ -209,6 +221,14 @@ exports.optionalProtect = async (req, res, next) => {
       req.user = await User.findById(decoded.id).select('-password');
       // Continue even if user not found (for public access)
       if (req.user) {
+        // Check token version if user exists
+        const tokenVersion = decoded.tokenVersion !== undefined ? decoded.tokenVersion : 0;
+        const userTokenVersion = req.user.tokenVersion !== undefined ? req.user.tokenVersion : 0;
+        
+        // If token version doesn't match, don't set req.user (treat as unauthenticated)
+        if (tokenVersion !== userTokenVersion) {
+          req.user = null;
+        }
         // For mobile app users, populate cafeId and employeeId if not already set
         if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
           if (!req.user.cafeId || !req.user.employeeId) {

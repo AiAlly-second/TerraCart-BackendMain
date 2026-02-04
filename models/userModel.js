@@ -98,6 +98,9 @@ const userSchema = new mongoose.Schema(
       port: { type: Number, default: 9100 },
       enabled: { type: Boolean, default: true },
     },
+    // Token version for logout from all devices
+    // Incrementing this invalidates all existing tokens
+    tokenVersion: { type: Number, default: 0 },
   },
   {
     timestamps: true,
