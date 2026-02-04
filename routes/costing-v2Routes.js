@@ -144,17 +144,15 @@ router.post(
 );
 
 // ==================== INVENTORY ====================
-// Get inventory from costing-v2 ingredients for mobile app
+// Get inventory from costing-v2 ingredients (cook + manager for mobile app; admin roles for web)
 router.get(
   "/inventory",
   authorize([
     "super_admin",
     "franchise_admin",
     "admin",
-    "waiter",
-    "cook",
-    "captain",
     "manager",
+    "cook",
   ]),
   getCostingInventory
 );

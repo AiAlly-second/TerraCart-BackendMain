@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const InventoryItem = require("../models/inventoryModel");
 const User = require("../models/userModel");
 const Employee = require("../models/employeeModel");
@@ -52,23 +53,62 @@ exports.getAllInventory = async (req, res) => {
     } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
       query.franchiseId = req.user._id;
     } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cartId from employee record
-      const cartId = await getCafeId(req.user); // Function returns cartId value
+      // Mobile users - get cartId from employee record (Employee uses cartId)
+      let cartId = await getCafeId(req.user);
+      const franchiseId = req.user?.franchiseId || (await Employee.findOne({
+        $or: [{ email: req.user?.email?.toLowerCase() }, { userId: req.user?._id }]
+      }).lean())?.franchiseId;
+
+      console.log('[INVENTORY] getAllInventory - Mobile user:', req.user?.role, 'userId:', req.user?._id, 'cartId:', cartId?.toString(), 'franchiseId:', franchiseId?.toString());
+
       if (cartId) {
-        query.cartId = cartId; // Inventory model uses cartId, not cafeId
+        // Ensure ObjectId for query (handles string/ObjectId mismatch)
+        query.cartId = mongoose.Types.ObjectId.isValid(cartId)
+          ? (cartId instanceof mongoose.Types.ObjectId ? cartId : new mongoose.Types.ObjectId(cartId.toString()))
+          : cartId;
+      } else {
+        console.log('[INVENTORY] getAllInventory - No cartId for mobile user, returning empty.');
+        return res.json({ success: true, data: [] });
       }
     } else if (req.user?.role === "employee") {
-      const cartId = await getCafeId(req.user); // Function returns cartId value
+      const cartId = await getCafeId(req.user);
       if (cartId) {
-        query.cartId = cartId; // Inventory model uses cartId, not cafeId
+        query.cartId = mongoose.Types.ObjectId.isValid(cartId)
+          ? (cartId instanceof mongoose.Types.ObjectId ? cartId : new mongoose.Types.ObjectId(cartId.toString()))
+          : cartId;
       }
     }
 
-    const items = await InventoryItem.find(query)
+    let items = await InventoryItem.find(query)
       .sort({ category: 1, name: 1 })
       .lean();
-    
-    console.log('[INVENTORY] getAllInventory - Found items:', items.length);
+
+    console.log('[INVENTORY] getAllInventory - Query:', JSON.stringify(query), 'Found items:', items.length);
+
+    // Fallback for mobile users: if 0 items by cartId, try franchiseId (items may have wrong cartId)
+    if (items.length === 0 && query.cartId && ["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
+      const franchiseId = req.user?.franchiseId || (await Employee.findOne({
+        $or: [{ email: req.user?.email?.toLowerCase() }, { userId: req.user?._id }]
+      }).lean())?.franchiseId;
+
+      if (franchiseId) {
+        const franchiseQuery = { franchiseId: mongoose.Types.ObjectId.isValid(franchiseId) ? (franchiseId instanceof mongoose.Types.ObjectId ? franchiseId : new mongoose.Types.ObjectId(franchiseId.toString())) : franchiseId };
+        items = await InventoryItem.find(franchiseQuery)
+          .sort({ category: 1, name: 1 })
+          .lean();
+        console.log('[INVENTORY] getAllInventory - Fallback by franchiseId:', franchiseId.toString(), 'Found items:', items.length);
+        if (items.length > 0) {
+          console.log('[INVENTORY] getAllInventory - Items have wrong cartId. Run: node scripts/fix-inventory-cartid.js', query.cartId.toString(), 'to fix.');
+        }
+      }
+    }
+
+    if (items.length === 0 && query.cartId) {
+      const totalInDb = await InventoryItem.countDocuments({});
+      const forThisCart = await InventoryItem.countDocuments({ cartId: query.cartId });
+      const distinctCartIds = await InventoryItem.distinct('cartId');
+      console.log('[INVENTORY] getAllInventory - DB has', totalInDb, 'total items,', forThisCart, 'for cartId', query.cartId.toString(), '| Item cartIds in DB:', distinctCartIds.map((id) => id?.toString()).filter(Boolean));
+    }
 
     // Return in consistent format for both admin app and admin site
     return res.json({

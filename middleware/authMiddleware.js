@@ -59,15 +59,17 @@ exports.protect = async (req, res, next) => {
           }
           
           if (employee) {
-            // Populate cafeId and employeeId on req.user for use in controllers
-            req.user.cafeId = req.user.cafeId || employee.cafeId;
+            // Employee model uses cartId; User model uses cafeId for backward compatibility
+            const employeeCartId = employee.cartId || employee.cafeId;
+            req.user.cafeId = req.user.cafeId || employeeCartId;
+            req.user.cartId = req.user.cartId || employeeCartId;
             req.user.employeeId = req.user.employeeId || employee._id;
             
             // Update User model if fields are missing (one-time update)
             if (!req.user.cafeId || !req.user.employeeId) {
               const updateData = {};
-              if (!req.user.cafeId && employee.cafeId) {
-                updateData.cafeId = employee.cafeId;
+              if (!req.user.cafeId && employeeCartId) {
+                updateData.cafeId = employeeCartId;
               }
               if (!req.user.employeeId && employee._id) {
                 updateData.employeeId = employee._id;
@@ -75,7 +77,8 @@ exports.protect = async (req, res, next) => {
               if (Object.keys(updateData).length > 0) {
                 await User.findByIdAndUpdate(req.user._id, updateData);
                 // Update req.user object
-                req.user.cafeId = req.user.cafeId || employee.cafeId;
+                req.user.cafeId = req.user.cafeId || employeeCartId;
+                req.user.cartId = req.user.cartId || employeeCartId;
                 req.user.employeeId = req.user.employeeId || employee._id;
               }
             }
@@ -241,7 +244,9 @@ exports.optionalProtect = async (req, res, next) => {
             }
             
             if (employee) {
-              req.user.cafeId = req.user.cafeId || employee.cafeId;
+              const employeeCartId = employee.cartId || employee.cafeId;
+              req.user.cafeId = req.user.cafeId || employeeCartId;
+              req.user.cartId = req.user.cartId || employeeCartId;
               req.user.employeeId = req.user.employeeId || employee._id;
             }
           }
