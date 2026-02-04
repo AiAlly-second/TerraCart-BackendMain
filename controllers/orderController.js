@@ -3164,6 +3164,66 @@ const convertToTakeaway = async (req, res) => {
   }
 };
 
+// ---------------- UPDATE PRINT STATUS ----------------
+const updatePrintStatus = async (req, res) => {
+  try {
+    const { kotPrinted, billPrinted } = req.body;
+    if (kotPrinted === undefined && billPrinted === undefined) {
+      return res.status(400).json({
+        message: "At least one of kotPrinted or billPrinted is required",
+      });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Access control: admin and manager only (per plan)
+    if (req.user && req.user.role === "admin" && req.user._id) {
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cafe" });
+      }
+    } else if (req.user && req.user.role === "manager") {
+      if (!req.user.cafeId && !req.user.cartId) {
+        return res
+          .status(403)
+          .json({ message: "No cart/kiosk assigned to your account" });
+      }
+      const userCartId = (req.user.cartId || req.user.cafeId).toString();
+      if (!order.cartId || order.cartId.toString() !== userCartId) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cart/kiosk" });
+      }
+    }
+    // franchise_admin and super_admin not in authorize list per plan
+
+    const update = {};
+    if (kotPrinted === true) update["printStatus.kotPrinted"] = true;
+    if (billPrinted === true) update["printStatus.billPrinted"] = true;
+
+    if (Object.keys(update).length === 0) {
+      return res.json(order);
+    }
+
+    const updated = await Order.findByIdAndUpdate(
+      req.params.id,
+      { $set: update },
+      { new: true }
+    )
+      .populate("table")
+      .lean();
+
+    return res.json(updated);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   createOrder,
   addKot,
@@ -3178,4 +3238,5 @@ module.exports = {
   releaseTableForOrder,
   returnItems,
   convertToTakeaway,
+  updatePrintStatus,
 };

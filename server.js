@@ -116,6 +116,7 @@ app.use("/api/kiosk-owner", require("./routes/kioskOwnerRoutes"));
 app.use("/api/carts", require("./routes/cartRoutes"));
 app.use("/api/employees", require("./routes/employeeRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
+app.use("/api/printer-config", require("./routes/printerConfigRoutes"));
 app.use("/api/employee-schedule", require("./routes/employeeScheduleRoutes"));
 app.use("/api/employee-skills", require("./routes/employeeSkillsRoutes"));
 app.use("/api/admin/costing", require("./routes/costingRoutes"));
