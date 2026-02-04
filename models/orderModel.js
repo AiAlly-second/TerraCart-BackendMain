@@ -103,6 +103,10 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     cancellationReason: { type: String },
+    printStatus: {
+      kotPrinted: { type: Boolean, default: false },
+      billPrinted: { type: Boolean, default: false },
+    },
   },
   { timestamps: true }
 );
