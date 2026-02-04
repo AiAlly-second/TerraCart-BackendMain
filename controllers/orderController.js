@@ -73,19 +73,44 @@ function buildKot(items) {
         `Item at index ${index} (${it.name}) has invalid quantity: ${it.quantity}`
       );
     }
-    const price = Number(it.price);
+    let price = Number(it.price);
     if (!Number.isFinite(price) || price < 0) {
       throw new Error(
         `Item at index ${index} (${it.name}) has invalid price: ${it.price}`
       );
     }
 
-    return {
+    // Add extras prices to item price
+    const itemExtras = [];
+    if (Array.isArray(it.extras) && it.extras.length > 0) {
+      it.extras.forEach((extra, extraIndex) => {
+        if (!extra || typeof extra !== "object") return;
+        if (!extra.name || typeof extra.name !== "string") return;
+        
+        const extraPrice = Number(extra.price);
+        if (Number.isFinite(extraPrice) && extraPrice >= 0) {
+          price += extraPrice; // Add extra price to item price
+          itemExtras.push({
+            name: String(extra.name).trim(),
+            price: extraPrice,
+          });
+        }
+      });
+    }
+
+    const itemData = {
       name: String(it.name).trim(),
       quantity: quantity,
       price: toPaise(price),
       returned: Boolean(it.returned),
     };
+
+    // Include extras in order if any were added
+    if (itemExtras.length > 0) {
+      itemData.extras = itemExtras;
+    }
+
+    return itemData;
   });
 
   const subtotalP = lines.reduce((s, it) => s + it.price * it.quantity, 0);
@@ -982,6 +1007,43 @@ const createOrder = async (req, res) => {
     }
 
     // Order created successfully
+
+    // Consume ingredients from inventory immediately when order is created
+    // This ensures inventory is reduced as soon as order is placed
+    // Run in background (non-blocking) to not slow down order creation
+    const userIdForConsumption = req.user?._id || order.cartId;
+    if (userIdForConsumption) {
+      consumeIngredientsForOrder(order, userIdForConsumption)
+        .then((consumptionResult) => {
+          if (consumptionResult.success) {
+            console.log(
+              `[COSTING] ✅ Successfully consumed ingredients for newly created order ${order._id}`
+            );
+          } else {
+            console.warn(
+              `[COSTING] ⚠️ Failed to consume ingredients for order ${order._id}:`,
+              consumptionResult.error || consumptionResult.message
+            );
+            // Log detailed error for debugging
+            if (consumptionResult.summary?.errors?.length > 0) {
+              console.warn(
+                `[COSTING] Consumption errors:`,
+                consumptionResult.summary.errors
+              );
+            }
+          }
+        })
+        .catch((consumptionError) => {
+          console.error(
+            `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
+            consumptionError
+          );
+        });
+    } else {
+      console.warn(
+        `[COSTING] ⚠️ Cannot consume ingredients for order ${order._id}: No user ID available`
+      );
+    }
 
     // Only update table status for dine-in orders
     if (!isTakeaway && tableDoc) {
@@ -2646,7 +2708,7 @@ const confirmPaymentByCustomer = async (req, res) => {
 
     // Consume ingredients for costing (user is "customer" via QR -> attribute to cart admin)
     // Use cartId as the user, since cartId points to the User (cart admin)
-    const userId = order.cartId || order.cafeId;
+    const userId = order.cartId;
     if (userId) {
       consumeIngredientsForOrder(order, userId)
         .then((result) => {

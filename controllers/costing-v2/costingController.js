@@ -497,10 +497,10 @@ exports.getIngredients = async (req, res) => {
           includeShared: true,
         });
       }
-      ingredients = await Ingredient.find(costingFilter)
-        .populate("preferredSupplierId", "name")
-        .populate("cartId", "name cafeName")
-        .sort({ category: 1, name: 1 });
+    ingredients = await Ingredient.find(costingFilter)
+      .populate("preferredSupplierId", "name")
+      .populate("cartId", "name cafeName")
+      .sort({ category: 1, name: 1 });
     }
     
     // CRITICAL: Log final count before processing
@@ -547,21 +547,21 @@ exports.getIngredients = async (req, res) => {
       console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found with current filter!`);
       console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
       
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-        ? new mongoose.Types.ObjectId(userCartId) 
-        : userCartId;
-      
-      // Check database directly
-      const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
-      const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
+        const userCartId = req.user._id;
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
+          ? new mongoose.Types.ObjectId(userCartId) 
+          : userCartId;
+        
+        // Check database directly
+        const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
+        const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
       const dbCheck2Active = await Ingredient.countDocuments({ cartId: null, isActive: true });
       const dbCheck2Inactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
-      const dbCheck3 = await Ingredient.countDocuments({});
-      
-      console.warn(`[GET_INGREDIENTS] Database check:`);
-      console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
-      console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
+        const dbCheck3 = await Ingredient.countDocuments({});
+        
+        console.warn(`[GET_INGREDIENTS] Database check:`);
+        console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
+        console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
       console.warn(`  - Ingredients with cartId=null (all): ${dbCheck2}`);
       console.warn(`  - Ingredients with cartId=null AND isActive=true: ${dbCheck2Active}`);
       console.warn(`  - Ingredients with cartId=null AND isActive=false: ${dbCheck2Inactive}`);
@@ -838,19 +838,19 @@ exports.getIngredients = async (req, res) => {
             }
           } else {
             // For super admin or franchise admin, use stored values (they may have set default values)
-            ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
-            ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
+          ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
+          ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
+          ingredient.lastPurchaseUnitPrice = 0;
+          ingredient.lastPurchaseUom = ingredient.uom;
+          
+          // If stock is 0, ensure cost is 0
+          if (ingredient.qtyOnHand <= 0) {
+            ingredient.currentCostPerBaseUnit = 0;
             ingredient.lastPurchaseUnitPrice = 0;
-            ingredient.lastPurchaseUom = ingredient.uom;
-            
-            // If stock is 0, ensure cost is 0
-            if (ingredient.qtyOnHand <= 0) {
-              ingredient.currentCostPerBaseUnit = 0;
-              ingredient.lastPurchaseUnitPrice = 0;
-            }
-            
-            if (process.env.NODE_ENV === 'development') {
-              console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
+          }
+          
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
             }
           }
           continue; // Skip transaction-based calculation
@@ -1748,7 +1748,7 @@ exports.updateIngredient = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Ingredient not found" });
     }
-    
+
     // CRITICAL: Check if this is a SHARED ingredient (cartId: null)
     const isSharedIngredient = existingIngredient.cartId === null || existingIngredient.cartId === undefined;
     

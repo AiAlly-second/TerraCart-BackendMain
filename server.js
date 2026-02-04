@@ -98,6 +98,7 @@ app.use(rateLimiters.api);
 // Routes
 app.use("/api/users", require("./routes/userRoutes"));
 app.use("/api/menu", require("./routes/menuRoutes"));
+app.use("/api/addons", require("./routes/addonRoutes"));
 app.use("/api/default-menu", require("./routes/defaultMenuRoutes"));
 app.use("/api/orders", require("./routes/orderRoutes"));
 app.use("/api/tables", require("./routes/tableRoutes"));

@@ -2,25 +2,31 @@
  * Order Consumption Service
  * Automatically consumes ingredients from inventory when orders are ready/paid/completed
  * Handles both DINE_IN and TAKEAWAY orders, including items converted from dine-in to takeaway
+ * Uses ONLY the NEW costing-v2 system (Finances Panel)
  */
 
+const mongoose = require("mongoose");
+
+// Costing V2 System Models (NEW Finances Panel)
 const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
 const RecipeV2 = require("../../models/costing-v2/recipeModel");
 const IngredientV2 = require("../../models/costing-v2/ingredientModel");
 const WeightedAverageService = require("./weightedAverageService");
-const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
+const InventoryTransactionV2 = require("../../models/costing-v2/inventoryTransactionModel");
 
 /**
  * Consume ingredients for an order when it's marked as Ready, Paid, Finalized, or Completed
  * Processes all items in the order (dine-in, takeaway, and converted-to-takeaway items)
+ * Uses ONLY the NEW costing-v2 system (Finances Panel)
  * @param {Object} order - Order document (can be DINE_IN or TAKEAWAY)
  * @param {String} userId - User ID who triggered the consumption
  * @returns {Promise<Object>} Consumption summary
  */
 async function consumeIngredientsForOrder(order, userId) {
   try {
-    // Get cart ID from order - handle both ObjectId and string formats
-    let cartId = order.cartId || order.cafeId;
+    // Get cart ID from order - ONLY use cartId (not cafeId)
+    // Handle both ObjectId and string formats
+    let cartId = order.cartId;
     if (cartId && typeof cartId === "object" && cartId._id) {
       cartId = cartId._id;
     }
@@ -30,24 +36,23 @@ async function consumeIngredientsForOrder(order, userId) {
 
     if (!cartId) {
       console.warn(
-        `[COSTING] Order ${order._id} has no cartId/cafeId, skipping consumption`
+        `[COSTING] Order ${order._id} has no cartId, skipping consumption`
       );
       console.warn(`[COSTING] Order data:`, {
         cartId: order.cartId,
-        cafeId: order.cafeId,
         franchiseId: order.franchiseId,
       });
       return {
         success: false,
-        message: "Order has no cart association",
+        message: "Order has no cartId association",
       };
     }
 
     console.log(`[COSTING] Processing order ${order._id} for cart ${cartId}`);
 
     // Check existing transactions to determine which KOTs are processed (Idempotency + Incremental)
-    // refId can be mixed, so we query carefully. Using the exact order._id value should work if consistent.
-    const existingTransactions = await InventoryTransaction.find({
+    // Only check new costing-v2 system transactions
+    const existingTransactions = await InventoryTransactionV2.find({
       refType: "order",
       refId: order._id,
     }).select('notes').lean();
@@ -126,6 +131,9 @@ async function consumeIngredientsForOrder(order, userId) {
           // Normalize item name for matching (trim and lowercase)
           const normalizedItemName = itemName.trim();
 
+          // Find menu item in NEW costing-v2 system (Finances Panel)
+          console.log(`[COSTING] Checking NEW costing-v2 system (Finances Panel) for "${itemName}"...`);
+          
           // Find menu item by name - try multiple strategies
           // Use cartId to match against cartId in menu items (cartId = cartId for cart admin)
           let menuItem = await MenuItemV2.findOne({
@@ -183,13 +191,12 @@ async function consumeIngredientsForOrder(order, userId) {
 
           if (!menuItem) {
             console.warn(
-              `[COSTING] Menu item not found in costing: "${itemName}" for cart ${cartId}`
+              `[COSTING] Menu item not found in costing-v2 system (Finances Panel): "${itemName}" for cart ${cartId}`
             );
-            // Log truncated suggestions
             consumptionSummary.errors.push({
               item: itemName,
               error:
-                "Menu item not found in costing system. Please add this item to costing menu items.",
+                "Menu item not found in Finances Panel. Please add this item to Finances → Menu Items.",
             });
             continue;
           }
@@ -202,10 +209,12 @@ async function consumeIngredientsForOrder(order, userId) {
             consumptionSummary.errors.push({
               item: itemName,
               error:
-                "Menu item has no recipe linked. Please link a recipe to this menu item.",
+                "Menu item has no recipe linked. Please link a recipe to this menu item in Finances → Menu Items.",
             });
             continue;
           }
+
+          console.log(`[COSTING] ✅ Found "${itemName}" in costing-v2 system (Finances Panel), consuming ingredients...`);
 
           // Get recipe
           const recipe = await RecipeV2.findById(menuItem.recipeId);
@@ -297,8 +306,8 @@ async function consumeIngredientsForOrder(order, userId) {
                 cartId
               );
 
-              // Create inventory transaction regarding this KOT
-              const transaction = new InventoryTransaction({
+              // Create inventory transaction regarding this KOT (V2 system)
+              const transaction = new InventoryTransactionV2({
                 ingredientId: recipeIngredient.ingredientId,
                 type: "OUT",
                 qty: totalQtyToConsume, // Original quantity
@@ -336,6 +345,7 @@ async function consumeIngredientsForOrder(order, userId) {
           }
 
           consumptionSummary.itemsProcessed++;
+          console.log(`[COSTING] ✅ Successfully consumed "${itemName}" from costing-v2 system (Finances Panel)`);
         } catch (itemError) {
           console.error(
             `[COSTING] Error processing item ${itemName} for order ${order._id}:`,

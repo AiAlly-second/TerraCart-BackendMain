@@ -8,6 +8,13 @@ const itemSchema = new mongoose.Schema(
     price: { type: Number, required: true, min: 0 },
     returned: { type: Boolean, default: false },
     convertedToTakeaway: { type: Boolean, default: false },
+    // Extras/add-ons selected for this item
+    extras: [
+      {
+        name: { type: String, required: true },
+        price: { type: Number, required: true, min: 0 },
+      },
+    ],
   },
   { _id: false }
 );
@@ -28,6 +35,17 @@ const orderSchema = new mongoose.Schema(
   {
     _id: { type: String }, // add this line
     tableNumber: { type: String },
+    // Global add-ons selected for this order
+    selectedAddons: [
+      {
+        addonId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Addon",
+        },
+        name: { type: String, required: true },
+        price: { type: Number, required: true, min: 0 },
+      },
+    ],
     table: { type: mongoose.Schema.Types.ObjectId, ref: "Table" },
     serviceType: {
       type: String,

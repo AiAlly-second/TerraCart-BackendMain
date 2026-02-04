@@ -59,6 +59,29 @@ const menuItemSchema = new mongoose.Schema(
       type: Number,
       min: 0,
     },
+    // Extras/Add-ons for this menu item
+    extras: [
+      {
+        name: {
+          type: String,
+          required: true,
+          trim: true,
+        },
+        price: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+        isAvailable: {
+          type: Boolean,
+          default: true,
+        },
+        sortOrder: {
+          type: Number,
+          default: 0,
+        },
+      },
+    ],
     // Cart admin association for data isolation (changed from cafeId to cartId)
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
   },
