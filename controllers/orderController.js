@@ -4,6 +4,7 @@ const Counter = require("../models/countermodel");
 const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
+const Employee = require("../models/employeeModel");
 const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
@@ -2213,6 +2214,101 @@ const addItemsToOrder = async (req, res) => {
   }
 };
 
+// ---------------- ACCEPT ORDER (first-come-first-serve) ----------------
+const acceptOrder = async (req, res) => {
+  try {
+    const orderId = req.params.id;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Only for TAKEAWAY, PICKUP, or DELIVERY orders
+    const allowedServiceTypes = ["TAKEAWAY", "PICKUP", "DELIVERY"];
+    if (!allowedServiceTypes.includes(order.serviceType)) {
+      return res.status(400).json({
+        message: "Order acceptance is only for takeaway, pickup, or delivery orders",
+      });
+    }
+
+    // Only when status is Pending and not yet accepted
+    if (order.status !== "Pending") {
+      return res.status(400).json({
+        message: `Order cannot be accepted (current status: ${order.status})`,
+      });
+    }
+    if (order.acceptedBy && order.acceptedBy.employeeId) {
+      return res.status(409).json({
+        message: `Order already accepted by ${order.acceptedBy.employeeName || "another staff member"}`,
+      });
+    }
+
+    // Check cart access for waiter/captain/manager
+    const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
+    if (!userCartId) {
+      return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+    }
+    if (!order.cartId || order.cartId.toString() !== userCartId) {
+      return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+    }
+
+    // Lookup employee by userId
+    const employee = await Employee.findOne({
+      userId: req.user._id,
+      cartId: order.cartId,
+      isActive: true,
+    });
+    if (!employee) {
+      return res.status(403).json({
+        message: "Employee record not found for your account",
+      });
+    }
+
+    const acceptedBy = {
+      employeeId: employee._id,
+      employeeName: employee.name || "Staff",
+      disability: {
+        hasDisability: employee.disability?.hasDisability ?? false,
+        type: employee.disability?.type || null,
+      },
+      acceptedAt: new Date(),
+    };
+
+    // Atomic update: first to accept wins
+    const updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        status: "Pending",
+        $or: [{ acceptedBy: { $exists: false } }, { acceptedBy: null }],
+      },
+      {
+        $set: {
+          status: "Accepted",
+          acceptedBy,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedOrder) {
+      return res.status(409).json({
+        message: "Order was already accepted by another staff member",
+      });
+    }
+
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && updatedOrder.cartId && emitToCafe) {
+      emitToCafe(io, updatedOrder.cartId.toString(), "order:status:updated", updatedOrder);
+      emitToCafe(io, updatedOrder.cartId.toString(), "orderUpdated", updatedOrder);
+    }
+
+    return res.json(updatedOrder);
+  } catch (err) {
+    console.error("[ORDER] acceptOrder error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // ---------------- UPDATE ORDER STATUS ----------------
 const updateOrderStatus = async (req, res) => {
   try {
@@ -3247,6 +3343,7 @@ module.exports = {
   getOrders,
   getOrderById,
   updateOrderStatus,
+  acceptOrder,
   cancelOrderByCustomer,
   confirmPaymentByCustomer,
   deleteOrder,
