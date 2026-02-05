@@ -265,7 +265,16 @@ exports.getTodayAttendance = async (req, res) => {
     const istNow = getISTNow();
     const now = new Date();
 
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    let hierarchyQuery = await buildHierarchyQuery(req.user);
+    // Manager sees all employees' attendance in their cart (not just their own)
+    if (req.user.role === "manager") {
+      const employee = await Employee.findOne({ userId: req.user._id }).lean()
+        || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      if (managerCartId) {
+        hierarchyQuery = { $or: [{ cartId: managerCartId }, { cafeId: managerCartId }] };
+      }
+    }
     const query = {
       ...hierarchyQuery,
       date: { $gte: today, $lt: tomorrow },
@@ -285,7 +294,15 @@ exports.getTodayAttendance = async (req, res) => {
     console.log('[ATTENDANCE] getTodayAttendance found records:', attendance.length);
 
     // Get all employees in the hierarchy to check for absent employees
-    const employeeQuery = await buildHierarchyQuery(req.user);
+    let employeeQuery = await buildHierarchyQuery(req.user);
+    if (req.user.role === "manager") {
+      const employee = await Employee.findOne({ userId: req.user._id }).lean()
+        || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      if (managerCartId) {
+        employeeQuery = { $or: [{ cartId: managerCartId }, { cafeId: managerCartId }] };
+      }
+    }
     const employees = await Employee.find(employeeQuery)
       .select("_id name employeeRole cafeId franchiseId")
       .lean();
@@ -460,11 +477,20 @@ exports.checkIn = async (req, res) => {
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
-    // Mobile users can only check themselves in
-    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // Mobile users: waiter/cook/captain can only check themselves in; manager can check in employees in their cart
+    if (["waiter", "cook", "captain"].includes(user.role)) {
       const userEmployee = await Employee.findOne({ userId: user._id });
       if (!userEmployee || userEmployee._id.toString() !== targetEmployeeId.toString()) {
         return res.status(403).json({ message: "Access denied. You can only check yourself in." });
+      }
+    }
+    if (user.role === "manager" && employeeId) {
+      // Manager can manual check-in for employees in their cart
+      const managerEmployee = await Employee.findOne({ userId: user._id }).lean();
+      const managerCartId = managerEmployee?.cartId || managerEmployee?.cafeId || user.cartId || user.cafeId;
+      const empCartId = employee.cartId || employee.cafeId;
+      if (!managerCartId || !empCartId || empCartId.toString() !== managerCartId.toString()) {
+        return res.status(403).json({ message: "Access denied. Employee must be in your cart." });
       }
     }
 
@@ -1078,10 +1104,17 @@ exports.updateAttendanceStatus = async (req, res) => {
 
     // Check hierarchy access
     const query = await buildHierarchyQuery(req.user);
-    if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
+    if (req.user.role === "manager") {
+      const employee = await Employee.findOne({ userId: req.user._id }).lean()
+        || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      const attCartId = attendance.cartId || attendance.cafeId;
+      if (!managerCartId || !attCartId || attCartId.toString() !== managerCartId.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
       return res.status(403).json({ message: "Access denied" });
-    }
-    if (query.franchiseId && attendance.franchiseId?.toString() !== query.franchiseId.toString()) {
+    } else if (query.franchiseId && attendance.franchiseId?.toString() !== query.franchiseId.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -1100,6 +1133,34 @@ exports.updateAttendanceStatus = async (req, res) => {
     await attendance.populate("employeeId", "name mobile employeeRole");
 
     return res.json(attendance);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// Delete attendance record (admin, manager - for erroneous records)
+exports.deleteAttendance = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const attendance = await EmployeeAttendance.findById(id);
+    if (!attendance) {
+      return res.status(404).json({ message: "Attendance record not found" });
+    }
+
+    if (req.user.role === "manager") {
+      const employee = await Employee.findOne({ userId: req.user._id }).lean()
+        || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
+      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      const attCartId = attendance.cartId || attendance.cafeId;
+      if (!managerCartId || !attCartId || attCartId.toString() !== managerCartId.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else if (!["admin", "franchise_admin", "super_admin"].includes(req.user.role)) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    await EmployeeAttendance.findByIdAndDelete(id);
+    return res.json({ message: "Attendance record deleted" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

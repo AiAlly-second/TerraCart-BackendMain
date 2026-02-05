@@ -7,9 +7,10 @@ const {
 } = require("../controllers/printerConfigController");
 
 router.use(protect);
-router.use(authorize(["manager"]));
 
-router.get("/", getPrinterConfig);
-router.put("/", savePrinterConfig);
+// GET: waiter, captain, manager (to print KOT/Bill)
+router.get("/", authorize(["waiter", "captain", "manager"]), getPrinterConfig);
+// PUT: manager only (to configure printer)
+router.put("/", authorize(["manager"]), savePrinterConfig);
 
 module.exports = router;

@@ -1784,6 +1784,29 @@ exports.updateIngredient = async (req, res) => {
           // For now, we'll filter out the disallowed fields
         }
       }
+    } else if (req.user.role === "manager") {
+      // Manager - can update ingredients for their cart (same logic as getCostingInventory)
+      let managerCartId = req.user.cartId ?? req.user.cafeId;
+      if (!managerCartId && req.user.employeeId) {
+        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
+        managerCartId = employee?.cartId || employee?.cafeId;
+      }
+      if (!managerCartId) {
+        const employee = await require("../../models/employeeModel").findOne({
+          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
+        }).lean();
+        managerCartId = employee?.cartId || employee?.cafeId;
+      }
+      if (!managerCartId) {
+        return res.status(403).json({ success: false, message: "No cart associated with manager" });
+      }
+      // Manager can update: ingredients with cartId matching their cart, or shared (cartId null)
+      if (existingIngredient.cartId && existingIngredient.cartId.toString() !== managerCartId.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only update ingredients belonging to your cart.",
+        });
+      }
     }
 
     // Decode HTML entities in category field if present
@@ -2386,10 +2409,29 @@ exports.consumeInventory = async (req, res) => {
 
     // For cart admin, always use their own cartId
     // For franchise admin and super admin, use provided cartId or validate
+    // For manager (mobile), get cartId from user or employee
     let finalOutletId = cartId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
+    } else if (req.user.role === "manager") {
+      // Manager - use their cart (from user or employee)
+      if (req.user.cartId) {
+        finalOutletId = req.user.cartId;
+      } else if (req.user.cafeId) {
+        finalOutletId = req.user.cafeId;
+      } else if (req.user.employeeId) {
+        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      } else {
+        const employee = await require("../../models/employeeModel").findOne({
+          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
+        }).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      }
+      if (!finalOutletId) {
+        return res.status(400).json({ success: false, message: "No cart associated with manager" });
+      }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - must provide cartId
       if (!cartId) {
@@ -2467,10 +2509,29 @@ exports.returnToInventory = async (req, res) => {
 
     // For cart admin, always use their own cartId
     // For franchise admin and super admin, use provided cartId or validate
+    // For manager (mobile), get cartId from user or employee
     let finalOutletId = cartId;
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
+    } else if (req.user.role === "manager") {
+      // Manager - use their cart (from user or employee)
+      if (req.user.cartId) {
+        finalOutletId = req.user.cartId;
+      } else if (req.user.cafeId) {
+        finalOutletId = req.user.cafeId;
+      } else if (req.user.employeeId) {
+        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      } else {
+        const employee = await require("../../models/employeeModel").findOne({
+          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
+        }).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      }
+      if (!finalOutletId) {
+        return res.status(400).json({ success: false, message: "No cart associated with manager" });
+      }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - must provide cartId
       if (!cartId) {

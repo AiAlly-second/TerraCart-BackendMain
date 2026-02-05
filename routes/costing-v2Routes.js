@@ -107,7 +107,7 @@ router.post(
 );
 router.put(
   "/ingredients/:id",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   updateIngredient
 );
 router.delete(
@@ -158,12 +158,12 @@ router.get(
 );
 router.post(
   "/inventory/consume",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   consumeInventory
 );
 router.post(
   "/inventory/return",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   returnToInventory
 );
 router.get(

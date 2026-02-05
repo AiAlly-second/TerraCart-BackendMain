@@ -98,9 +98,11 @@ const getDayName = (date) => {
   return dayNames[date.getDay()];
 };
 
-// Helper function to check if task should be shown today based on frequency and work schedule
+// Helper function to check if task should be shown today based on frequency (IST)
+// Frequency is primary: e.g. sat-sun task appears only on Sat-Sun in IST
+// Work schedule is NOT used - task visibility is driven by frequency alone
 const shouldShowTaskToday = (task, employeeSchedule, today) => {
-  // If task has no frequency, show it normally
+  // If task has no frequency, show it normally (handled by caller - dueDate check)
   if (!task.frequency || task.frequency.length === 0) {
     return true;
   }
@@ -108,22 +110,8 @@ const shouldShowTaskToday = (task, employeeSchedule, today) => {
   // Use IST day name for consistency
   const todayDayName = getISTDayName();
   
-  // Check if today is in the frequency list
-  if (!task.frequency.includes(todayDayName)) {
-    return false;
-  }
-
-  // If employee schedule exists, check if today is a working day
-  if (employeeSchedule && employeeSchedule.weeklySchedule) {
-    const todaySchedule = employeeSchedule.weeklySchedule.find(
-      (s) => s.day === todayDayName
-    );
-    // Only show task if it's a working day
-    return todaySchedule && todaySchedule.isWorking;
-  }
-
-  // If no schedule, show task if day matches frequency
-  return true;
+  // Check if today is in the frequency list - that's the only filter for recurring tasks
+  return task.frequency.includes(todayDayName);
 };
 
 // Helper function to calculate task status based on work schedule
