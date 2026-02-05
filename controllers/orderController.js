@@ -3167,17 +3167,17 @@ const convertToTakeaway = async (req, res) => {
 // ---------------- UPDATE PRINT STATUS ----------------
 const updatePrintStatus = async (req, res) => {
   try {
-    const { kotPrinted, billPrinted } = req.body;
-    if (kotPrinted === undefined && billPrinted === undefined) {
+    const { kotPrinted, billPrinted, lastPrintedKotIndex } = req.body;
+    if (kotPrinted === undefined && billPrinted === undefined && lastPrintedKotIndex === undefined) {
       return res.status(400).json({
-        message: "At least one of kotPrinted or billPrinted is required",
+        message: "At least one of kotPrinted, billPrinted, or lastPrintedKotIndex is required",
       });
     }
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Access control: admin and manager only (per plan)
+    // Access control: admin, manager, waiter, captain
     if (req.user && req.user.role === "admin" && req.user._id) {
       if (
         !order.cartId ||
@@ -3187,7 +3187,7 @@ const updatePrintStatus = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && req.user.role === "manager") {
+    } else if (req.user && ["manager", "waiter", "captain"].includes(req.user.role)) {
       if (!req.user.cafeId && !req.user.cartId) {
         return res
           .status(403)
@@ -3200,11 +3200,13 @@ const updatePrintStatus = async (req, res) => {
           .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
-    // franchise_admin and super_admin not in authorize list per plan
 
     const update = {};
     if (kotPrinted === true) update["printStatus.kotPrinted"] = true;
     if (billPrinted === true) update["printStatus.billPrinted"] = true;
+    if (typeof lastPrintedKotIndex === "number" && lastPrintedKotIndex >= 0) {
+      update["printStatus.lastPrintedKotIndex"] = lastPrintedKotIndex;
+    }
 
     if (Object.keys(update).length === 0) {
       return res.json(order);

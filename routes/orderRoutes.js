@@ -29,7 +29,7 @@ router.patch("/:id/confirm-payment", confirmPaymentByCustomer);  // Customer con
 router.get("/", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getOrders);
 router.get("/:id", getOrderById);  // Public for customers to view their order
 router.patch("/:id/status", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), updateOrderStatus);
-router.patch("/:id/print-status", protect, authorize(["admin", "manager"]), updatePrintStatus);
+router.patch("/:id/print-status", protect, authorize(["admin", "manager", "waiter", "captain"]), updatePrintStatus);
 router.post("/:id/add-items", protect, authorize(["admin", "franchise_admin", "super_admin"]), addItemsToOrder);
 router.patch("/:id/return-items", protect, authorize(["admin", "franchise_admin", "super_admin"]), returnItems);
 router.patch("/:id/convert-to-takeaway", protect, authorize(["admin", "franchise_admin", "super_admin"]), convertToTakeaway);

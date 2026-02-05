@@ -124,6 +124,7 @@ const orderSchema = new mongoose.Schema(
     printStatus: {
       kotPrinted: { type: Boolean, default: false },
       billPrinted: { type: Boolean, default: false },
+      lastPrintedKotIndex: { type: Number, default: -1 },
     },
   },
   { timestamps: true }
