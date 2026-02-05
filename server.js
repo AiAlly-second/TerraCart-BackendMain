@@ -205,10 +205,10 @@ io.on("connection", (socket) => {
   // Join cart room (for mobile app users)
   socket.on("join:cart", (cartId) => {
     if (cartId) {
-      const room = `cart:${cartId}`;
-      socket.join(room);
-      // Also join cafe room for backward compatibility
-      socket.emit("join:cafe", cartId);
+      const cartRoom = `cart:${cartId}`;
+      const cafeRoom = `cafe:${cartId}`;
+      socket.join(cartRoom);
+      socket.join(cafeRoom);
     }
   });
 

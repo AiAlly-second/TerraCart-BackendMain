@@ -2252,6 +2252,14 @@ const updateOrderStatus = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your franchise" });
       }
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
+      if (!userCartId) {
+        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+      }
+      if (!order.cartId || order.cartId.toString() !== userCartId) {
+        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+      }
     }
     // For super_admin, no restriction (they can update all orders)
 
@@ -3212,15 +3220,20 @@ const updatePrintStatus = async (req, res) => {
       return res.json(order);
     }
 
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
+    // Atomic: only update if kotPrinted/billPrinted are not already true (prevent duplicate prints)
+    const filter = { _id: req.params.id };
+    if (kotPrinted === true) filter["printStatus.kotPrinted"] = { $ne: true };
+    if (billPrinted === true) filter["printStatus.billPrinted"] = { $ne: true };
+
+    const updated = await Order.findOneAndUpdate(
+      filter,
       { $set: update },
       { new: true }
     )
       .populate("table")
       .lean();
 
-    return res.json(updated);
+    return res.json(updated ?? order);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
