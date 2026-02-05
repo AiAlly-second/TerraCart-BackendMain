@@ -5,6 +5,7 @@ const {
   listTables,
   getAvailableTables,
   lookupTableBySlug,
+  getCartIdByTableId,
   createTable,
   getTable,
   updateTable,
@@ -21,6 +22,7 @@ const { protect, authorize } = require("../middleware/authMiddleware");
 // Public endpoints for customer flows
 router.get("/available", getAvailableTables);
 router.get("/public", getPublicTables);
+router.get("/public-cart-id/:tableId", getCartIdByTableId); // For cart page: get cartId from table ID
 router.get("/lookup/:slug", lookupTableBySlug);
 router.post("/:id/occupy", occupyTable); // Public endpoint to mark table as occupied
 

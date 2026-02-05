@@ -543,6 +543,26 @@ exports.getPublicTables = async (req, res) => {
   }
 };
 
+/**
+ * Public: get cartId for a table by table ID (for customer cart page when only table ID is in URL)
+ */
+exports.getCartIdByTableId = async (req, res) => {
+  try {
+    const { tableId } = req.params;
+    if (!tableId || !mongoose.Types.ObjectId.isValid(tableId)) {
+      return res.status(400).json({ success: false, message: "Invalid table ID" });
+    }
+    const table = await Table.findById(tableId).select("cartId").lean();
+    if (!table || !table.cartId) {
+      return res.status(404).json({ success: false, message: "Table not found" });
+    }
+    return res.json({ success: true, cartId: table.cartId.toString() });
+  } catch (err) {
+    console.error("Error in getCartIdByTableId:", err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 exports.lookupTableBySlug = async (req, res) => {
   try {
     await syncTableFields();

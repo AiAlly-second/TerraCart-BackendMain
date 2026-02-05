@@ -326,6 +326,7 @@ const createOrder = async (req, res) => {
       cartId: requestCartId, // Accept cartId from request body (for takeaway/pickup/delivery orders)
       customerLocation, // { latitude, longitude, address }
       specialInstructions, // Special notes from customer
+      selectedAddons, // Add-ons selected by customer
     } = req.body;
     let { tableNumber } = req.body;
 
@@ -826,7 +827,10 @@ const createOrder = async (req, res) => {
       orderType: isPickup ? "PICKUP" : isDelivery ? "DELIVERY" : undefined,
       // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
+      // For takeaway/pickup/delivery orders, store session token to isolate each customer session
+      // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
+      selectedAddons: Array.isArray(selectedAddons) ? selectedAddons : [],
       kotLines: [kot],
       status: "Confirmed",
     };
@@ -1755,18 +1759,19 @@ const finalizeOrder = async (req, res) => {
     order.status = "Finalized";
     await order.save();
 
-    // Consume ingredients for costing
-    // We do this even if req.user is missing (using fallback ID) to ensure stock is always accurate
-    const userId = req.user ? req.user._id : "SYSTEM";
-    
-    console.log(`[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`);
-    
-    consumeIngredientsForOrder(order, userId)
+    // Selective token consumption: only when we have a valid User ObjectId (InventoryTransactionV2.recordedBy)
+    const userId = req.user ? req.user._id : (order.cartId && (order.cartId._id || order.cartId));
+    if (userId) {
+      console.log(`[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`);
+      consumeIngredientsForOrder(order, userId)
       .then(result => {
          if (result.success) console.log(`[COSTING] Finalized order ${order._id} consumption success`);
          else console.warn(`[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`);
       })
       .catch(err => console.error(`[COSTING] Finalized order ${order._id} consumption error:`, err));
+    } else {
+      console.warn(`[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`);
+    }
 
     // Release table when order is finalized
     const io = req.app.get("io");
@@ -2395,13 +2400,15 @@ const updateOrderStatus = async (req, res) => {
     const shouldConsumeIngredients = consumptionTriggerStatuses.includes(status);
 
     if (shouldConsumeIngredients) {
-      // Use req.user._id if available, otherwise use "SYSTEM" or fallback
-      const userId = req.user ? req.user._id : "SYSTEM";
-      
-      console.log(`[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`);
+      // Selective token consumption: only run when we have a valid User ObjectId (required by InventoryTransactionV2.recordedBy)
+      const userId = req.user ? req.user._id : (updatedOrder.cartId && (updatedOrder.cartId._id || updatedOrder.cartId));
+      if (!userId) {
+        console.warn(`[COSTING] Skipping consumption for order ${updatedOrder._id}: no req.user and no order.cartId`);
+      } else {
+        console.log(`[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`);
 
-      // Run ingredient consumption in background (non-blocking)
-      consumeIngredientsForOrder(updatedOrder, userId)
+        // Run ingredient consumption in background (non-blocking)
+        consumeIngredientsForOrder(updatedOrder, userId)
         .then((consumptionResult) => {
           if (consumptionResult.success) {
             console.log(
@@ -2413,11 +2420,19 @@ const updateOrderStatus = async (req, res) => {
              if (isBenign) {
                 console.log(`[COSTING] ℹ️ Consumption skipped for ${order._id}: ${consumptionResult.message}`);
              } else {
+
                 console.warn(
-                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
-                  consumptionResult.error || consumptionResult.message
+                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`
                 );
+                if (consumptionResult.summary?.errors) {
+                  consumptionResult.summary.errors.forEach(e => {
+                     console.warn(` - ${e.item}: ${e.error}`);
+                  });
+                } else {
+                   console.warn(consumptionResult.error || consumptionResult.message || "Unknown error");
+                }
              }
+
           }
         })
         .catch((consumptionError) => {
@@ -2426,6 +2441,7 @@ const updateOrderStatus = async (req, res) => {
             consumptionError
           );
         });
+      }
     }
 
     // Handle payment updates in background (non-blocking)

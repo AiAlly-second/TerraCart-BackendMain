@@ -233,20 +233,37 @@ exports.getPublicMenu = async (req, res) => {
 
 exports.listMenu = async (req, res) => {
   try {
-    // Filter by cartId if user is cart admin (changed from cafeId to cartId)
-    const cartId = req.user && req.user.role === "admin" ? req.user._id : null;
+    // Optional cartId from query (for franchise/super admin: load a specific outlet's menu, e.g. when editing that outlet's order)
+    const queryCartId = req.query.cartId ? req.query.cartId.toString().trim() : null;
+    const User = require("../models/userModel");
+
+    let filterCartId = null;
+    if (req.user.role === "admin") {
+      filterCartId = req.user._id;
+    } else if (queryCartId && mongoose.Types.ObjectId.isValid(queryCartId)) {
+      const queryCartIdObj = new mongoose.Types.ObjectId(queryCartId);
+      if (req.user.role === "franchise_admin") {
+        const outlet = await User.findById(queryCartIdObj).select("franchiseId").lean();
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Access denied: outlet does not belong to your franchise" });
+        }
+        filterCartId = queryCartIdObj;
+      } else if (req.user.role === "super_admin") {
+        filterCartId = queryCartIdObj;
+      }
+    }
+
     const categoryQuery = {};
     const itemQuery = {};
 
-    if (cartId) {
-      // Support both cartId (new) and cafeId (old) during migration transition
+    if (filterCartId) {
       categoryQuery.$or = [
-        { cartId: cartId },
-        { cafeId: cartId } // Support old cafeId field during migration
+        { cartId: filterCartId },
+        { cafeId: filterCartId }
       ];
       itemQuery.$or = [
-        { cartId: cartId },
-        { cafeId: cartId } // Support old cafeId field during migration
+        { cartId: filterCartId },
+        { cafeId: filterCartId }
       ];
     }
 

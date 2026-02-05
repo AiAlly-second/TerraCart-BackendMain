@@ -90,6 +90,10 @@ const {
   setOutletContext,
 } = require("../../utils/costing-v2/accessControl");
 
+/** Safe ObjectId conversion (Mongoose 6+ requires `new`). Use everywhere instead of mongoose.Types.ObjectId(id). */
+const toObjectIdSafe = (id) =>
+  id == null || id === "" ? null : new mongoose.Types.ObjectId(String(id));
+
 /**
  * Decode HTML entities in a string
  * Handles common HTML entities like &amp;, &lt;, &gt;, &quot;, &#39;
@@ -4243,11 +4247,12 @@ exports.getHierarchicalCosting = async (req, res) => {
             transactionDateFilter.date.$lte = toDate;
           }
         }
+        const kioskCartIdObj = toObjectIdSafe(kiosk._id);
         const consumptionTransactions = await InventoryTransaction.aggregate([
           {
             $match: {
               type: { $in: ["OUT", "WASTE"] },
-              cartId: kiosk._id,
+              ...(kioskCartIdObj ? { cartId: kioskCartIdObj } : {}),
               ...transactionDateFilter,
             },
           },
@@ -4263,7 +4268,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get labour costs - filter by date range properly
-        const labourFilter = { cartId: kiosk._id };
+        const labourFilter = { cartId: kioskCartIdObj || kiosk._id };
         if (from || to) {
           // Include labour costs that overlap with the date range
           const fromDate = from ? new Date(from) : new Date("1970-01-01");
@@ -4294,7 +4299,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get expenses for this kiosk in the date range
-        const expenseFilter = { cartId: kiosk._id };
+        const expenseFilter = { cartId: kioskCartIdObj || kiosk._id };
         if (from || to) {
           expenseFilter.expenseDate = {};
           if (from) {
@@ -4318,7 +4323,7 @@ exports.getHierarchicalCosting = async (req, res) => {
         // Get sales from orders (use cartId, not cafeId)
         // Include "Exit" status for takeaway orders that are completed
         const orderFilter = {
-          cartId: kiosk._id,
+          cartId: kioskCartIdObj || kiosk._id,
           status: { $in: ["Paid", "Finalized", "Exit"] },
         };
         if (from || to) {
@@ -4615,17 +4620,15 @@ exports.getFoodCostReport = async (req, res) => {
       if (to) transactionDateFilter.date.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
     }
 
-    // Build outlet filter based on role
+    // Build outlet filter based on role (normalize cartId to ObjectId for reliable match with InventoryTransactionV2)
     let transactionOutletFilter = {};
     if (req.user.role === "admin") {
-      // Cart admin - only their own kiosk
-      transactionOutletFilter.cartId = req.user._id;
+      transactionOutletFilter.cartId = toObjectIdSafe(req.user._id);
       console.log(
         "[FOOD_COST_REPORT] Cart admin filter - cartId:",
-        req.user._id.toString()
+        transactionOutletFilter.cartId?.toString()
       );
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - specific outlet or all their franchise outlets
       if (cartId) {
         const outlet = await User.findById(cartId);
         if (
@@ -4637,23 +4640,22 @@ exports.getFoodCostReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        transactionOutletFilter.cartId = { $in: outlets.map((o) => o._id) };
+        transactionOutletFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
       }
     } else if (req.user.role === "super_admin") {
-      // Super admin - specific outlet or all
       if (cartId) {
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
       }
     }
 
-    // Get total food cost (from consumption transactions)
+    // Get total food cost (from consumption transactions - InventoryTransactionV2 OUT/WASTE)
     const consumptionTransactions = await InventoryTransaction.aggregate([
       {
         $match: {
@@ -4677,27 +4679,23 @@ exports.getFoodCostReport = async (req, res) => {
       if (from) orderFilter.createdAt.$gte = new Date(from + "T00:00:00.000Z");
       if (to) orderFilter.createdAt.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
     }
-    // Build order filter based on role
+    // Build order filter based on role (normalize cartId to ObjectId for match with Order)
     if (req.user.role === "admin") {
-      // Cart admin - only their own kiosk (use cartId)
-      orderFilter.cartId = req.user._id;
+      orderFilter.cartId = toObjectIdSafe(req.user._id);
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - specific outlet or all their franchise outlets
       if (cartId) {
-        orderFilter.cartId = cartId;
+        orderFilter.cartId = toObjectIdSafe(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const cartIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: cartIds };
+        orderFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
       }
     } else if (req.user.role === "super_admin") {
-      // Super admin - specific outlet or all
       if (cartId) {
-        orderFilter.cartId = cartId;
+        orderFilter.cartId = toObjectIdSafe(cartId);
       }
     }
 
@@ -4725,13 +4723,20 @@ exports.getFoodCostReport = async (req, res) => {
     const totalFoodCost = Number(
       (consumptionTransactions[0]?.totalFoodCost || 0).toFixed(2)
     );
+    const matchCount = await InventoryTransaction.countDocuments({
+      type: { $in: ["OUT", "WASTE"] },
+      ...transactionDateFilter,
+      ...transactionOutletFilter,
+    });
     console.log(
       "[FOOD_COST_REPORT] Total sales:",
       totalSales,
       "Total food cost:",
       totalFoodCost,
-      "Order filter:",
-      JSON.stringify(orderFilter)
+      "Consumption transactions matched:",
+      matchCount,
+      "Order filter (cartId only):",
+      orderFilter.cartId ? "set" : "all"
     );
     const foodCostPercent =
       totalSales > 0
@@ -5028,17 +5033,12 @@ exports.getPnLReport = async (req, res) => {
       if (to) transactionDateFilter.date.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
     }
 
-    // Build outlet filter based on role
+    // Build outlet filter based on role (normalize cartId to ObjectId for match with InventoryTransactionV2)
     let transactionOutletFilter = {};
     if (req.user.role === "admin") {
-      // Cart admin - only their own kiosk
-      transactionOutletFilter.cartId = req.user._id;
-      console.log(
-        "[PNL_REPORT] Cart admin filter - cartId:",
-        req.user._id.toString()
-      );
+      transactionOutletFilter.cartId = toObjectIdSafe(req.user._id);
+      console.log("[PNL_REPORT] Cart admin filter - cartId:", transactionOutletFilter.cartId?.toString());
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - specific outlet or all their franchise outlets
       if (cartId) {
         const outlet = await User.findById(cartId);
         if (
@@ -5050,23 +5050,22 @@ exports.getPnLReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        transactionOutletFilter.cartId = { $in: outlets.map((o) => o._id) };
+        transactionOutletFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
       }
     } else if (req.user.role === "super_admin") {
-      // Super admin - specific outlet or all
       if (cartId) {
-        transactionOutletFilter.cartId = cartId;
+        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
       }
     }
 
-    // Get total food cost (from consumption transactions)
+    // Get total food cost (from consumption transactions - InventoryTransactionV2 OUT/WASTE)
     const consumptionTransactions = await InventoryTransaction.aggregate([
       {
         $match: {
@@ -5089,8 +5088,8 @@ exports.getPnLReport = async (req, res) => {
     console.log(
       "[PNL_REPORT] Total food cost:",
       foodCost,
-      "Transaction filter:",
-      JSON.stringify(transactionOutletFilter)
+      "Transaction filter (cartId):",
+      transactionOutletFilter.cartId ? "set" : "all"
     );
 
     // Get total sales (from orders - calculate from kotLines)
@@ -5101,33 +5100,26 @@ exports.getPnLReport = async (req, res) => {
       if (to) orderFilter.createdAt.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
     }
 
-    // Build order filter based on role
+    // Build order filter based on role (normalize cartId to ObjectId)
     if (req.user.role === "admin") {
-      // Cart admin - only their own kiosk (use cartId)
-      orderFilter.cartId = req.user._id;
+      orderFilter.cartId = toObjectIdSafe(req.user._id);
     } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - specific outlet or all their franchise outlets
       if (cartId) {
-        orderFilter.cartId = cartId;
+        orderFilter.cartId = toObjectIdSafe(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        const cartIds = outlets.map((o) => o._id);
-        orderFilter.cartId = { $in: cartIds };
+        orderFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
       }
     } else if (req.user.role === "super_admin") {
-      // Super admin - specific outlet or all
       if (cartId) {
-        orderFilter.cartId = cartId;
+        orderFilter.cartId = toObjectIdSafe(cartId);
       }
     }
 
-    orderFilter.status = { $in: ["Paid", "Finalized"] };
-
-    // Calculate sales from kotLines (orders don't have top-level totalAmount)
     // Include "Exit" status for takeaway orders
     orderFilter.status = { $in: ["Paid", "Finalized", "Exit"] };
     const salesData = await Order.aggregate([
