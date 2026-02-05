@@ -4,6 +4,7 @@ const InventoryItem = require("../models/inventoryModel");
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
+const Task = require("../models/taskModel");
 
 // Helper to get cartId based on user role (returns cartId, not cafeId)
 const getCafeId = async (user) => {
@@ -74,6 +75,7 @@ exports.getDashboardStats = async (req, res) => {
       todayAttendance,
       occupiedTables,
       totalTables,
+      pendingTasks,
     ] = await Promise.all([
       // Active orders (today, excluding all completed/inactive statuses)
       Order.countDocuments({
@@ -164,13 +166,16 @@ exports.getDashboardStats = async (req, res) => {
       Table.countDocuments({
         cartId: cafeId,
       }),
+
+      // Pending tasks (not completed or cancelled)
+      Task.countDocuments({
+        cartId: cafeId,
+        status: { $nin: ["completed", "cancelled"] },
+      }),
     ]);
 
     // Extract revenue from aggregation result
     const todayRevenue = todayOrders.length > 0 ? todayOrders[0].totalRevenue || 0 : 0;
-
-    // Pending tasks (if you have a tasks model, otherwise return 0)
-    const pendingTasks = 0; // TODO: Implement when tasks model is available
 
     res.json({
       success: true,

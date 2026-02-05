@@ -4,6 +4,7 @@ const Counter = require("../models/countermodel");
 const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
+const Employee = require("../models/employeeModel");
 const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
@@ -2218,6 +2219,101 @@ const addItemsToOrder = async (req, res) => {
   }
 };
 
+// ---------------- ACCEPT ORDER (first-come-first-serve) ----------------
+const acceptOrder = async (req, res) => {
+  try {
+    const orderId = req.params.id;
+
+    const order = await Order.findById(orderId);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // Only for TAKEAWAY, PICKUP, or DELIVERY orders
+    const allowedServiceTypes = ["TAKEAWAY", "PICKUP", "DELIVERY"];
+    if (!allowedServiceTypes.includes(order.serviceType)) {
+      return res.status(400).json({
+        message: "Order acceptance is only for takeaway, pickup, or delivery orders",
+      });
+    }
+
+    // Only when status is Pending and not yet accepted
+    if (order.status !== "Pending") {
+      return res.status(400).json({
+        message: `Order cannot be accepted (current status: ${order.status})`,
+      });
+    }
+    if (order.acceptedBy && order.acceptedBy.employeeId) {
+      return res.status(409).json({
+        message: `Order already accepted by ${order.acceptedBy.employeeName || "another staff member"}`,
+      });
+    }
+
+    // Check cart access for waiter/captain/manager
+    const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
+    if (!userCartId) {
+      return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+    }
+    if (!order.cartId || order.cartId.toString() !== userCartId) {
+      return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+    }
+
+    // Lookup employee by userId
+    const employee = await Employee.findOne({
+      userId: req.user._id,
+      cartId: order.cartId,
+      isActive: true,
+    });
+    if (!employee) {
+      return res.status(403).json({
+        message: "Employee record not found for your account",
+      });
+    }
+
+    const acceptedBy = {
+      employeeId: employee._id,
+      employeeName: employee.name || "Staff",
+      disability: {
+        hasDisability: employee.disability?.hasDisability ?? false,
+        type: employee.disability?.type || null,
+      },
+      acceptedAt: new Date(),
+    };
+
+    // Atomic update: first to accept wins
+    const updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: orderId,
+        status: "Pending",
+        $or: [{ acceptedBy: { $exists: false } }, { acceptedBy: null }],
+      },
+      {
+        $set: {
+          status: "Accepted",
+          acceptedBy,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedOrder) {
+      return res.status(409).json({
+        message: "Order was already accepted by another staff member",
+      });
+    }
+
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && updatedOrder.cartId && emitToCafe) {
+      emitToCafe(io, updatedOrder.cartId.toString(), "order:status:updated", updatedOrder);
+      emitToCafe(io, updatedOrder.cartId.toString(), "orderUpdated", updatedOrder);
+    }
+
+    return res.json(updatedOrder);
+  } catch (err) {
+    console.error("[ORDER] acceptOrder error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // ---------------- UPDATE ORDER STATUS ----------------
 const updateOrderStatus = async (req, res) => {
   try {
@@ -2256,6 +2352,14 @@ const updateOrderStatus = async (req, res) => {
         return res
           .status(403)
           .json({ message: "Order does not belong to your franchise" });
+      }
+    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+      const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
+      if (!userCartId) {
+        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+      }
+      if (!order.cartId || order.cartId.toString() !== userCartId) {
+        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
     // For super_admin, no restriction (they can update all orders)
@@ -3183,17 +3287,17 @@ const convertToTakeaway = async (req, res) => {
 // ---------------- UPDATE PRINT STATUS ----------------
 const updatePrintStatus = async (req, res) => {
   try {
-    const { kotPrinted, billPrinted } = req.body;
-    if (kotPrinted === undefined && billPrinted === undefined) {
+    const { kotPrinted, billPrinted, lastPrintedKotIndex } = req.body;
+    if (kotPrinted === undefined && billPrinted === undefined && lastPrintedKotIndex === undefined) {
       return res.status(400).json({
-        message: "At least one of kotPrinted or billPrinted is required",
+        message: "At least one of kotPrinted, billPrinted, or lastPrintedKotIndex is required",
       });
     }
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Access control: admin and manager only (per plan)
+    // Access control: admin, manager, waiter, captain
     if (req.user && req.user.role === "admin" && req.user._id) {
       if (
         !order.cartId ||
@@ -3203,7 +3307,7 @@ const updatePrintStatus = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && req.user.role === "manager") {
+    } else if (req.user && ["manager", "waiter", "captain"].includes(req.user.role)) {
       if (!req.user.cafeId && !req.user.cartId) {
         return res
           .status(403)
@@ -3216,25 +3320,32 @@ const updatePrintStatus = async (req, res) => {
           .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
-    // franchise_admin and super_admin not in authorize list per plan
 
     const update = {};
     if (kotPrinted === true) update["printStatus.kotPrinted"] = true;
     if (billPrinted === true) update["printStatus.billPrinted"] = true;
+    if (typeof lastPrintedKotIndex === "number" && lastPrintedKotIndex >= 0) {
+      update["printStatus.lastPrintedKotIndex"] = lastPrintedKotIndex;
+    }
 
     if (Object.keys(update).length === 0) {
       return res.json(order);
     }
 
-    const updated = await Order.findByIdAndUpdate(
-      req.params.id,
+    // Atomic: only update if kotPrinted/billPrinted are not already true (prevent duplicate prints)
+    const filter = { _id: req.params.id };
+    if (kotPrinted === true) filter["printStatus.kotPrinted"] = { $ne: true };
+    if (billPrinted === true) filter["printStatus.billPrinted"] = { $ne: true };
+
+    const updated = await Order.findOneAndUpdate(
+      filter,
       { $set: update },
       { new: true }
     )
       .populate("table")
       .lean();
 
-    return res.json(updated);
+    return res.json(updated ?? order);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -3248,6 +3359,7 @@ module.exports = {
   getOrders,
   getOrderById,
   updateOrderStatus,
+  acceptOrder,
   cancelOrderByCustomer,
   confirmPaymentByCustomer,
   deleteOrder,

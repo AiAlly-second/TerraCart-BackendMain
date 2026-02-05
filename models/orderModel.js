@@ -124,6 +124,17 @@ const orderSchema = new mongoose.Schema(
     printStatus: {
       kotPrinted: { type: Boolean, default: false },
       billPrinted: { type: Boolean, default: false },
+      lastPrintedKotIndex: { type: Number, default: -1 },
+    },
+    // First-come-first-serve order acceptance (TAKEAWAY/PICKUP/DELIVERY)
+    acceptedBy: {
+      employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
+      employeeName: { type: String },
+      disability: {
+        hasDisability: { type: Boolean, default: false },
+        type: { type: String },
+      },
+      acceptedAt: { type: Date, default: Date.now },
     },
   },
   { timestamps: true }

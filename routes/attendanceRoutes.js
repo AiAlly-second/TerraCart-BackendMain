@@ -9,6 +9,7 @@ const {
   checkOutById,
   getAttendanceStats,
   updateAttendanceStatus,
+  deleteAttendance,
   startBreak,
   endBreak,
 } = require("../controllers/attendanceController");
@@ -35,8 +36,11 @@ router.patch("/:id/checkout", protect, authorize(["admin", "franchise_admin", "s
 // Get attendance statistics
 router.get("/stats", protect, authorize(["admin", "franchise_admin", "super_admin"]), getAttendanceStats);
 
-// Update attendance status manually
-router.put("/:id/status", protect, authorize(["admin", "franchise_admin", "super_admin"]), updateAttendanceStatus);
+// Update attendance status manually (admin, manager)
+router.put("/:id/status", protect, authorize(["admin", "franchise_admin", "super_admin", "manager"]), updateAttendanceStatus);
+
+// Delete attendance record (admin, manager)
+router.delete("/:id", protect, authorize(["admin", "franchise_admin", "super_admin", "manager"]), deleteAttendance);
 
 // Start break (support both POST and PATCH for compatibility)
 router.post("/:id/start-break", protect, authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), startBreak);

@@ -21,7 +21,7 @@ const handleSecureFile = (req, res, next) => {
   if (!req.path.startsWith('/secure/uploads/')) {
     return next();
   }
-
+//jai hind maafi hai
   try {
     // Extract the file path after /secure/uploads/
     const filePathAfterPrefix = req.path.replace('/secure/uploads/', '');
