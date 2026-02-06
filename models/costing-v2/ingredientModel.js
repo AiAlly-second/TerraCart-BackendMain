@@ -91,6 +91,11 @@ const ingredientSchema = new mongoose.Schema(
       min: 0,
       default: 7,
     },
+    /** When stock was last received (return/purchase). Used with shelfTimeDays to compute expiry. */
+    lastReceivedAt: {
+      type: Date,
+      default: null,
+    },
     preferredSupplierId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Supplier",

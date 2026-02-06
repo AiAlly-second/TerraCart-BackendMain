@@ -28,10 +28,10 @@ const InventoryTransaction = require("../models/inventoryTransactionModel");
  */
 async function initializeNewCart(cartId, franchiseId) {
   try {
-    console.log(`[CART INIT] ========================================`);
-    console.log(`[CART INIT] 🆕 Initializing NEW cart: ${cartId}`);
-    console.log(`[CART INIT] Franchise ID: ${franchiseId}`);
-    console.log(`[CART INIT] Ensuring all operational data starts EMPTY/NULL`);
+    // console.log(`[CART INIT] ========================================`);
+    // console.log(`[CART INIT] 🆕 Initializing NEW cart: ${cartId}`);
+    // console.log(`[CART INIT] Franchise ID: ${franchiseId}`);
+    // console.log(`[CART INIT] Ensuring all operational data starts EMPTY/NULL`);
 
     // Convert to ObjectId if needed
     const mongoose = require("mongoose");
@@ -86,12 +86,12 @@ async function initializeNewCart(cartId, franchiseId) {
         InventoryTransaction.deleteMany({ outletId: cartObjectId }),
       ]);
 
-      console.log(`[CART INIT] ✅ Cleaned up existing data`);
+      // console.log(`[CART INIT] ✅ Cleaned up existing data`);
     }
 
     // STEP 2: Verify data isolation - ensure no data leakage from other carts
     // Check that queries properly filter by cartId
-    console.log(`[CART INIT] 🔒 Verifying data isolation...`);
+    // console.log(`[CART INIT] 🔒 Verifying data isolation...`);
     
     // Verify that this cart's data is isolated from other carts in the same franchise
     const otherCartsInFranchise = await require("../models/userModel")
@@ -120,17 +120,17 @@ async function initializeNewCart(cartId, franchiseId) {
     }
 
     // STEP 3: Log initialization status
-    console.log(`[CART INIT] ✅ Cart ${cartId} initialized with EMPTY operational data:`);
-    console.log(`[CART INIT]   - Orders: 0`);
-    console.log(`[CART INIT]   - Tables: 0`);
-    console.log(`[CART INIT]   - Customers: 0`);
-    console.log(`[CART INIT]   - Feedback: 0`);
-    console.log(`[CART INIT]   - Employees: 0`);
-    console.log(`[CART INIT]   - Attendance Records: 0`);
-    console.log(`[CART INIT]   - Inventory Transactions: 0`);
-    console.log(`[CART INIT] ✅ Data isolation verified - cart has separate database records`);
-    console.log(`[CART INIT] ✅ All queries will filter by cartId: ${cartObjectId}`);
-    console.log(`[CART INIT] ========================================`);
+    // console.log(`[CART INIT] ✅ Cart ${cartId} initialized with EMPTY operational data:`);
+    // console.log(`[CART INIT]   - Orders: 0`);
+    // console.log(`[CART INIT]   - Tables: 0`);
+    // console.log(`[CART INIT]   - Customers: 0`);
+    // console.log(`[CART INIT]   - Feedback: 0`);
+    // console.log(`[CART INIT]   - Employees: 0`);
+    // console.log(`[CART INIT]   - Attendance Records: 0`);
+    // console.log(`[CART INIT]   - Inventory Transactions: 0`);
+    // console.log(`[CART INIT] ✅ Data isolation verified - cart has separate database records`);
+    // console.log(`[CART INIT] ✅ All queries will filter by cartId: ${cartObjectId}`);
+    // console.log(`[CART INIT] ========================================`);
 
     return {
       success: true,

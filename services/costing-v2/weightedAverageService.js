@@ -496,9 +496,11 @@ class WeightedAverageService {
     if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - update directly
       ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+      ingredient.lastReceivedAt = new Date();
     } else if (!ingredient.cartId && !cartId) {
       // Shared ingredient with NO cartId - global return, update global stock
       ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+      ingredient.lastReceivedAt = new Date();
     } else if (!ingredient.cartId && cartId) {
       // Shared ingredient with cartId - outlet-specific return
       // DON'T update global stock, stock is tracked via transactions

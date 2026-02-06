@@ -75,7 +75,7 @@ const generateFranchiseCode = async (franchiseName, retryCount = 0) => {
   }
   
   const shortcut = generateShortcut(franchiseName);
-  console.log(`[CODE GEN] Generating franchise code for: "${franchiseName}" → shortcut: ${shortcut}`);
+  // console.log(`[CODE GEN] Generating franchise code for: "${franchiseName}" → shortcut: ${shortcut}`);
   
   // Find the highest sequence number for this shortcut
   const lastFranchise = await User.findOne({
@@ -91,18 +91,18 @@ const generateFranchiseCode = async (franchiseName, retryCount = 0) => {
   const sequence = (lastFranchise?.franchiseSequence || 0) + 1 + retryCount;
   const code = `${shortcut}${formatSequence(sequence)}`;
   
-  console.log(`[CODE GEN] Last sequence: ${lastFranchise?.franchiseSequence || 0}, New: ${sequence}, Code: ${code} (retry: ${retryCount})`);
+  // console.log(`[CODE GEN] Last sequence: ${lastFranchise?.franchiseSequence || 0}, New: ${sequence}, Code: ${code} (retry: ${retryCount})`);
   
   // Verify the code is unique across BOTH franchiseCode AND cartCode (in case of race conditions)
   const existingFranchise = await User.findOne({ franchiseCode: code }).lean();
   const existingCart = await User.findOne({ cartCode: code }).lean();
   if (existingFranchise || existingCart) {
-    console.log(`[CODE GEN] Code ${code} already exists (franchise: ${!!existingFranchise}, cart: ${!!existingCart}), retrying with next sequence... (attempt ${retryCount + 1})`);
+    // console.log(`[CODE GEN] Code ${code} already exists (franchise: ${!!existingFranchise}, cart: ${!!existingCart}), retrying with next sequence... (attempt ${retryCount + 1})`);
     // If code exists, try the next sequence
     return generateFranchiseCode(franchiseName, retryCount + 1);
   }
   
-  console.log(`[CODE GEN] ✅ Successfully generated franchise code: ${code}`);
+  // console.log(`[CODE GEN] ✅ Successfully generated franchise code: ${code}`);
   
   return {
     franchiseShortcut: shortcut,
@@ -144,7 +144,7 @@ const generateCartCode = async (franchiseId, retryCount = 0) => {
   // If franchise doesn't have a shortcut, generate one and save it
   if (!shortcut) {
     shortcut = generateShortcut(franchise.name);
-    console.log(`[CODE GEN] Franchise ${franchiseId} missing shortcut, generating: ${shortcut}`);
+    // console.log(`[CODE GEN] Franchise ${franchiseId} missing shortcut, generating: ${shortcut}`);
     
     // Update the franchise with the shortcut
     await User.findByIdAndUpdate(franchiseId, { 
@@ -152,7 +152,7 @@ const generateCartCode = async (franchiseId, retryCount = 0) => {
     });
   }
   
-  console.log(`[CODE GEN] Generating cart code for franchise: ${franchise.name} (${franchise.franchiseCode || franchiseId})`);
+  // console.log(`[CODE GEN] Generating cart code for franchise: ${franchise.name} (${franchise.franchiseCode || franchiseId})`);
   
   // Find the highest sequence number for carts under this franchise
   const lastCart = await User.findOne({
@@ -168,18 +168,18 @@ const generateCartCode = async (franchiseId, retryCount = 0) => {
   const sequence = (lastCart?.cartSequence || 0) + 1 + retryCount;
   const code = `${shortcut}${formatSequence(sequence)}`;
   
-  console.log(`[CODE GEN] Last cart sequence: ${lastCart?.cartSequence || 0}, New: ${sequence}, Code: ${code} (retry: ${retryCount})`);
+  // console.log(`[CODE GEN] Last cart sequence: ${lastCart?.cartSequence || 0}, New: ${sequence}, Code: ${code} (retry: ${retryCount})`);
   
   // Verify the code is unique across BOTH cartCode AND franchiseCode
   const existingCart = await User.findOne({ cartCode: code }).lean();
   const existingFranchise = await User.findOne({ franchiseCode: code }).lean();
   if (existingCart || existingFranchise) {
-    console.log(`[CODE GEN] Cart code ${code} already exists (cart: ${!!existingCart}, franchise: ${!!existingFranchise}), retrying with next sequence... (attempt ${retryCount + 1})`);
+    // console.log(`[CODE GEN] Cart code ${code} already exists (cart: ${!!existingCart}, franchise: ${!!existingFranchise}), retrying with next sequence... (attempt ${retryCount + 1})`);
     // If code exists, try the next sequence
     return generateCartCode(franchiseId, retryCount + 1);
   }
   
-  console.log(`[CODE GEN] ✅ Successfully generated cart code: ${code}`);
+  // console.log(`[CODE GEN] ✅ Successfully generated cart code: ${code}`);
   
   return {
     cartSequence: sequence,
@@ -192,7 +192,7 @@ const generateCartCode = async (franchiseId, retryCount = 0) => {
  * Run this once to assign codes to existing records
  */
 const migrateExistingCodes = async () => {
-  console.log('Starting code migration...');
+  // console.log('Starting code migration...');
   
   // Step 1: Generate codes for all franchises
   const franchises = await User.find({ 
@@ -200,7 +200,7 @@ const migrateExistingCodes = async () => {
     franchiseCode: { $exists: false }
   }).sort({ createdAt: 1 });
   
-  console.log(`Found ${franchises.length} franchises without codes`);
+  // console.log(`Found ${franchises.length} franchises without codes`);
   
   for (const franchise of franchises) {
     const { franchiseShortcut, franchiseSequence, franchiseCode } = await generateFranchiseCode(franchise.name);
@@ -211,7 +211,7 @@ const migrateExistingCodes = async () => {
       franchiseCode
     });
     
-    console.log(`  Franchise "${franchise.name}" -> ${franchiseCode}`);
+    // console.log(`  Franchise "${franchise.name}" -> ${franchiseCode}`);
   }
   
   // Step 2: Generate codes for all carts
@@ -221,7 +221,7 @@ const migrateExistingCodes = async () => {
     franchiseId: { $exists: true }
   }).sort({ createdAt: 1 });
   
-  console.log(`Found ${carts.length} carts without codes`);
+  // console.log(`Found ${carts.length} carts without codes`);
   
   for (const cart of carts) {
     try {
@@ -232,13 +232,13 @@ const migrateExistingCodes = async () => {
         cartCode
       });
       
-      console.log(`  Cart "${cart.cartName || cart.name}" -> ${cartCode}`);
+      // console.log(`  Cart "${cart.cartName || cart.name}" -> ${cartCode}`);
     } catch (error) {
       console.log(`  Error processing cart ${cart._id}: ${error.message}`);
     }
   }
   
-  console.log('Migration complete!');
+  // console.log('Migration complete!');
 };
 
 module.exports = {

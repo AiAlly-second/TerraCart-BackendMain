@@ -2492,13 +2492,17 @@ const updateOrderStatus = async (req, res) => {
     // This ensures ingredients are consumed when order starts being prepared
     // Run in background to not block status update response
     const consumptionTriggerStatuses = [
-      "Preparing", 
-      "Ready", 
-      "Paid", 
-      "Finalized", 
-      "Completed", 
-      "Served", 
-      "Exit"
+      "Preparing",
+      "Ready",
+      "Paid",
+      "Finalized",
+      "Completed",
+      "Served",
+      "Exit",
+      "Being Prepared",
+      "BeingPrepared",
+      "Confirmed",
+      "Accepted",
     ];
     
     const shouldConsumeIngredients = consumptionTriggerStatuses.includes(status);

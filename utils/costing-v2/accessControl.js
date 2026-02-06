@@ -84,18 +84,18 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
         }
         
         // Debug logging with actual ObjectId values
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId:`, userCartId);
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId type:`, userCartId.constructor.name);
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - otherFilters:`, JSON.stringify(otherFilters, null, 2));
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - cartIdConditions:`, [
-          { cartId: userCartId.toString() },
-          { cartId: null },
-          { cartId: { $exists: false } }
-        ]);
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter:`, JSON.stringify(filter, null, 2));
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId:`, userCartId);
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - userCartId type:`, userCartId.constructor.name);
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - otherFilters:`, JSON.stringify(otherFilters, null, 2));
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - cartIdConditions:`, [
+        //   { cartId: userCartId.toString() },
+        //   { cartId: null },
+        //   { cartId: { $exists: false } }
+        // ]);
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter:`, JSON.stringify(filter, null, 2));
         
         // Also log the actual filter object (not JSON) to see ObjectIds
-        console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter (raw):`, filter);
+        // console.log(`[buildCostingQuery] Cart admin (${user._id}) - final filter (raw):`, filter);
       } else {
         // skipOutletFilter is true - include shared ingredients based on franchiseId
         if (user.franchiseId) {

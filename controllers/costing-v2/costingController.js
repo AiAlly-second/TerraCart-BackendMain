@@ -4760,8 +4760,8 @@ exports.getFoodCostReport = async (req, res) => {
       }
     }
 
-    // Include "Exit" status for takeaway orders
-    orderFilter.status = { $in: ["Paid", "Finalized", "Exit"] };
+    // Include Paid/Finalized/Exit and Completed (takeaway) so sales match orders that have food cost
+    orderFilter.status = { $in: ["Paid", "Finalized", "Exit", "Completed"] };
 
     // Calculate sales from kotLines (orders don't have top-level totalAmount)
     const salesData = await Order.aggregate([
@@ -4799,6 +4799,13 @@ exports.getFoodCostReport = async (req, res) => {
       "Order filter (cartId only):",
       orderFilter.cartId ? "set" : "all"
     );
+    const zeroCostCount = await InventoryTransaction.countDocuments({
+      type: { $in: ["OUT", "WASTE"] },
+      costAllocated: 0,
+      ...transactionDateFilter,
+      ...transactionOutletFilter,
+    });
+
     const foodCostPercent =
       totalSales > 0
         ? Number(((totalFoodCost / totalSales) * 100).toFixed(2))
@@ -4807,10 +4814,20 @@ exports.getFoodCostReport = async (req, res) => {
     res.json({
       success: true,
       data: {
-        period: { from, to },
-        totalFoodCost: Number(totalFoodCost.toFixed(2)),
-        totalSales: Number(totalSales.toFixed(2)),
-        foodCostPercent: Number(foodCostPercent.toFixed(2)),
+        totalFoodCost,
+        totalSales,
+        foodCostPercent:
+          totalSales > 0
+            ? Number(((totalFoodCost / totalSales) * 100).toFixed(2))
+            : 0,
+        period: {
+          from: from || null,
+          to: to || null,
+        },
+        meta: {
+          transactionCount: matchCount, // Exposed for debugging "Zero Food Cost" issues
+          zeroCostCount, // Start warning if most transactions have 0 cost
+        }
       },
     });
   } catch (error) {
@@ -5181,8 +5198,8 @@ exports.getPnLReport = async (req, res) => {
       }
     }
 
-    // Include "Exit" status for takeaway orders
-    orderFilter.status = { $in: ["Paid", "Finalized", "Exit"] };
+    // Include Paid/Finalized/Exit and Completed (takeaway) for consistent sales
+    orderFilter.status = { $in: ["Paid", "Finalized", "Exit", "Completed"] };
     const salesData = await Order.aggregate([
       { $match: orderFilter },
       {

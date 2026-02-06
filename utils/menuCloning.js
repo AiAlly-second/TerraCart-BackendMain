@@ -34,7 +34,7 @@ async function cloneGlobalMenuToFranchise(franchiseId, franchiseAdminId) {
 
     // Check if menu already initialized
     if (franchise.menuInitialized) {
-      console.log(`[MENU CLONE] Franchise ${franchiseId} menu already initialized`);
+      // console.log(`[MENU CLONE] Franchise ${franchiseId} menu already initialized`);
       return {
         success: false,
         message: "Franchise menu already initialized",
@@ -46,9 +46,9 @@ async function cloneGlobalMenuToFranchise(franchiseId, franchiseAdminId) {
     // This prevents old/duplicate data from appearing
     const existingItems = await FranchiseMenuItem.find({ franchiseId: franchiseId }).lean();
     if (existingItems.length > 0) {
-      console.log(`[MENU CLONE] ⚠️ Found ${existingItems.length} existing items for franchise ${franchiseId}, deleting...`);
+      // console.log(`[MENU CLONE] ⚠️ Found ${existingItems.length} existing items for franchise ${franchiseId}, deleting...`);
       await FranchiseMenuItem.deleteMany({ franchiseId: franchiseId });
-      console.log(`[MENU CLONE] ✅ Deleted ${existingItems.length} existing items`);
+      // console.log(`[MENU CLONE] ✅ Deleted ${existingItems.length} existing items`);
     }
 
     // Get all global menu items
@@ -65,7 +65,7 @@ async function cloneGlobalMenuToFranchise(franchiseId, franchiseAdminId) {
       };
     }
 
-    console.log(`[MENU CLONE] Cloning ${globalItems.length} items from global menu to franchise ${franchiseId}`);
+    // console.log(`[MENU CLONE] Cloning ${globalItems.length} items from global menu to franchise ${franchiseId}`);
 
     // Clone each item with new ID
     // CRITICAL: Each item gets a NEW _id - no shared references
@@ -97,8 +97,8 @@ async function cloneGlobalMenuToFranchise(franchiseId, franchiseAdminId) {
       menuInitializedAt: new Date(),
     });
 
-    console.log(`[MENU CLONE] ✅ Successfully cloned ${createdItems.length} items to franchise ${franchiseId}`);
-    console.log(`[MENU CLONE] ✅ Franchise ${franchiseId} now has UNIQUE menu data (not shared with global)`);
+    // console.log(`[MENU CLONE] ✅ Successfully cloned ${createdItems.length} items to franchise ${franchiseId}`);
+    // console.log(`[MENU CLONE] ✅ Franchise ${franchiseId} now has UNIQUE menu data (not shared with global)`);
 
     return {
       success: true,
@@ -140,7 +140,7 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
     // CRITICAL: ALWAYS delete ALL existing menu data for this cart first
     // This prevents old/duplicate data from appearing in new carts
     // We do this REGARDLESS of initialization status to ensure clean state
-    console.log(`[MENU CLONE] 🧹 AGGRESSIVE CLEANUP: Deleting ALL existing menu data for cart ${cartId}`);
+    // console.log(`[MENU CLONE] 🧹 AGGRESSIVE CLEANUP: Deleting ALL existing menu data for cart ${cartId}`);
     
     // Convert cartId to all possible formats
     const cartIdStr = cartId.toString();
@@ -164,10 +164,10 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
       }
     });
     
-    console.log(`[MENU CLONE] Found ${allExistingItems.length} existing items to delete`);
+    // console.log(`[MENU CLONE] Found ${allExistingItems.length} existing items to delete`);
     
     if (allExistingItems.length > 0) {
-      console.log(`[MENU CLONE] Item details: ${allExistingItems.map(i => `"${i.name}" (cartId: ${i.cartId}, type: ${typeof i.cartId})`).join(', ')}`);
+      // console.log(`[MENU CLONE] Item details: ${allExistingItems.map(i => `"${i.name}" (cartId: ${i.cartId}, type: ${typeof i.cartId})`).join(', ')}`);
     }
     
     // Delete using multiple strategies to catch all formats
@@ -179,13 +179,13 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
         { cartId: cartId }
       ]
     });
-    console.log(`[MENU CLONE] 🗑️ Deleted ${deletedOr.deletedCount} items using $or query`);
+    // console.log(`[MENU CLONE] 🗑️ Deleted ${deletedOr.deletedCount} items using $or query`);
     
     // Strategy 2: Delete individually for each format (to be absolutely sure)
     const deleted1 = await CartMenuItem.deleteMany({ cartId: cartObjectId });
     const deleted2 = await CartMenuItem.deleteMany({ cartId: cartIdStr });
     const deleted3 = await CartMenuItem.deleteMany({ cartId: cartId });
-    console.log(`[MENU CLONE] 🗑️ Deleted ${deleted1.deletedCount} (ObjectId) + ${deleted2.deletedCount} (string) + ${deleted3.deletedCount} (direct)`);
+    // console.log(`[MENU CLONE] 🗑️ Deleted ${deleted1.deletedCount} (ObjectId) + ${deleted2.deletedCount} (string) + ${deleted3.deletedCount} (direct)`);
     
     // Wait for deletion to commit
     await new Promise(resolve => setTimeout(resolve, 300));
@@ -224,8 +224,8 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
       }
     }
     
-    console.log(`[MENU CLONE] ✅ CLEANUP COMPLETE: All menu data deleted (0 items remaining)`);
-    console.log(`[MENU CLONE] Database is now clean and ready for fresh menu clone`);
+    // console.log(`[MENU CLONE] ✅ CLEANUP COMPLETE: All menu data deleted (0 items remaining)`);
+    // console.log(`[MENU CLONE] Database is now clean and ready for fresh menu clone`);
 
     // Get all franchise menu items
     const franchiseItems = await FranchiseMenuItem.find({
@@ -244,7 +244,7 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
       };
     }
 
-    console.log(`[MENU CLONE] Cloning ${franchiseItems.length} items from franchise ${franchiseId} to cart ${cartId}`);
+    // console.log(`[MENU CLONE] Cloning ${franchiseItems.length} items from franchise ${franchiseId} to cart ${cartId}`);
 
     // Clone each item with new ID
     // CRITICAL: Each item gets a NEW _id - no shared references
@@ -278,15 +278,15 @@ async function cloneFranchiseMenuToCart(cartId, franchiseId) {
 
     // Final verification - ensure we have the correct number of items
     const finalItemCount = await CartMenuItem.countDocuments({ cartId: cartObjectId });
-    console.log(`[MENU CLONE] ✅ Successfully cloned ${createdItems.length} items to cart ${cartId}`);
-    console.log(`[MENU CLONE] ✅ Final verification: ${finalItemCount} items in database (expected: ${createdItems.length})`);
+    // console.log(`[MENU CLONE] ✅ Successfully cloned ${createdItems.length} items to cart ${cartId}`);
+    // console.log(`[MENU CLONE] ✅ Final verification: ${finalItemCount} items in database (expected: ${createdItems.length})`);
     
     if (finalItemCount !== createdItems.length) {
       console.error(`[MENU CLONE] ⚠️ WARNING: Item count mismatch! Expected ${createdItems.length}, got ${finalItemCount}`);
     }
     
-    console.log(`[MENU CLONE] ✅ Cart ${cartId} now has UNIQUE menu data (not shared with other carts)`);
-    console.log(`[MENU CLONE] ✅ All previous menu data has been deleted and replaced with fresh clone`);
+    // console.log(`[MENU CLONE] ✅ Cart ${cartId} now has UNIQUE menu data (not shared with other carts)`);
+    // console.log(`[MENU CLONE] ✅ All previous menu data has been deleted and replaced with fresh clone`);
 
     return {
       success: true,
