@@ -71,13 +71,13 @@ function buildKot(items) {
     const quantity = Number(it.quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) {
       throw new Error(
-        `Item at index ${index} (${it.name}) has invalid quantity: ${it.quantity}`
+        `Item at index ${index} (${it.name}) has invalid quantity: ${it.quantity}`,
       );
     }
     let price = Number(it.price);
     if (!Number.isFinite(price) || price < 0) {
       throw new Error(
-        `Item at index ${index} (${it.name}) has invalid price: ${it.price}`
+        `Item at index ${index} (${it.name}) has invalid price: ${it.price}`,
       );
     }
 
@@ -87,7 +87,7 @@ function buildKot(items) {
       it.extras.forEach((extra, extraIndex) => {
         if (!extra || typeof extra !== "object") return;
         if (!extra.name || typeof extra.name !== "string") return;
-        
+
         const extraPrice = Number(extra.price);
         if (Number.isFinite(extraPrice) && extraPrice >= 0) {
           price += extraPrice; // Add extra price to item price
@@ -287,13 +287,13 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
         await notifyNextWaitlist(tableId, io);
       } else {
         console.log(
-          `[TABLE] Table ${table.number} released but already has NOTIFIED waitlist entry - skipping notification`
+          `[TABLE] Table ${table.number} released but already has NOTIFIED waitlist entry - skipping notification`,
         );
       }
     }
 
     console.log(
-      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE (Order ${order._id} status: ${order.status})`
+      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE (Order ${order._id} status: ${order.status})`,
     );
   } catch (err) {
     console.error("Failed to release table", err);
@@ -371,7 +371,7 @@ const createOrder = async (req, res) => {
             tableId,
             tableNumber,
             hasItems: items && items.length > 0,
-          }
+          },
         );
         return res.status(400).json({
           message:
@@ -416,7 +416,7 @@ const createOrder = async (req, res) => {
             // User has an active order with matching sessionToken - allow order creation
             hasActiveOrderForTable = true;
             console.log(
-              `[ORDER] User has active order ${existingOrderForTable._id} for table ${tableDoc.number} - allowing order creation`
+              `[ORDER] User has active order ${existingOrderForTable._id} for table ${tableDoc.number} - allowing order creation`,
             );
           }
         } catch (err) {
@@ -445,7 +445,7 @@ const createOrder = async (req, res) => {
           if (existingOrderForTable) {
             hasActiveOrderForTable = true;
             console.log(
-              `[ORDER] Found active order ${existingOrderForTable._id} for table ${tableDoc.number} with matching sessionToken - allowing order creation`
+              `[ORDER] Found active order ${existingOrderForTable._id} for table ${tableDoc.number} with matching sessionToken - allowing order creation`,
             );
           }
         } catch (err) {
@@ -483,7 +483,7 @@ const createOrder = async (req, res) => {
             currentOrder: tableDoc.currentOrder,
             tableStatus: tableDoc.status,
             tableHasOtherOrder,
-          }
+          },
         );
         return res.status(403).json({
           message: "This table is currently assigned to another guest.",
@@ -499,7 +499,7 @@ const createOrder = async (req, res) => {
         tableDoc.status !== "OCCUPIED"
       ) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has sessionToken mismatch but status is ${tableDoc.status} - updating sessionToken to: ${sessionToken}`
+          `[ORDER] Table ${tableDoc.number} has sessionToken mismatch but status is ${tableDoc.status} - updating sessionToken to: ${sessionToken}`,
         );
         tableDoc.sessionToken = sessionToken;
       }
@@ -507,7 +507,7 @@ const createOrder = async (req, res) => {
       // If table has no sessionToken, set it (user is claiming the table)
       if (!tableDoc.sessionToken && sessionToken) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has no sessionToken - setting it to: ${sessionToken}`
+          `[ORDER] Table ${tableDoc.number} has no sessionToken - setting it to: ${sessionToken}`,
         );
         tableDoc.sessionToken = sessionToken;
       }
@@ -516,7 +516,7 @@ const createOrder = async (req, res) => {
       // update table's sessionToken to match the order's sessionToken
       if (hasActiveOrderForTable && tableDoc.sessionToken !== sessionToken) {
         console.log(
-          `[ORDER] Updating table ${tableDoc.number} sessionToken to match active order: ${sessionToken}`
+          `[ORDER] Updating table ${tableDoc.number} sessionToken to match active order: ${sessionToken}`,
         );
         tableDoc.sessionToken = sessionToken;
       }
@@ -524,7 +524,7 @@ const createOrder = async (req, res) => {
       // If table has no sessionToken but user has active order, set it
       if (hasActiveOrderForTable && !tableDoc.sessionToken && sessionToken) {
         console.log(
-          `[ORDER] Setting table ${tableDoc.number} sessionToken from active order: ${sessionToken}`
+          `[ORDER] Setting table ${tableDoc.number} sessionToken from active order: ${sessionToken}`,
         );
         tableDoc.sessionToken = sessionToken;
       }
@@ -569,7 +569,7 @@ const createOrder = async (req, res) => {
     let counter = await Counter.findOneAndUpdate(
       { date: dateStr },
       { $inc: { seq: 1 } },
-      { new: true, upsert: true }
+      { new: true, upsert: true },
     );
 
     const seqStr = String(counter.seq).padStart(3, "0");
@@ -584,7 +584,7 @@ const createOrder = async (req, res) => {
       cartId = req.user._id;
       console.log(
         "[ORDER] Using cartId from authenticated user:",
-        cartId.toString()
+        cartId.toString(),
       );
     } else if (isTakeaway && requestCartId && !isPickup && !isDelivery) {
       // For regular takeaway orders (not pickup/delivery), use cartId from request body (sent by customer frontend)
@@ -602,11 +602,11 @@ const createOrder = async (req, res) => {
         cartId = requestCartId;
         console.log(
           "[ORDER] Using cartId from request body for takeaway:",
-          cartId.toString()
+          cartId.toString(),
         );
       } else {
         console.warn(
-          `[ORDER] WARNING: Invalid cartId in request (${requestCartId}). Cart admin not found or not active/approved. Falling back to first active cafe.`
+          `[ORDER] WARNING: Invalid cartId in request (${requestCartId}). Cart admin not found or not active/approved. Falling back to first active cafe.`,
         );
         // Fall through to fallback logic below
       }
@@ -652,7 +652,7 @@ const createOrder = async (req, res) => {
             : requestCartId;
           console.log(
             "[ORDER] Using requestCartId as cartAdminId (backward compatibility):",
-            cartAdminId
+            cartAdminId,
           );
         }
 
@@ -689,7 +689,7 @@ const createOrder = async (req, res) => {
       } catch (cartError) {
         console.error(
           "[ORDER] Error processing cart for pickup/delivery:",
-          cartError
+          cartError,
         );
         return res.status(400).json({
           message: `Failed to process cart: ${cartError.message}`,
@@ -740,13 +740,13 @@ const createOrder = async (req, res) => {
           customerLocation.longitude,
           cart.coordinates.latitude,
           cart.coordinates.longitude,
-          cart.deliveryRadius || 5
+          cart.deliveryRadius || 5,
         );
 
         if (!rangeCheck.isWithinRange) {
           return res.status(400).json({
             message: `Delivery not available. You are ${rangeCheck.distance.toFixed(
-              2
+              2,
             )} km away, but maximum delivery radius is ${
               cart.deliveryRadius || 5
             } km.`,
@@ -790,11 +790,11 @@ const createOrder = async (req, res) => {
         cartId = firstCafe._id;
         console.log(
           "[ORDER] Using cartId from first active cafe for takeaway (fallback):",
-          cartId.toString()
+          cartId.toString(),
         );
       } else {
         console.warn(
-          "[ORDER] WARNING: No active cafe admin found for takeaway order. Order will be created without cartId."
+          "[ORDER] WARNING: No active cafe admin found for takeaway order. Order will be created without cartId.",
         );
         // Allow order to be created without cartId - it will be visible to super admin only
       }
@@ -950,7 +950,7 @@ const createOrder = async (req, res) => {
         const usedTokens = new Set(
           existingTokens
             .map((o) => o.takeawayToken)
-            .filter((v) => Number.isInteger(v) && v > 0)
+            .filter((v) => Number.isInteger(v) && v > 0),
         );
 
         // Find the smallest positive integer not currently in use
@@ -963,7 +963,7 @@ const createOrder = async (req, res) => {
         console.log(
           `[ORDER] Generated takeaway token ${
             orderData.takeawayToken
-          } for cart ${cartId.toString()}`
+          } for cart ${cartId.toString()}`,
         );
       }
     }
@@ -997,12 +997,12 @@ const createOrder = async (req, res) => {
       if (createError.errors) {
         console.error(
           "[ORDER] Validation errors:",
-          JSON.stringify(createError.errors, null, 2)
+          JSON.stringify(createError.errors, null, 2),
         );
       }
       console.error(
         "[ORDER] Order data that failed:",
-        JSON.stringify(orderData, null, 2)
+        JSON.stringify(orderData, null, 2),
       );
       return res.status(400).json({
         message: `Failed to create order: ${createError.message}`,
@@ -1022,18 +1022,18 @@ const createOrder = async (req, res) => {
         .then((consumptionResult) => {
           if (consumptionResult.success) {
             console.log(
-              `[COSTING] ✅ Successfully consumed ingredients for newly created order ${order._id}`
+              `[COSTING] ✅ Successfully consumed ingredients for newly created order ${order._id}`,
             );
           } else {
             console.warn(
               `[COSTING] ⚠️ Failed to consume ingredients for order ${order._id}:`,
-              consumptionResult.error || consumptionResult.message
+              consumptionResult.error || consumptionResult.message,
             );
             // Log detailed error for debugging
             if (consumptionResult.summary?.errors?.length > 0) {
               console.warn(
                 `[COSTING] Consumption errors:`,
-                consumptionResult.summary.errors
+                consumptionResult.summary.errors,
               );
             }
           }
@@ -1041,12 +1041,12 @@ const createOrder = async (req, res) => {
         .catch((consumptionError) => {
           console.error(
             `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
-            consumptionError
+            consumptionError,
           );
         });
     } else {
       console.warn(
-        `[COSTING] ⚠️ Cannot consume ingredients for order ${order._id}: No user ID available`
+        `[COSTING] ⚠️ Cannot consume ingredients for order ${order._id}: No user ID available`,
       );
     }
 
@@ -1072,7 +1072,7 @@ const createOrder = async (req, res) => {
       }
 
       console.log(
-        `[TABLE] Table ${tableDoc.number} marked as OCCUPIED for order ${order._id}`
+        `[TABLE] Table ${tableDoc.number} marked as OCCUPIED for order ${order._id}`,
       );
     }
 
@@ -1118,7 +1118,7 @@ const createOrder = async (req, res) => {
           // Phone or email is required to create customer
           if (!normalizedPhone && !normalizedEmail) {
             console.log(
-              "[ORDER] Skipping customer creation - no phone or email provided"
+              "[ORDER] Skipping customer creation - no phone or email provided",
             );
             return;
           }
@@ -1170,7 +1170,7 @@ const createOrder = async (req, res) => {
 
           console.log(
             "[ORDER] Customer search query:",
-            JSON.stringify(query, null, 2)
+            JSON.stringify(query, null, 2),
           );
 
           // Try to find existing customer
@@ -1247,7 +1247,7 @@ const createOrder = async (req, res) => {
             console.log(
               `✅ [ORDER] Updated customer record: ${customer.name} (${
                 customer.phone || customer.email
-              }) - Visit #${customer.visitCount} for order ${orderId}`
+              }) - Visit #${customer.visitCount} for order ${orderId}`,
             );
           } else {
             // Create new customer record
@@ -1311,7 +1311,7 @@ const createOrder = async (req, res) => {
               console.log(
                 `✅ [ORDER] Created new customer record: ${customer.name} (${
                   customer.phone || customer.email
-                }) for order ${orderId}`
+                }) for order ${orderId}`,
               );
               console.log("[ORDER] Created customer details:", {
                 customerId: customer._id.toString(),
@@ -1323,7 +1323,7 @@ const createOrder = async (req, res) => {
 
               // Verify customer was created correctly
               const verifyCustomer = await Customer.findById(
-                customer._id
+                customer._id,
               ).lean();
               if (verifyCustomer) {
                 console.log(
@@ -1334,7 +1334,7 @@ const createOrder = async (req, res) => {
                     name: verifyCustomer.name,
                     phone: verifyCustomer.phone,
                     email: verifyCustomer.email,
-                  }
+                  },
                 );
 
                 // Test query that customer management panel would use
@@ -1354,11 +1354,11 @@ const createOrder = async (req, res) => {
                           cartId: testCustomers[0].cartId?.toString(),
                         }
                       : null,
-                  }
+                  },
                 );
               } else {
                 console.error(
-                  "[ORDER] Customer verification FAILED - Customer not found after creation!"
+                  "[ORDER] Customer verification FAILED - Customer not found after creation!",
                 );
               }
             } catch (createError) {
@@ -1376,7 +1376,7 @@ const createOrder = async (req, res) => {
           // Log error but don't fail the order creation
           console.error(
             "[ORDER] Failed to create/update customer record:",
-            customerError
+            customerError,
           );
           console.error("[ORDER] Customer error stack:", customerError.stack);
           console.error("[ORDER] Customer error details:", {
@@ -1431,7 +1431,7 @@ const addKot = async (req, res) => {
   console.log("[ORDER] addKot - Order ID:", req.params.id);
   console.log(
     "[ORDER] addKot - Request body:",
-    JSON.stringify(req.body, null, 2)
+    JSON.stringify(req.body, null, 2),
   );
   try {
     const { items } = req.body;
@@ -1447,7 +1447,7 @@ const addKot = async (req, res) => {
       console.error(
         "[ORDER] addKot - Items is not an array:",
         typeof items,
-        items
+        items,
       );
       return res
         .status(400)
@@ -1489,7 +1489,7 @@ const addKot = async (req, res) => {
     if (blockedStatuses.includes(order.status)) {
       console.error(
         "[ORDER] addKot - Order is in a final status that blocks KOTs:",
-        order.status
+        order.status,
       );
       return res.status(400).json({
         message: `Cannot add items to order with status: ${
@@ -1502,7 +1502,7 @@ const addKot = async (req, res) => {
     if (!allowedStatusesForKot.includes(order.status)) {
       console.error(
         "[ORDER] addKot - Order status does not allow adding KOTs:",
-        order.status
+        order.status,
       );
       return res.status(400).json({
         message: `Order is not open for adding items. Current status: ${order.status}. Please contact staff if you need to modify your order.`,
@@ -1640,7 +1640,7 @@ const addKot = async (req, res) => {
           // Phone or email is required to find customer
           if (!normalizedPhone && !normalizedEmail) {
             console.log(
-              "[ORDER] addKot - Skipping customer update - no phone or email"
+              "[ORDER] addKot - Skipping customer update - no phone or email",
             );
             return;
           }
@@ -1687,7 +1687,7 @@ const addKot = async (req, res) => {
             console.log(
               `✅ [ORDER] addKot - Updated customer record: ${customer.name} (${
                 customer.phone || customer.email
-              }) for order ${order._id}`
+              }) for order ${order._id}`,
             );
           } else {
             console.log(
@@ -1695,14 +1695,14 @@ const addKot = async (req, res) => {
                 order._id
               } (phone: ${normalizedPhone || "N/A"}, email: ${
                 normalizedEmail || "N/A"
-              })`
+              })`,
             );
           }
         } catch (customerError) {
           // Log error but don't fail the order update
           console.error(
             "[ORDER] addKot - Failed to update customer record:",
-            customerError
+            customerError,
           );
         }
       })();
@@ -1761,17 +1761,34 @@ const finalizeOrder = async (req, res) => {
     await order.save();
 
     // Selective token consumption: only when we have a valid User ObjectId (InventoryTransactionV2.recordedBy)
-    const userId = req.user ? req.user._id : (order.cartId && (order.cartId._id || order.cartId));
+    const userId = req.user
+      ? req.user._id
+      : order.cartId && (order.cartId._id || order.cartId);
     if (userId) {
-      console.log(`[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`);
+      console.log(
+        `[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`,
+      );
       consumeIngredientsForOrder(order, userId)
-      .then(result => {
-         if (result.success) console.log(`[COSTING] Finalized order ${order._id} consumption success`);
-         else console.warn(`[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`);
-      })
-      .catch(err => console.error(`[COSTING] Finalized order ${order._id} consumption error:`, err));
+        .then((result) => {
+          if (result.success)
+            console.log(
+              `[COSTING] Finalized order ${order._id} consumption success`,
+            );
+          else
+            console.warn(
+              `[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`,
+            );
+        })
+        .catch((err) =>
+          console.error(
+            `[COSTING] Finalized order ${order._id} consumption error:`,
+            err,
+          ),
+        );
     } else {
-      console.warn(`[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`);
+      console.warn(
+        `[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`,
+      );
     }
 
     // Release table when order is finalized
@@ -1811,7 +1828,7 @@ const getOrders = async (req, res) => {
       // This ensures complete data isolation between carts
       query.cartId = req.user._id;
       console.log(
-        `[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`
+        `[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`,
       );
     } else if (
       req.user &&
@@ -1821,7 +1838,7 @@ const getOrders = async (req, res) => {
       // Franchise admin - only see orders from cafes under their franchise
       query.franchiseId = req.user._id;
       console.log(
-        `[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`
+        `[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`,
       );
     } else if (
       req.user &&
@@ -1832,12 +1849,12 @@ const getOrders = async (req, res) => {
       if (req.user.cafeId) {
         query.cartId = req.user.cafeId;
         console.log(
-          `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`
+          `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`,
         );
       } else {
         // If cafeId not set, return empty array (should not happen if middleware works correctly)
         console.warn(
-          `[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`
+          `[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`,
         );
         return res.json([]);
       }
@@ -1857,7 +1874,7 @@ const getOrders = async (req, res) => {
     // Optimize franchiseId population: Batch fetch instead of N+1 queries
     const User = require("../models/userModel");
     const ordersNeedingFranchiseId = orders.filter(
-      (order) => !order.franchiseId && order.cartId
+      (order) => !order.franchiseId && order.cartId,
     );
 
     if (ordersNeedingFranchiseId.length > 0) {
@@ -1865,8 +1882,8 @@ const getOrders = async (req, res) => {
       const cartIds = [
         ...new Set(
           ordersNeedingFranchiseId.map((o) =>
-            o.cartId.toString ? o.cartId.toString() : o.cartId
-          )
+            o.cartId.toString ? o.cartId.toString() : o.cartId,
+          ),
         ),
       ];
 
@@ -1875,7 +1892,7 @@ const getOrders = async (req, res) => {
         .lean();
 
       const cafeMap = new Map(
-        cafes.map((c) => [c._id.toString(), c.franchiseId])
+        cafes.map((c) => [c._id.toString(), c.franchiseId]),
       );
 
       // Update orders in memory and batch update in background
@@ -1892,9 +1909,9 @@ const getOrders = async (req, res) => {
             Order.findByIdAndUpdate(order._id, { franchiseId }).catch((err) => {
               console.warn(
                 `[GET_ORDERS] Failed to update order ${order._id} franchiseId:`,
-                err.message
+                err.message,
               );
-            })
+            }),
           );
         }
       }
@@ -2183,12 +2200,12 @@ const addItemsToOrder = async (req, res) => {
       await order.save();
       console.log(
         "[ORDER] addItemsToOrder - Order updated successfully:",
-        order._id
+        order._id,
       );
     } catch (saveError) {
       console.error(
         "[ORDER] addItemsToOrder - Failed to save order:",
-        saveError
+        saveError,
       );
       return res.status(400).json({
         message: `Failed to save order: ${saveError.message}`,
@@ -2231,7 +2248,8 @@ const acceptOrder = async (req, res) => {
     const allowedServiceTypes = ["TAKEAWAY", "PICKUP", "DELIVERY"];
     if (!allowedServiceTypes.includes(order.serviceType)) {
       return res.status(400).json({
-        message: "Order acceptance is only for takeaway, pickup, or delivery orders",
+        message:
+          "Order acceptance is only for takeaway, pickup, or delivery orders",
       });
     }
 
@@ -2250,10 +2268,14 @@ const acceptOrder = async (req, res) => {
     // Check cart access for waiter/captain/manager
     const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
     if (!userCartId) {
-      return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+      return res
+        .status(403)
+        .json({ message: "No cart/kiosk assigned to your account" });
     }
     if (!order.cartId || order.cartId.toString() !== userCartId) {
-      return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+      return res
+        .status(403)
+        .json({ message: "Order does not belong to your cart/kiosk" });
     }
 
     // Lookup employee by userId
@@ -2291,7 +2313,7 @@ const acceptOrder = async (req, res) => {
           acceptedBy,
         },
       },
-      { new: true }
+      { new: true },
     );
 
     if (!updatedOrder) {
@@ -2303,8 +2325,18 @@ const acceptOrder = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (io && updatedOrder.cartId && emitToCafe) {
-      emitToCafe(io, updatedOrder.cartId.toString(), "order:status:updated", updatedOrder);
-      emitToCafe(io, updatedOrder.cartId.toString(), "orderUpdated", updatedOrder);
+      emitToCafe(
+        io,
+        updatedOrder.cartId.toString(),
+        "order:status:updated",
+        updatedOrder,
+      );
+      emitToCafe(
+        io,
+        updatedOrder.cartId.toString(),
+        "orderUpdated",
+        updatedOrder,
+      );
     }
 
     return res.json(updatedOrder);
@@ -2353,13 +2385,20 @@ const updateOrderStatus = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your franchise" });
       }
-    } else if (req.user && ["waiter", "cook", "captain", "manager"].includes(req.user.role)) {
+    } else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
       const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
       if (!userCartId) {
-        return res.status(403).json({ message: "No cart/kiosk assigned to your account" });
+        return res
+          .status(403)
+          .json({ message: "No cart/kiosk assigned to your account" });
       }
       if (!order.cartId || order.cartId.toString() !== userCartId) {
-        return res.status(403).json({ message: "Order does not belong to your cart/kiosk" });
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
     // For super_admin, no restriction (they can update all orders)
@@ -2476,7 +2515,7 @@ const updateOrderStatus = async (req, res) => {
     const updatedOrder = await Order.findByIdAndUpdate(
       req.params.id,
       updateData,
-      { new: true, runValidators: false } // Skip validators for speed
+      { new: true, runValidators: false }, // Skip validators for speed
     )
       .populate("table", "number name status")
       .lean();
@@ -2504,51 +2543,65 @@ const updateOrderStatus = async (req, res) => {
       "Confirmed",
       "Accepted",
     ];
-    
-    const shouldConsumeIngredients = consumptionTriggerStatuses.includes(status);
+
+    const shouldConsumeIngredients =
+      consumptionTriggerStatuses.includes(status);
 
     if (shouldConsumeIngredients) {
       // Selective token consumption: only run when we have a valid User ObjectId (required by InventoryTransactionV2.recordedBy)
-      const userId = req.user ? req.user._id : (updatedOrder.cartId && (updatedOrder.cartId._id || updatedOrder.cartId));
+      const userId = req.user
+        ? req.user._id
+        : updatedOrder.cartId &&
+          (updatedOrder.cartId._id || updatedOrder.cartId);
       if (!userId) {
-        console.warn(`[COSTING] Skipping consumption for order ${updatedOrder._id}: no req.user and no order.cartId`);
+        console.warn(
+          `[COSTING] Skipping consumption for order ${updatedOrder._id}: no req.user and no order.cartId`,
+        );
       } else {
-        console.log(`[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`);
+        console.log(
+          `[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`,
+        );
 
         // Run ingredient consumption in background (non-blocking)
         consumeIngredientsForOrder(updatedOrder, userId)
-        .then((consumptionResult) => {
-          if (consumptionResult.success) {
-            console.log(
-              `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`
-            );
-          } else {
-            // It's normal to have "already processed" or "no items" - log as info, not error/warn
-            const isBenign = consumptionResult.alreadyProcessed || consumptionResult.message?.includes("No new items");
-             if (isBenign) {
-                console.log(`[COSTING] ℹ️ Consumption skipped for ${order._id}: ${consumptionResult.message}`);
-             } else {
-
+          .then((consumptionResult) => {
+            if (consumptionResult.success) {
+              console.log(
+                `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`,
+              );
+            } else {
+              // It's normal to have "already processed" or "no items" - log as info, not error/warn
+              const isBenign =
+                consumptionResult.alreadyProcessed ||
+                consumptionResult.message?.includes("No new items");
+              if (isBenign) {
+                console.log(
+                  `[COSTING] ℹ️ Consumption skipped for ${order._id}: ${consumptionResult.message}`,
+                );
+              } else {
                 console.warn(
-                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`
+                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
                 );
                 if (consumptionResult.summary?.errors) {
-                  consumptionResult.summary.errors.forEach(e => {
-                     console.warn(` - ${e.item}: ${e.error}`);
+                  consumptionResult.summary.errors.forEach((e) => {
+                    console.warn(` - ${e.item}: ${e.error}`);
                   });
                 } else {
-                   console.warn(consumptionResult.error || consumptionResult.message || "Unknown error");
+                  console.warn(
+                    consumptionResult.error ||
+                      consumptionResult.message ||
+                      "Unknown error",
+                  );
                 }
-             }
-
-          }
-        })
-        .catch((consumptionError) => {
-          console.error(
-            `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
-            consumptionError
-          );
-        });
+              }
+            }
+          })
+          .catch((consumptionError) => {
+            console.error(
+              `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
+              consumptionError,
+            );
+          });
       }
     }
 
@@ -2562,7 +2615,7 @@ const updateOrderStatus = async (req, res) => {
         io,
         order.cartId.toString(),
         "order:status:updated",
-        updatedOrder
+        updatedOrder,
       );
       emitToCafe(io, order.cartId.toString(), "orderUpdated", updatedOrder); // Legacy support
     }
@@ -2579,7 +2632,7 @@ const updateOrderStatus = async (req, res) => {
                 status: "PAID",
                 method: "CASH",
                 description: "Payment recorded via admin panel",
-              }
+              },
             );
             if (payment && io) {
               const payload = formatPaymentPayload(payment);
@@ -2694,7 +2747,7 @@ const cancelOrderByCustomer = async (req, res) => {
         // Order has no sessionToken - allow cancellation for backward compatibility
         // This handles old orders created before sessionToken was required
         console.log(
-          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation for backward compatibility`
+          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation for backward compatibility`,
         );
       }
     }
@@ -2855,21 +2908,23 @@ const confirmPaymentByCustomer = async (req, res) => {
         .then((result) => {
           if (result.success)
             console.log(
-              `[COSTING] Customer paid order ${order._id} consumption success`
+              `[COSTING] Customer paid order ${order._id} consumption success`,
             );
           else
             console.warn(
-              `[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`
+              `[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`,
             );
         })
         .catch((err) =>
           console.error(
             `[COSTING] Customer paid order ${order._id} consumption error:`,
-            err
-          )
+            err,
+          ),
         );
     } else {
-        console.warn(`[COSTING] Skipping consumption for customer payment - no cartId on order ${order._id}`);
+      console.warn(
+        `[COSTING] Skipping consumption for customer payment - no cartId on order ${order._id}`,
+      );
     }
 
     // Create or update payment record
@@ -3292,9 +3347,14 @@ const convertToTakeaway = async (req, res) => {
 const updatePrintStatus = async (req, res) => {
   try {
     const { kotPrinted, billPrinted, lastPrintedKotIndex } = req.body;
-    if (kotPrinted === undefined && billPrinted === undefined && lastPrintedKotIndex === undefined) {
+    if (
+      kotPrinted === undefined &&
+      billPrinted === undefined &&
+      lastPrintedKotIndex === undefined
+    ) {
       return res.status(400).json({
-        message: "At least one of kotPrinted, billPrinted, or lastPrintedKotIndex is required",
+        message:
+          "At least one of kotPrinted, billPrinted, or lastPrintedKotIndex is required",
       });
     }
 
@@ -3311,7 +3371,10 @@ const updatePrintStatus = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your cafe" });
       }
-    } else if (req.user && ["manager", "waiter", "captain"].includes(req.user.role)) {
+    } else if (
+      req.user &&
+      ["manager", "waiter", "captain"].includes(req.user.role)
+    ) {
       if (!req.user.cafeId && !req.user.cartId) {
         return res
           .status(403)
@@ -3344,7 +3407,7 @@ const updatePrintStatus = async (req, res) => {
     const updated = await Order.findOneAndUpdate(
       filter,
       { $set: update },
-      { new: true }
+      { new: true },
     )
       .populate("table")
       .lean();

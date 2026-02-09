@@ -52,15 +52,30 @@ exports.getAddons = async (req, res) => {
 
 /**
  * Get public add-ons for customer frontend
+ * Accepts cartId OR tableId (when cart page is opened with ?table=xxx we resolve table -> cartId)
  */
 exports.getPublicAddons = async (req, res) => {
   try {
-    const { cartId } = req.query;
+    let cartId = typeof req.query.cartId === "string" ? req.query.cartId.trim() : (req.query.cartId && String(req.query.cartId).trim()) || "";
+    const tableId = typeof req.query.tableId === "string" ? req.query.tableId.trim() : (req.query.tableId && String(req.query.tableId).trim()) || "";
+
+    if (!cartId && tableId && mongoose.Types.ObjectId.isValid(tableId)) {
+      try {
+        const Table = require("../models/tableModel");
+        const table = await Table.findById(tableId).select("cartId").lean();
+        if (table && table.cartId) {
+          cartId = table.cartId.toString();
+          console.log("[ADDON_PUBLIC] Resolved tableId to cartId:", { tableId, cartId });
+        }
+      } catch (err) {
+        console.warn("[ADDON_PUBLIC] Failed to resolve tableId:", err.message);
+      }
+    }
 
     if (!cartId) {
       return res.status(400).json({
         success: false,
-        message: "cartId is required",
+        message: "cartId or tableId is required",
       });
     }
 
@@ -103,76 +118,105 @@ exports.getPublicAddons = async (req, res) => {
 
     let addons = [];
     const User = require("../models/userModel");
+    const Cart = require("../models/cartModel");
 
-    // STEP 1: Try exact cartId match (ObjectId) with resolved ID
-    if (isValidTargetId) {
-      console.log("[ADDON_PUBLIC] STEP 1: Trying exact cartId match (ObjectId)...");
+    // Build list of IDs to match: cart admin User _id + original cartId + Cart document _id (add-ons may be stored with any of these)
+    const originalCartIdObj = mongoose.Types.ObjectId.isValid(cartId) ? new mongoose.Types.ObjectId(cartId) : null;
+    const idsToMatch = [];
+    if (cartIdObj) idsToMatch.push(cartIdObj);
+    if (originalCartIdObj && (!cartIdObj || originalCartIdObj.toString() !== cartIdObj.toString())) {
+      idsToMatch.push(originalCartIdObj);
+    }
+    // Include Cart document _id: table.cartId is User _id; Cart has cartAdminId = User _id; add-ons might be stored with Cart._id
+    if (cartIdObj) {
+      try {
+        const cartDoc = await Cart.findOne({ cartAdminId: cartIdObj }).select("_id").lean();
+        if (cartDoc && cartDoc._id) {
+          const cartDocIdStr = cartDoc._id.toString();
+          if (!idsToMatch.some((id) => id.toString() === cartDocIdStr)) {
+            idsToMatch.push(cartDoc._id);
+          }
+        }
+      } catch (_) {}
+    }
+    if (idsToMatch.length === 0 && originalCartIdObj) idsToMatch.push(originalCartIdObj);
+
+    // STEP 1: Match add-ons by cartId = any of the ids we collected (User _id or Cart _id)
+    if (idsToMatch.length > 0) {
+      console.log("[ADDON_PUBLIC] STEP 1: Matching addons by cartId in:", idsToMatch.map((id) => id.toString()));
       addons = await Addon.find({
-        cartId: cartIdObj,
-        isAvailable: true,
-      }).sort({ sortOrder: 1, name: 1 });
+        cartId: idsToMatch.length === 1 ? idsToMatch[0] : { $in: idsToMatch },
+        $or: [{ isAvailable: true }, { isAvailable: { $exists: false } }],
+      }).sort({ sortOrder: 1, name: 1 }).lean();
+      addons = addons.filter((a) => a.isAvailable !== false);
       console.log("[ADDON_PUBLIC] STEP 1 Result:", addons.length, "addons found");
     }
 
-    // STEP 2: If no match, try both ObjectId and string comparison using $or
-    if (addons.length === 0) {
-      console.log("[ADDON_PUBLIC] STEP 2: Trying flexible cartId match ($or query)...");
+    // STEP 2: If no match, try with original cartId (string) - Mongoose may cast to ObjectId
+    if (addons.length === 0 && cartId && mongoose.Types.ObjectId.isValid(cartId)) {
       const flexibleMatchAddons = await Addon.find({
-        $or: [
-          { cartId: cartIdObj },
-          { cartId: targetCartId }, // Try string match too
-        ],
+        cartId: cartId,
         isAvailable: true,
-      }).sort({ sortOrder: 1, name: 1 });
-      console.log("[ADDON_PUBLIC] STEP 2 Result:", flexibleMatchAddons.length, "addons found");
+      }).sort({ sortOrder: 1, name: 1 }).lean();
       if (flexibleMatchAddons.length > 0) {
         addons = flexibleMatchAddons;
+        console.log("[ADDON_PUBLIC] STEP 2 Result:", addons.length, "addons found (by raw cartId)");
       }
     }
 
-    // STEP 3: Try to find cart admin and match by franchiseId
-    if (addons.length === 0 && isValidTargetId) {
-      console.log("[ADDON_PUBLIC] STEP 3: Looking up cart admin and trying franchiseId match...");
-      try {
-        const cartAdmin = await User.findById(cartIdObj).select("franchiseId _id name role");
-        if (cartAdmin) {
-          console.log("[ADDON_PUBLIC] Cart admin found:", {
-            _id: cartAdmin._id.toString(),
-            name: cartAdmin.name,
-            role: cartAdmin.role,
-            franchiseId: cartAdmin.franchiseId?.toString()
-          });
-          
-          // Try matching by cart admin's _id (in case there's a mismatch)
-          // This duplicates Step 1 but keeps logic identical to previous version if cartId was already admin ID
-          console.log("[ADDON_PUBLIC] STEP 3a: Trying match by cart admin _id...");
-          const adminIdMatch = await Addon.find({
-            cartId: cartAdmin._id,
-            isAvailable: true,
-          }).sort({ sortOrder: 1, name: 1 });
-          if (adminIdMatch.length > 0) {
-            addons = adminIdMatch;
-          }
-          
-          // Try franchiseId match if still no results
-          if (addons.length === 0 && cartAdmin.franchiseId) {
-            console.log("[ADDON_PUBLIC] STEP 3b: Trying franchiseId match:", cartAdmin.franchiseId.toString());
-            const franchiseAddons = await Addon.find({
-              franchiseId: cartAdmin.franchiseId,
-              isAvailable: true,
-            }).sort({ sortOrder: 1, name: 1 });
-            console.log("[ADDON_PUBLIC] STEP 3b Result:", franchiseAddons.length, "franchise addons found");
-            if (franchiseAddons.length > 0) {
-              addons = franchiseAddons;
-            }
-          }
-        } else {
-          console.warn("[ADDON_PUBLIC] ⚠️ Cart admin not found for targetCartId:", targetCartId);
-        }
-      } catch (err) {
-        console.error("[ADDON_PUBLIC] Error in STEP 3:", err);
+    // STEP 3: Fallback - find by cartId only (no isAvailable filter), then filter in code
+    if (addons.length === 0 && idsToMatch.length > 0) {
+      const anyMatch = await Addon.find({
+        cartId: idsToMatch.length === 1 ? idsToMatch[0] : { $in: idsToMatch },
+      }).sort({ sortOrder: 1, name: 1 }).lean();
+      if (anyMatch.length > 0) {
+        addons = anyMatch.filter((a) => a.isAvailable !== false);
+        console.log("[ADDON_PUBLIC] STEP 3 Result:", addons.length, "addons (matched without isAvailable filter)");
       }
     }
+
+    // STEP 3.5: FRANCHISE-LEVEL FALLBACK
+    // If no cart-specific add-ons found, check if this cart belongs to a franchise
+    // and fetch add-ons from all carts in the same franchise
+    if (addons.length === 0 && cartIdObj) {
+      try {
+        console.log("[ADDON_PUBLIC] STEP 3.5: Checking for franchise-level add-ons...");
+        
+        // Get the cart admin's franchise ID
+        const cartAdmin = await User.findById(cartIdObj).select("franchiseId").lean();
+        
+        if (cartAdmin && cartAdmin.franchiseId) {
+          console.log("[ADDON_PUBLIC] Cart belongs to franchise:", cartAdmin.franchiseId.toString());
+          
+          // Find all cart admins in this franchise
+          const franchiseAdmins = await User.find({
+            franchiseId: cartAdmin.franchiseId,
+            role: "admin"
+          }).select("_id").lean();
+          
+          const franchiseAdminIds = franchiseAdmins.map(admin => admin._id);
+          console.log("[ADDON_PUBLIC] Found", franchiseAdminIds.length, "cart admins in franchise");
+          
+          // Fetch add-ons from ANY cart in this franchise
+          const franchiseAddons = await Addon.find({
+            franchiseId: cartAdmin.franchiseId,
+            $or: [{ isAvailable: true }, { isAvailable: { $exists: false } }],
+          }).sort({ sortOrder: 1, name: 1 }).lean();
+          
+          if (franchiseAddons.length > 0) {
+            addons = franchiseAddons.filter((a) => a.isAvailable !== false);
+            console.log("[ADDON_PUBLIC] STEP 3.5 Result: Found", addons.length, "franchise-level add-ons");
+          } else {
+            console.log("[ADDON_PUBLIC] STEP 3.5 Result: No franchise-level add-ons found");
+          }
+        } else {
+          console.log("[ADDON_PUBLIC] STEP 3.5: Cart admin has no franchise - skipping franchise lookup");
+        }
+      } catch (err) {
+        console.warn("[ADDON_PUBLIC] STEP 3.5 Error:", err.message);
+      }
+    }
+
 
     // STEP 4: Comprehensive debugging - check what addons exist
     console.log("[ADDON_PUBLIC] STEP 4: Diagnostic check...");

@@ -28,20 +28,23 @@ exports.getPublicMenu = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(cartId)) {
         return res.status(400).json({ message: "Invalid cart ID" });
       }
-      
+
       // Check if cartId is a Cart document ID or cartAdminId (user ID)
       // Try to find Cart document first
       const Cart = require("../models/cartModel");
       const cart = await Cart.findById(cartId).lean();
-      
+
       if (cart && cart.cartAdminId) {
         // It's a Cart document ID - use the cartAdminId
         targetCartId = cart.cartAdminId;
-        console.log("[MENU] getPublicMenu - Found Cart document, using cartAdminId:", {
-          cartId: cartId,
-          cartAdminId: targetCartId,
-          cartAdminIdType: typeof targetCartId
-        });
+        console.log(
+          "[MENU] getPublicMenu - Found Cart document, using cartAdminId:",
+          {
+            cartId: cartId,
+            cartAdminId: targetCartId,
+            cartAdminIdType: typeof targetCartId,
+          },
+        );
       } else {
         // Assume it's already a cartAdminId (user ID) - backward compatibility
         // But also check if it's a table's cartId that might be a Cart document ID
@@ -50,11 +53,17 @@ exports.getPublicMenu = async (req, res) => {
         if (cartCheck) {
           // The cartId is actually a cartAdminId, use it directly
           targetCartId = cartId;
-          console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (verified):", targetCartId);
+          console.log(
+            "[MENU] getPublicMenu - Using cartId as cartAdminId (verified):",
+            targetCartId,
+          );
         } else {
           // Assume it's a cartAdminId (user ID) - backward compatibility
           targetCartId = cartId;
-          console.log("[MENU] getPublicMenu - Using cartId as cartAdminId (backward compatibility):", targetCartId);
+          console.log(
+            "[MENU] getPublicMenu - Using cartId as cartAdminId (backward compatibility):",
+            targetCartId,
+          );
         }
       }
     }
@@ -86,28 +95,33 @@ exports.getPublicMenu = async (req, res) => {
     if (targetCartId) {
       // Ensure targetCartId is ObjectId for proper matching
       targetCartIdObj = mongoose.Types.ObjectId.isValid(targetCartId)
-        ? (typeof targetCartId === "string" ? new mongoose.Types.ObjectId(targetCartId) : targetCartId)
+        ? typeof targetCartId === "string"
+          ? new mongoose.Types.ObjectId(targetCartId)
+          : targetCartId
         : targetCartId;
-      
+
       // Support both cartId (new) and cafeId (old) during migration transition
       // This ensures backward compatibility with existing data
       categoryQuery.$or = [
         { cartId: targetCartIdObj },
-        { cafeId: targetCartIdObj } // Support old cafeId field during migration
+        { cafeId: targetCartIdObj }, // Support old cafeId field during migration
       ];
       itemQuery.$or = [
         { cartId: targetCartIdObj },
-        { cafeId: targetCartIdObj } // Support old cafeId field during migration
+        { cafeId: targetCartIdObj }, // Support old cafeId field during migration
       ];
-      console.log("[MENU] getPublicMenu - Filtering by cartId (with cafeId fallback):", {
-        targetCartId: targetCartId.toString(),
-        targetCartIdObj: targetCartIdObj.toString(),
-        query: categoryQuery
-      });
+      console.log(
+        "[MENU] getPublicMenu - Filtering by cartId (with cafeId fallback):",
+        {
+          targetCartId: targetCartId.toString(),
+          targetCartIdObj: targetCartIdObj.toString(),
+          query: categoryQuery,
+        },
+      );
     } else {
       // Return empty menu if no cartId - prevents showing all carts' menus
       console.log(
-        "[MENU] getPublicMenu - No cartId found, returning empty menu"
+        "[MENU] getPublicMenu - No cartId found, returning empty menu",
       );
       return res.json([]);
     }
@@ -118,13 +132,15 @@ exports.getPublicMenu = async (req, res) => {
 
     console.log("[MENU] getPublicMenu - Categories found:", {
       count: categories.length,
-      categoryIds: categories.map(c => c._id.toString()),
-      sampleCategory: categories[0] ? {
-        _id: categories[0]._id.toString(),
-        name: categories[0].name,
-        cartId: categories[0].cartId?.toString(),
-        cafeId: categories[0].cafeId?.toString()
-      } : null
+      categoryIds: categories.map((c) => c._id.toString()),
+      sampleCategory: categories[0]
+        ? {
+            _id: categories[0]._id.toString(),
+            name: categories[0].name,
+            cartId: categories[0].cartId?.toString(),
+            cafeId: categories[0].cafeId?.toString(),
+          }
+        : null,
     });
 
     const categoryIds = categories.map((cat) => cat._id);
@@ -134,12 +150,15 @@ exports.getPublicMenu = async (req, res) => {
       // This ensures both filters are applied together
       itemQuery.$and = [
         { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
-        { category: { $in: categoryIds } } // Add category filter
+        { category: { $in: categoryIds } }, // Add category filter
       ];
       delete itemQuery.$or; // Remove $or from root level since it's now in $and
     } else {
       // No categories found for this cart
-      console.log("[MENU] getPublicMenu - No categories found, query was:", JSON.stringify(categoryQuery, null, 2));
+      console.log(
+        "[MENU] getPublicMenu - No categories found, query was:",
+        JSON.stringify(categoryQuery, null, 2),
+      );
       return res.json([]);
     }
 
@@ -150,20 +169,20 @@ exports.getPublicMenu = async (req, res) => {
     // Calculate order counts for each menu item (most selling items)
     const Order = require("../models/orderModel");
     const itemOrderCounts = {};
-    
+
     // Aggregate order counts from all completed/paid orders
     // Count items from kotLines where status is not Cancelled
     const orderQuery = {
-      status: { $nin: ["Cancelled"] }
+      status: { $nin: ["Cancelled"] },
     };
-    
+
     // Add cartId filter if targetCartIdObj exists
     if (targetCartIdObj) {
       orderQuery.cartId = targetCartIdObj;
     }
-    
+
     const orders = await Order.find(orderQuery).select("kotLines").lean();
-    
+
     // Count occurrences of each item name across all orders
     orders.forEach((order) => {
       if (order.kotLines && Array.isArray(order.kotLines)) {
@@ -172,14 +191,15 @@ exports.getPublicMenu = async (req, res) => {
             kotLine.items.forEach((item) => {
               if (item.name && !item.returned) {
                 // Count quantity, not just occurrences
-                itemOrderCounts[item.name] = (itemOrderCounts[item.name] || 0) + (item.quantity || 1);
+                itemOrderCounts[item.name] =
+                  (itemOrderCounts[item.name] || 0) + (item.quantity || 1);
               }
             });
           }
         });
       }
     });
-    
+
     // Add orderCount to each item
     const itemsWithOrderCount = items.map((item) => ({
       ...item,
@@ -189,12 +209,14 @@ exports.getPublicMenu = async (req, res) => {
     console.log("[MENU] getPublicMenu - Items found:", {
       count: items.length,
       itemQuery: JSON.stringify(itemQuery, null, 2),
-      sampleItem: items[0] ? {
-        _id: items[0]._id.toString(),
-        name: items[0].name,
-        cartId: items[0].cartId?.toString(),
-        cafeId: items[0].cafeId?.toString()
-      } : null
+      sampleItem: items[0]
+        ? {
+            _id: items[0]._id.toString(),
+            name: items[0].name,
+            cartId: items[0].cartId?.toString(),
+            cafeId: items[0].cafeId?.toString(),
+          }
+        : null,
     });
 
     // Helper function to decode HTML entities in image URLs
@@ -234,7 +256,9 @@ exports.getPublicMenu = async (req, res) => {
 exports.listMenu = async (req, res) => {
   try {
     // Optional cartId from query (for franchise/super admin: load a specific outlet's menu, e.g. when editing that outlet's order)
-    const queryCartId = req.query.cartId ? req.query.cartId.toString().trim() : null;
+    const queryCartId = req.query.cartId
+      ? req.query.cartId.toString().trim()
+      : null;
     const User = require("../models/userModel");
 
     let filterCartId = null;
@@ -243,9 +267,19 @@ exports.listMenu = async (req, res) => {
     } else if (queryCartId && mongoose.Types.ObjectId.isValid(queryCartId)) {
       const queryCartIdObj = new mongoose.Types.ObjectId(queryCartId);
       if (req.user.role === "franchise_admin") {
-        const outlet = await User.findById(queryCartIdObj).select("franchiseId").lean();
-        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
-          return res.status(403).json({ message: "Access denied: outlet does not belong to your franchise" });
+        const outlet = await User.findById(queryCartIdObj)
+          .select("franchiseId")
+          .lean();
+        if (
+          !outlet ||
+          outlet.franchiseId?.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({
+              message:
+                "Access denied: outlet does not belong to your franchise",
+            });
         }
         filterCartId = queryCartIdObj;
       } else if (req.user.role === "super_admin") {
@@ -257,14 +291,8 @@ exports.listMenu = async (req, res) => {
     const itemQuery = {};
 
     if (filterCartId) {
-      categoryQuery.$or = [
-        { cartId: filterCartId },
-        { cafeId: filterCartId }
-      ];
-      itemQuery.$or = [
-        { cartId: filterCartId },
-        { cafeId: filterCartId }
-      ];
+      categoryQuery.$or = [{ cartId: filterCartId }, { cafeId: filterCartId }];
+      itemQuery.$or = [{ cartId: filterCartId }, { cafeId: filterCartId }];
     }
 
     const categories = await MenuCategory.find(categoryQuery)
@@ -278,7 +306,7 @@ exports.listMenu = async (req, res) => {
       if (itemQuery.$or) {
         itemQuery.$and = [
           { $or: itemQuery.$or }, // Keep the cartId/cafeId filter
-          { category: { $in: categoryIds } } // Add category filter
+          { category: { $in: categoryIds } }, // Add category filter
         ];
         delete itemQuery.$or; // Remove $or from root level since it's now in $and
       } else {
@@ -422,7 +450,7 @@ exports.deleteCategory = async (req, res) => {
     // Delete all items in this category first (cascade delete)
     const itemsDeleted = await MenuItem.deleteMany({ category: id });
     console.log(
-      `[Menu] Deleted ${itemsDeleted.deletedCount} item(s) from category ${id} before deleting category`
+      `[Menu] Deleted ${itemsDeleted.deletedCount} item(s) from category ${id} before deleting category`,
     );
 
     // Now delete the category
@@ -476,11 +504,9 @@ exports.createItem = async (req, res) => {
       return res.status(400).json({ message: "Item price is required" });
     }
     if (!SPICE_LEVELS.includes(spiceLevel)) {
-      return res
-        .status(400)
-        .json({
-          message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
-        });
+      return res.status(400).json({
+        message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
+      });
     }
 
     const category = await MenuCategory.findById(categoryId);
@@ -492,7 +518,7 @@ exports.createItem = async (req, res) => {
     // Support both cartId (new) and cafeId (old) for backward compatibility
     const cartId = req.user && req.user.role === "admin" ? req.user._id : null;
     const categoryCartId = category.cartId || category.cafeId; // Support old cafeId field
-    
+
     if (
       cartId &&
       categoryCartId &&
@@ -577,11 +603,9 @@ exports.updateItem = async (req, res) => {
     }
 
     if (updates.spiceLevel && !SPICE_LEVELS.includes(updates.spiceLevel)) {
-      return res
-        .status(400)
-        .json({
-          message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
-        });
+      return res.status(400).json({
+        message: `Spice level must be one of ${SPICE_LEVELS.join(", ")}`,
+      });
     }
 
     const item = await MenuItem.findByIdAndUpdate(id, updates, {
@@ -605,18 +629,15 @@ exports.updateItem = async (req, res) => {
           syncDefaultMenuToCosting,
         } = require("../services/costing-v2/syncDefaultMenuToCosting");
         // Sync only this specific cart's menu to costing
-        await syncDefaultMenuToCosting(
-          null,
-          itemCartId.toString()
-        );
+        await syncDefaultMenuToCosting(null, itemCartId.toString());
         console.log(
-          `[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${itemCartId}`
+          `[MENU CONTROLLER] Auto-synced menu item price to costing for cart: ${itemCartId}`,
         );
       } catch (syncError) {
         // Don't fail the request if sync fails - just log it
         console.error(
           `[MENU CONTROLLER] Failed to auto-sync to costing:`,
-          syncError.message
+          syncError.message,
         );
       }
     }
@@ -659,7 +680,7 @@ exports.updateItemAvailability = async (req, res) => {
     const item = await MenuItem.findByIdAndUpdate(
       id,
       { isAvailable },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true },
     ).lean();
 
     if (!item) {
@@ -742,7 +763,7 @@ exports.uploadMenuImage = [
     // Use helper to get URL (handles S3 vs Local)
     // Pass "menu" as folderName to match storage configuration
     const fileUrl = getFileUrl(req, req.file, "menu");
-    
+
     return res.status(201).json({
       url: fileUrl,
       filename: req.file.key || req.file.filename, // S3 uses 'key', local uses 'filename'

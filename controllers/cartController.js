@@ -32,15 +32,18 @@ exports.getNearbyCarts = async (req, res) => {
           }
         ]
       })
-        .populate("cartAdminId", "name cafeName email")
+        .populate("cartAdminId", "name cafeName email isActive")
         .populate("franchiseId", "name")
         .lean();
 
-      console.log(`[CART] Found ${carts.length} carts matching pin code: ${pinCode}`);
+      const cartsWithActiveAdmin = carts.filter(
+        (c) => c.cartAdminId && c.cartAdminId.isActive !== false
+      );
+      console.log(`[CART] Found ${cartsWithActiveAdmin.length} carts matching pin code: ${pinCode} (excluded deleted/inactive admin)`);
 
       const nearbyCarts = [];
 
-      for (const cart of carts) {
+      for (const cart of cartsWithActiveAdmin) {
         const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
         const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
 
@@ -88,23 +91,25 @@ exports.getNearbyCarts = async (req, res) => {
       });
     }
 
-    // Get all active carts
-    // Also include carts where isActive is not set (for backward compatibility)
+    // Get all active carts (exclude deleted/inactive: cart isActive and cart admin user must be active)
     const carts = await Cart.find({
       $or: [
         { isActive: true },
-        { isActive: { $exists: false } } // Include carts without isActive field
+        { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cafeName email")
+      .populate("cartAdminId", "name cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
-    console.log(`[CART] Found ${carts.length} active carts`);
+    const cartsWithActiveAdmin = carts.filter(
+      (c) => c.cartAdminId && c.cartAdminId.isActive !== false
+    );
+    console.log(`[CART] Found ${cartsWithActiveAdmin.length} active carts (${carts.length - cartsWithActiveAdmin.length} excluded: deleted/inactive admin)`);
 
     const nearbyCarts = [];
 
-    for (const cart of carts) {
+    for (const cart of cartsWithActiveAdmin) {
       // Handle existing carts that don't have new fields - use defaults
       const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true; // Default true for existing carts
       const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false; // Default false
@@ -209,11 +214,18 @@ exports.getCartById = async (req, res) => {
     const { latitude, longitude, orderType } = req.query;
 
     const cart = await Cart.findById(id)
-      .populate("cartAdminId", "name cafeName email")
+      .populate("cartAdminId", "name cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
     if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: "Cart not found",
+      });
+    }
+
+    if (!cart.cartAdminId || cart.cartAdminId.isActive === false) {
       return res.status(404).json({
         success: false,
         message: "Cart not found",
@@ -378,22 +390,25 @@ exports.getAvailableCarts = async (req, res) => {
   try {
     const { orderType } = req.query;
 
-    // Get all active carts
+    // Get all active carts (exclude deleted/inactive: cart admin user must exist and be active)
     const carts = await Cart.find({
       $or: [
         { isActive: true },
-        { isActive: { $exists: false } } // Include carts without isActive field
+        { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cafeName email")
+      .populate("cartAdminId", "name cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
-    console.log(`[CART] Found ${carts.length} active carts`);
+    const cartsWithActiveAdmin = carts.filter(
+      (c) => c.cartAdminId && c.cartAdminId.isActive !== false
+    );
+    console.log(`[CART] Found ${cartsWithActiveAdmin.length} available carts (${carts.length - cartsWithActiveAdmin.length} excluded: deleted/inactive admin)`);
 
     const availableCarts = [];
 
-    for (const cart of carts) {
+    for (const cart of cartsWithActiveAdmin) {
       // Handle existing carts that don't have new fields - use defaults
       const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
       const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
