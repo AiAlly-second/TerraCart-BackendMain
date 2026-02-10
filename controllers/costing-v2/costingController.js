@@ -2846,7 +2846,7 @@ exports.getCostingInventory = async (req, res) => {
     // Get ingredients for this cart/cafe/kiosk
     let ingredients = await Ingredient.find(costingFilter)
       .select(
-        "name category uom baseUnit qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt"
+        "name category uom baseUnit qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt shelfTimeDays lastReceivedAt isActive"
       )
       .sort({ category: 1, name: 1 })
       .lean();
@@ -2951,28 +2951,81 @@ exports.getCostingInventory = async (req, res) => {
     }
 
     // Format ingredients as inventory items for the app (match web costing-v2 Inventory)
-    const inventoryItems = ingredients.map((ing) => ({
-      _id: ing._id,
-      name: ing.name,
-      category: ing.category,
-      quantity: ing.qtyOnHand || 0,
-      qtyOnHand: ing.qtyOnHand || 0,
-      unit: ing.uom,
-      uom: ing.uom,
-      baseUnit: ing.baseUnit || (["kg", "g"].includes(ing.uom) ? "g" : ["l", "ml"].includes(ing.uom) ? "ml" : "pcs"),
-      minStockLevel: ing.reorderLevel || 0,
-      reorderLevel: ing.reorderLevel || 0,
-      unitPrice: ing.currentCostPerBaseUnit || 0,
-      currentCostPerBaseUnit: ing.currentCostPerBaseUnit || 0,
-      location: ing.storageLocation || "Main Storage",
-      storageLocation: ing.storageLocation || "Main Storage",
-      updatedAt: ing.updatedAt
-        ? ing.updatedAt.toISOString()
-        : new Date().toISOString(),
-      minStock: ing.reorderLevel || 0,
-      ingredientId: ing._id,
-      cafeId: cartId || ing.cartId,
-    }));
+    const inventoryItems = ingredients.map((ing) => {
+      const qtyOnHand = Number(ing.qtyOnHand) || 0;
+      const weightedAvgCost = Number(ing.currentCostPerBaseUnit) || 0;
+      const totalValue = qtyOnHand > 0 && weightedAvgCost > 0
+        ? qtyOnHand * weightedAvgCost
+        : 0;
+
+      const shelfLifeDaysRaw =
+        ing.shelfTimeDays !== undefined && ing.shelfTimeDays !== null && ing.shelfTimeDays !== ""
+          ? Number(ing.shelfTimeDays)
+          : null;
+      const shelfLifeDays =
+        shelfLifeDaysRaw !== null && !Number.isNaN(shelfLifeDaysRaw)
+          ? shelfLifeDaysRaw
+          : null;
+
+      let shelfLifeText = null;
+      if (shelfLifeDays !== null && ing.lastReceivedAt) {
+        const startDate = new Date(ing.lastReceivedAt);
+        if (!Number.isNaN(startDate.getTime())) {
+          const expiry = new Date(startDate);
+          expiry.setDate(expiry.getDate() + shelfLifeDays);
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
+          expiry.setHours(0, 0, 0, 0);
+          const msPerDay = 24 * 60 * 60 * 1000;
+          const daysRemaining = Math.floor((expiry - today) / msPerDay);
+          if (daysRemaining < 0) {
+            shelfLifeText = "Expired";
+          } else if (daysRemaining === 0) {
+            shelfLifeText = "Expires today";
+          } else {
+            shelfLifeText = `${daysRemaining} day${daysRemaining !== 1 ? "s" : ""} left`;
+          }
+        }
+      } else if (shelfLifeDays !== null) {
+        shelfLifeText = `Shelf: ${shelfLifeDays} day${shelfLifeDays !== 1 ? "s" : ""}`;
+      }
+
+      return {
+        _id: ing._id,
+        name: ing.name,
+        category: ing.category,
+        quantity: qtyOnHand,
+        qtyOnHand: qtyOnHand,
+        unit: ing.uom,
+        uom: ing.uom,
+        baseUnit:
+          ing.baseUnit ||
+          (["kg", "g"].includes(ing.uom)
+            ? "g"
+            : ["l", "ml"].includes(ing.uom)
+              ? "ml"
+              : "pcs"),
+        minStockLevel: ing.reorderLevel || 0,
+        reorderLevel: ing.reorderLevel || 0,
+        unitPrice: weightedAvgCost,
+        currentCostPerBaseUnit: weightedAvgCost,
+        totalValue: Number(totalValue.toFixed(2)),
+        totalValueDisplay: `₹${Math.round(totalValue)}`,
+        shelfLifeDays: shelfLifeDays,
+        shelfTimeDays: shelfLifeDays,
+        shelfLifeText: shelfLifeText,
+        lastReceivedAt: ing.lastReceivedAt || null,
+        location: ing.storageLocation || "Main Storage",
+        storageLocation: ing.storageLocation || "Main Storage",
+        updatedAt: ing.updatedAt
+          ? ing.updatedAt.toISOString()
+          : new Date().toISOString(),
+        minStock: ing.reorderLevel || 0,
+        ingredientId: ing._id,
+        cafeId: cartId || ing.cartId,
+        isActive: ing.isActive !== false,
+      };
+    });
 
     console.log(
       "[COSTING] getCostingInventory - Found items:",

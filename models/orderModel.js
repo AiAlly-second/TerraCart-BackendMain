@@ -151,6 +151,7 @@ const orderSchema = new mongoose.Schema(
     acceptedBy: {
       employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
       employeeName: { type: String },
+      employeeRole: { type: String },
       disability: {
         hasDisability: { type: Boolean, default: false },
         type: { type: String },

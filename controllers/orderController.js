@@ -53,6 +53,53 @@ const setCachedCafe = (cartId, data) => {
 const toPaise = (n) => Math.round(Number(n) * 100);
 const toRupees = (p) => Number((p / 100).toFixed(2));
 
+const FINAL_ORDER_STATUSES = ["Paid", "Cancelled", "Finalized", "Returned", "Exit"];
+
+const mapAcceptedByToAssignedStaff = (acceptedBy, fallbackRole = null) => {
+  if (!acceptedBy || !acceptedBy.employeeId) {
+    return null;
+  }
+
+  const resolvedRole = acceptedBy.employeeRole || fallbackRole || null;
+  const employeeId =
+    typeof acceptedBy.employeeId?.toString === "function"
+      ? acceptedBy.employeeId.toString()
+      : acceptedBy.employeeId;
+
+  return {
+    id: employeeId || null,
+    name: acceptedBy.employeeName || null,
+    role: resolvedRole ? String(resolvedRole).toUpperCase() : null,
+    disability: acceptedBy.disability?.type || null,
+    photoUrl: null, // No photo field is currently stored in employee/user schema
+    acceptedAt: acceptedBy.acceptedAt || null,
+  };
+};
+
+const buildNewOrderAvailablePayload = (order) => {
+  const latestKot =
+    Array.isArray(order?.kotLines) && order.kotLines.length > 0
+      ? order.kotLines[order.kotLines.length - 1]
+      : null;
+
+  return {
+    orderId:
+      typeof order?._id?.toString === "function" ? order._id.toString() : order?._id,
+    orderType: order?.orderType || order?.serviceType || null,
+    serviceType: order?.serviceType || null,
+    tableNo: order?.tableNumber || null,
+    takeaway: order?.serviceType === "TAKEAWAY",
+    createdAt: order?.createdAt || new Date(),
+    orderSummary: (latestKot?.items || []).map((item) => ({
+      name: item?.name || "Item",
+      quantity: Number(item?.quantity) || 0,
+    })),
+  };
+};
+
+const ACCEPTABLE_ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Served"];
+const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
+
 // Build KOT
 function buildKot(items) {
   // Validate items before processing
@@ -1376,6 +1423,18 @@ const createOrder = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "order:created", order);
       emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:created", order); // KOT created
+
+      // Explicit new-order availability event for waiter/captain/manager claim flow.
+      const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
+      const isActiveStatus = !FINAL_ORDER_STATUSES.includes(order.status);
+      if (isUnassigned && isActiveStatus) {
+        emitToCafe(
+          io,
+          order.cartId.toString(),
+          "NEW_ORDER_AVAILABLE",
+          buildNewOrderAvailablePayload(order),
+        );
+      }
     }
 
     // Print KOT to printer (non-blocking)
@@ -1685,6 +1744,19 @@ const addKot = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      if (order.acceptedBy && order.acceptedBy.employeeId) {
+        emitToCafe(
+          io,
+          order.cartId.toString(),
+          "ORDER_ACCEPTED",
+          {
+            orderId: order._id,
+            status: order.status,
+            assignedStaff: mapAcceptedByToAssignedStaff(order.acceptedBy),
+            order,
+          },
+        );
+      }
     }
 
     // Print new KOT to printer (non-blocking)
@@ -1894,6 +1966,13 @@ const getOrders = async (req, res) => {
       }
     }
 
+    for (const order of orders) {
+      order.assignedStaff = mapAcceptedByToAssignedStaff(
+        order.acceptedBy,
+        order.acceptedBy?.employeeRole || null,
+      );
+    }
+
     return res.json(orders);
   } catch (err) {
     console.error("[GET_ORDERS] Error:", err);
@@ -2053,6 +2132,10 @@ const getOrderById = async (req, res) => {
       console.warn(`[INVOICE] Order ${order._id} has no cartId`);
     }
 
+    order.assignedStaff = mapAcceptedByToAssignedStaff(
+      order.acceptedBy,
+      order.acceptedBy?.employeeRole || null,
+    );
     return res.json(order);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -2214,17 +2297,16 @@ const acceptOrder = async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Only for TAKEAWAY, PICKUP, or DELIVERY orders
-    const allowedServiceTypes = ["TAKEAWAY", "PICKUP", "DELIVERY"];
-    if (!allowedServiceTypes.includes(order.serviceType)) {
+    // Allow acceptance for dine-in and takeaway flows.
+    if (!ACCEPTABLE_SERVICE_TYPES.includes(order.serviceType)) {
       return res.status(400).json({
         message:
-          "Order acceptance is only for takeaway, pickup, or delivery orders",
+          "Order acceptance is not supported for this order type",
       });
     }
 
-    // Only when status is Pending and not yet accepted
-    if (order.status !== "Pending") {
+    // Accept only while order is still active and not already accepted.
+    if (!ACCEPTABLE_ORDER_STATUSES.includes(order.status)) {
       return res.status(400).json({
         message: `Order cannot be accepted (current status: ${order.status})`,
       });
@@ -2260,9 +2342,24 @@ const acceptOrder = async (req, res) => {
       });
     }
 
+    // A staff member can work only one active accepted order at a time.
+    const alreadyAssignedOrder = await Order.findOne({
+      _id: { $ne: orderId },
+      cartId: order.cartId,
+      "acceptedBy.employeeId": employee._id,
+      status: { $nin: FINAL_ORDER_STATUSES },
+    }).select("_id");
+
+    if (alreadyAssignedOrder) {
+      return res.status(409).json({
+        message: `You already have an active accepted order (${alreadyAssignedOrder._id}). Complete it before accepting a new one.`,
+      });
+    }
+
     const acceptedBy = {
       employeeId: employee._id,
       employeeName: employee.name || "Staff",
+      employeeRole: employee.employeeRole || req.user?.role || null,
       disability: {
         hasDisability: employee.disability?.hasDisability ?? false,
         type: employee.disability?.type || null,
@@ -2270,19 +2367,25 @@ const acceptOrder = async (req, res) => {
       acceptedAt: new Date(),
     };
 
-    // Atomic update: first to accept wins
-    // UNIFIED FLOW: Transition to 'Confirmed' (same as dine-in)
-    // The acceptedBy field tracks who accepted the order
+    // Atomic update: first to accept wins.
+    // For takeaway flows we normalize Pending -> Confirmed when accepted.
+    const setFields = { acceptedBy };
+    if (order.serviceType !== "DINE_IN") {
+      setFields.status = "Confirmed";
+    }
     const updatedOrder = await Order.findOneAndUpdate(
       {
         _id: orderId,
-        status: "Pending",
-        $or: [{ acceptedBy: { $exists: false } }, { acceptedBy: null }],
+        status: { $in: ACCEPTABLE_ORDER_STATUSES },
+        $or: [
+          { acceptedBy: { $exists: false } },
+          { acceptedBy: null },
+          { "acceptedBy.employeeId": { $exists: false } },
+        ],
       },
       {
         $set: {
-          status: "Confirmed",  // UNIFIED: Same as dine-in flow
-          acceptedBy,
+          ...setFields,
         },
       },
       { new: true },
@@ -2296,7 +2399,13 @@ const acceptOrder = async (req, res) => {
 
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
+    let assignedStaff = null;
     if (io && updatedOrder.cartId && emitToCafe) {
+      assignedStaff = mapAcceptedByToAssignedStaff(
+        updatedOrder.acceptedBy,
+        employee.employeeRole || req.user?.role || null,
+      );
+
       emitToCafe(
         io,
         updatedOrder.cartId.toString(),
@@ -2309,9 +2418,25 @@ const acceptOrder = async (req, res) => {
         "orderUpdated",
         updatedOrder,
       );
+      emitToCafe(
+        io,
+        updatedOrder.cartId.toString(),
+        "ORDER_ACCEPTED",
+        {
+          orderId: updatedOrder._id,
+          status: updatedOrder.status,
+          assignedStaff,
+          order: updatedOrder,
+        },
+      );
     }
 
-    return res.json(updatedOrder);
+    const responseOrder =
+      typeof updatedOrder.toObject === "function"
+        ? updatedOrder.toObject()
+        : updatedOrder;
+    responseOrder.assignedStaff = assignedStaff;
+    return res.json(responseOrder);
   } catch (err) {
     console.error("[ORDER] acceptOrder error:", err);
     return res.status(500).json({ message: err.message });
