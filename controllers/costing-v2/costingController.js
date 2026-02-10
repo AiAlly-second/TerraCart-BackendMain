@@ -32,7 +32,7 @@ const MenuCategory = require("../../models/menuCategoryModel");
 // Helper function for manual unit conversion (fallback when ingredient method fails)
 function convertQtyToBaseUnit(qty, fromUom, baseUnit) {
   if (fromUom === baseUnit) return qty;
-  
+
   // Standard conversions
   if (baseUnit === 'g') {
     if (fromUom === 'kg') return qty * 1000;
@@ -47,7 +47,7 @@ function convertQtyToBaseUnit(qty, fromUom, baseUnit) {
       return qty;
     }
   }
-  
+
   // If no conversion found, return original qty (assume same unit)
   console.warn(`[CONVERSION] No conversion factor found for ${fromUom} to ${baseUnit}, using original qty`);
   return qty;
@@ -64,7 +64,7 @@ function safeConvertToBaseUnit(ingredient, qty, fromUom) {
       return convertQtyToBaseUnit(qty, fromUom, ingredient.baseUnit);
     }
   }
-  
+
   // Otherwise, use manual conversion
   const baseUnit = ingredient?.baseUnit || 'pcs';
   return convertQtyToBaseUnit(qty, fromUom, baseUnit);
@@ -157,7 +157,7 @@ exports.createSupplier = async (req, res) => {
       supplierData.cartId = supplierData.cartId;
       delete supplierData.cartId;
     }
-    
+
     // Use setOutletContext utility to set cartId and franchiseId
     const data = await setOutletContext(req.user, supplierData, true);
 
@@ -285,7 +285,7 @@ exports.getIngredients = async (req, res) => {
   try {
     // CRITICAL: Log request details for debugging
     console.log(`[GET_INGREDIENTS] Request received - User: ${req.user?.role} (${req.user?._id}), Query:`, req.query);
-    
+
     const {
       uom,
       lowStock,
@@ -336,18 +336,18 @@ exports.getIngredients = async (req, res) => {
     console.log(`[GET_INGREDIENTS] User: ${req.user?.role} (${req.user?._id})`);
     console.log(`[GET_INGREDIENTS] Input filter:`, JSON.stringify(filter, null, 2));
     console.log(`[GET_INGREDIENTS] Final costingFilter:`, JSON.stringify(costingFilter, null, 2));
-    
+
     if (req.user.role === "admin") {
       // Check what ingredients exist before query
       const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-        ? new mongoose.Types.ObjectId(userCartId) 
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+        ? new mongoose.Types.ObjectId(userCartId)
         : userCartId;
-      
+
       const cartSpecificCount = await Ingredient.countDocuments({ cartId: userCartIdObj });
       const sharedCount = await Ingredient.countDocuments({ cartId: null });
       const noCartIdCount = await Ingredient.countDocuments({ cartId: { $exists: false } });
-      
+
       console.log(`[GET_INGREDIENTS] Cart admin ${req.user._id} - Before query:`);
       console.log(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecificCount}`);
       console.log(`  - Shared (cartId=null): ${sharedCount}`);
@@ -358,21 +358,21 @@ exports.getIngredients = async (req, res) => {
     // CRITICAL: For cart admins, test the query directly before executing
     if (req.user.role === "admin") {
       const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-        ? new mongoose.Types.ObjectId(userCartId) 
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+        ? new mongoose.Types.ObjectId(userCartId)
         : userCartId;
-      
+
       // Test direct queries
       const directTest1 = await Ingredient.find({ cartId: userCartIdObj }).countDocuments();
       const directTest2 = await Ingredient.find({ cartId: null }).countDocuments();
-      const directTest3 = await Ingredient.find({ 
+      const directTest3 = await Ingredient.find({
         $or: [
           { cartId: userCartIdObj },
           { cartId: null },
           { cartId: { $exists: false } }
         ]
       }).countDocuments();
-      
+
       console.log(`[GET_INGREDIENTS] Direct query tests:`);
       console.log(`  - {cartId: ObjectId("${userCartIdObj}")}: ${directTest1} results`);
       console.log(`  - {cartId: null}: ${directTest2} results`);
@@ -382,22 +382,22 @@ exports.getIngredients = async (req, res) => {
 
     // CRITICAL: For cart admins, use a SIMPLIFIED and DIRECT query (like recipes)
     let ingredients = [];
-    
+
     // CRITICAL FIX: For cart admin, use a simple direct query that definitely works
     let ingredientsFetched = false;
     if (req.user.role === "admin") {
       const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-        ? new mongoose.Types.ObjectId(userCartId) 
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+        ? new mongoose.Types.ObjectId(userCartId)
         : userCartId;
-      
+
       // FIRST: Check what actually exists in the database
       const dbCheckCart = await Ingredient.countDocuments({ cartId: userCartIdObj });
       const dbCheckNull = await Ingredient.countDocuments({ cartId: null });
       const dbCheckNullActive = await Ingredient.countDocuments({ cartId: null, isActive: true });
       const dbCheckNullInactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
       const dbCheckExists = await Ingredient.countDocuments({ cartId: { $exists: false } });
-      
+
       console.log(`[GET_INGREDIENTS] 🔍 DATABASE STATE CHECK:`);
       console.log(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheckCart}`);
       console.log(`  - Ingredients with cartId=null (ALL): ${dbCheckNull}`);
@@ -405,7 +405,7 @@ exports.getIngredients = async (req, res) => {
       console.log(`  - Ingredients with cartId=null AND isActive=false: ${dbCheckNullInactive}`);
       console.log(`  - Ingredients without cartId field: ${dbCheckExists}`);
       console.log(`  - TOTAL SHARED (null + no field): ${dbCheckNull + dbCheckExists}`);
-      
+
       // Build a simple, direct query similar to recipes
       // Get ingredients with cartId = userCartId OR cartId = null (shared from super admin)
       // CRITICAL: This query ensures cart admin sees:
@@ -419,12 +419,12 @@ exports.getIngredients = async (req, res) => {
           { cartId: { $exists: false } }       // Legacy ingredients
         ]
       };
-      
+
       console.log(`[GET_INGREDIENTS] 🔗 CONNECTION: Cart admin query will find:`);
       console.log(`   - Shared ingredients (cartId: null) from super admin`);
       console.log(`   - Cart-specific ingredients (cartId: ${userCartIdObj})`);
       console.log(`   - Legacy ingredients (no cartId field)`);
-      
+
       // Apply other filters (category, search, etc.) using $and
       // NOTE: Don't apply isActive filter here - we want to see ALL shared ingredients
       // Cart admin can filter by isActive on the frontend if needed
@@ -442,7 +442,7 @@ exports.getIngredients = async (req, res) => {
       if (filter.uom) {
         otherFilters.uom = filter.uom;
       }
-      
+
       // Combine base query with other filters
       if (Object.keys(otherFilters).length > 0) {
         costingFilter = {
@@ -454,44 +454,44 @@ exports.getIngredients = async (req, res) => {
       } else {
         costingFilter = baseQuery;
       }
-      
+
       console.log(`[GET_INGREDIENTS] ⚠️ NOT applying isActive filter - showing ALL shared ingredients (active + inactive)`);
-      
+
       console.log(`[GET_INGREDIENTS] ✅ Using simplified direct query for cart admin`);
       console.log(`[GET_INGREDIENTS] Final filter:`, JSON.stringify(costingFilter, null, 2));
-      
+
       // Test the query before executing
       const testCount = await Ingredient.countDocuments(costingFilter);
       console.log(`[GET_INGREDIENTS] Test query count: ${testCount}`);
-      
+
       // Also test without any filters to see total
       const testAllCount = await Ingredient.countDocuments(baseQuery);
       console.log(`[GET_INGREDIENTS] Test base query (no other filters) count: ${testAllCount}`);
-      
+
       // If test count is 0 but we know ingredients exist, use emergency fallback
       if (testCount === 0 && (dbCheckNull > 0 || dbCheckExists > 0)) {
         console.error(`[GET_INGREDIENTS] ⚠️⚠️⚠️ CRITICAL: Query returns 0 but ingredients exist!`);
         console.error(`[GET_INGREDIENTS] Using emergency fallback: Fetching shared ingredients directly...`);
-        
+
         // Emergency fallback: fetch shared ingredients directly
         const sharedIngredients = await Ingredient.find({ cartId: null })
           .populate("preferredSupplierId", "name")
           .populate("cartId", "name cafeName")
           .sort({ category: 1, name: 1 });
-        
+
         // Also get cart-specific ingredients
         const cartSpecificIngredients = await Ingredient.find({ cartId: userCartIdObj })
           .populate("preferredSupplierId", "name")
           .populate("cartId", "name cafeName")
           .sort({ category: 1, name: 1 });
-        
+
         // Combine both
         ingredients = [...sharedIngredients, ...cartSpecificIngredients];
         ingredientsFetched = true;
         console.error(`[GET_INGREDIENTS] ✅ Emergency fetch: ${sharedIngredients.length} shared + ${cartSpecificIngredients.length} cart-specific = ${ingredients.length} total`);
       }
     }
-    
+
     // Unified query execution for all roles (only if not already fetched)
     if (!ingredientsFetched) {
       // Ensure costingFilter is defined (for non-admin users, it's set by buildCostingQuery above)
@@ -501,42 +501,42 @@ exports.getIngredients = async (req, res) => {
           includeShared: true,
         });
       }
-    ingredients = await Ingredient.find(costingFilter)
-      .populate("preferredSupplierId", "name")
-      .populate("cartId", "name cafeName")
-      .sort({ category: 1, name: 1 });
+      ingredients = await Ingredient.find(costingFilter)
+        .populate("preferredSupplierId", "name")
+        .populate("cartId", "name cafeName")
+        .sort({ category: 1, name: 1 });
     }
-    
+
     // CRITICAL: Log final count before processing
     console.log(`[GET_INGREDIENTS] Final ingredients count before processing: ${ingredients.length}`);
-    
+
     // CRITICAL: If ingredients is empty, log detailed debugging info
     if (ingredients.length === 0) {
       console.warn(`[GET_INGREDIENTS] ⚠️⚠️⚠️ NO INGREDIENTS FOUND!`);
       console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
       console.warn(`[GET_INGREDIENTS] Query filter used:`, JSON.stringify(costingFilter, null, 2));
       console.warn(`[GET_INGREDIENTS] ingredientsFetched: ${ingredientsFetched}`);
-      
+
       // Check database directly
       const totalInDB = await Ingredient.countDocuments({});
       console.warn(`[GET_INGREDIENTS] Total ingredients in database: ${totalInDB}`);
-      
+
       if (req.user.role === "admin") {
         const userCartId = req.user._id;
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-          ? new mongoose.Types.ObjectId(userCartId) 
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+          ? new mongoose.Types.ObjectId(userCartId)
           : userCartId;
-        
+
         const cartSpecific = await Ingredient.countDocuments({ cartId: userCartIdObj });
         const shared = await Ingredient.countDocuments({ cartId: null });
         const noCartId = await Ingredient.countDocuments({ cartId: { $exists: false } });
-        
+
         console.warn(`[GET_INGREDIENTS] Cart admin breakdown:`);
         console.warn(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecific}`);
         console.warn(`  - Shared (cartId=null): ${shared}`);
         console.warn(`  - Legacy (no cartId): ${noCartId}`);
         console.warn(`  - Total should be visible: ${cartSpecific + shared + noCartId}`);
-        
+
         // Try the exact query we're using
         const testQueryResult = await Ingredient.find(costingFilter).limit(5);
         console.warn(`[GET_INGREDIENTS] Test query result count: ${testQueryResult.length}`);
@@ -545,36 +545,36 @@ exports.getIngredients = async (req, res) => {
         }
       }
     }
-    
+
     // If no ingredients found, log detailed info and try without isActive filter
     if (ingredients.length === 0 && req.user.role === "admin") {
       console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found with current filter!`);
       console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
-      
-        const userCartId = req.user._id;
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-          ? new mongoose.Types.ObjectId(userCartId) 
-          : userCartId;
-        
-        // Check database directly
-        const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
-        const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
+
+      const userCartId = req.user._id;
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+        ? new mongoose.Types.ObjectId(userCartId)
+        : userCartId;
+
+      // Check database directly
+      const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
+      const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
       const dbCheck2Active = await Ingredient.countDocuments({ cartId: null, isActive: true });
       const dbCheck2Inactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
-        const dbCheck3 = await Ingredient.countDocuments({});
-        
-        console.warn(`[GET_INGREDIENTS] Database check:`);
-        console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
-        console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
+      const dbCheck3 = await Ingredient.countDocuments({});
+
+      console.warn(`[GET_INGREDIENTS] Database check:`);
+      console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
+      console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
       console.warn(`  - Ingredients with cartId=null (all): ${dbCheck2}`);
       console.warn(`  - Ingredients with cartId=null AND isActive=true: ${dbCheck2Active}`);
       console.warn(`  - Ingredients with cartId=null AND isActive=false: ${dbCheck2Inactive}`);
-      
+
       // If shared ingredients exist but are inactive, try query without isActive filter
       if (dbCheck2 > 0 && dbCheck2Active === 0 && filter.isActive === true) {
         console.warn(`[GET_INGREDIENTS] ⚠️ Shared ingredients exist but are INACTIVE!`);
         console.warn(`[GET_INGREDIENTS] Retrying query without isActive filter...`);
-        
+
         // Retry without isActive filter
         const retryFilter = { ...costingFilter };
         if (retryFilter.$and) {
@@ -586,12 +586,12 @@ exports.getIngredients = async (req, res) => {
         if (retryFilter.isActive) {
           delete retryFilter.isActive;
         }
-        
+
         const retryIngredients = await Ingredient.find(retryFilter)
           .populate("preferredSupplierId", "name")
           .populate("cartId", "name cafeName")
           .sort({ category: 1, name: 1 });
-        
+
         console.warn(`[GET_INGREDIENTS] Retry query found ${retryIngredients.length} ingredients`);
         if (retryIngredients.length > 0) {
           ingredients = retryIngredients;
@@ -608,21 +608,21 @@ exports.getIngredients = async (req, res) => {
         const cartIngredientsCount = await Ingredient.countDocuments({ cartId: req.user._id });
         const sharedIngredientsCount = await Ingredient.countDocuments({ cartId: null });
         console.log(`[GET_INGREDIENTS] Debug - Total ingredients: ${allIngredientsCount}, Cart-specific: ${cartIngredientsCount}, Shared: ${sharedIngredientsCount}`);
-        
+
         // Try the query manually to see what's wrong
         const userCartId = req.user._id;
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-          ? new mongoose.Types.ObjectId(userCartId) 
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+          ? new mongoose.Types.ObjectId(userCartId)
           : userCartId;
-        
+
         const testQuery1 = { cartId: userCartIdObj };
         const testQuery2 = { cartId: null };
         const testQuery3 = { $or: [{ cartId: userCartIdObj }, { cartId: null }, { cartId: { $exists: false } }] };
-        
+
         const test1 = await Ingredient.countDocuments(testQuery1);
         const test2 = await Ingredient.countDocuments(testQuery2);
         const test3 = await Ingredient.countDocuments(testQuery3);
-        
+
         console.log(`[GET_INGREDIENTS] Test queries:`);
         console.log(`  - Query {cartId: ObjectId("${userCartIdObj}")}: ${test1} results`);
         console.log(`  - Query {cartId: null}: ${test2} results`);
@@ -642,13 +642,13 @@ exports.getIngredients = async (req, res) => {
     // Calculate everything directly from transactions - no complex logic, no database syncing
     if (req.user.role === "admin") {
       const cartId = req.user._id;
-      
+
       // CRITICAL: Convert cartId to ObjectId for proper matching
-      const cartObjectId = mongoose.Types.ObjectId.isValid(cartId) 
-        ? new mongoose.Types.ObjectId(cartId) 
+      const cartObjectId = mongoose.Types.ObjectId.isValid(cartId)
+        ? new mongoose.Types.ObjectId(cartId)
         : cartId;
       const cartIdString = cartId.toString();
-      
+
       // DEBUG: First, let's see what transactions actually exist
       if (process.env.NODE_ENV === 'development') {
         const allTransactionsSample = await InventoryTransaction.find({}).limit(5).select('cartId ingredientId type qty qtyInBaseUnit').lean();
@@ -666,16 +666,16 @@ exports.getIngredients = async (req, res) => {
           cartIdString: cartIdString
         });
       }
-      
+
       // CRITICAL: Get all transactions for this cart
       // Try multiple query strategies to ensure we find transactions
       let allCartTransactions = [];
-      
+
       // Strategy 1: Direct ObjectId match (most reliable)
       allCartTransactions = await InventoryTransaction.find({
         cartId: cartObjectId
       }).sort({ date: 1 }).lean();
-      
+
       // Strategy 2: If no results, try aggregation with string comparison
       if (allCartTransactions.length === 0) {
         const aggResults = await InventoryTransaction.aggregate([
@@ -693,14 +693,14 @@ exports.getIngredients = async (req, res) => {
         ]);
         allCartTransactions = aggResults;
       }
-      
+
       // Strategy 3: Try direct string match as last resort
       if (allCartTransactions.length === 0) {
         allCartTransactions = await InventoryTransaction.find({
           cartId: cartIdString
         }).sort({ date: 1 }).lean();
       }
-      
+
       // Strategy 4: Try null/undefined cartId (legacy transactions)
       if (allCartTransactions.length === 0) {
         allCartTransactions = await InventoryTransaction.find({
@@ -710,18 +710,18 @@ exports.getIngredients = async (req, res) => {
           ]
         }).sort({ date: 1 }).lean();
       }
-      
+
       // If no results, log for debugging
       if (allCartTransactions.length === 0 && process.env.NODE_ENV === 'development') {
         const totalTransactions = await InventoryTransaction.countDocuments({});
         console.warn(`[DEBUG] No transactions found for cartId. Total transactions in DB: ${totalTransactions}`);
-        
+
         // Get sample transactions to see what cartIds exist
         const sampleTransactions = await InventoryTransaction.find({}).limit(10).select('cartId ingredientId type qty qtyInBaseUnit').lean();
         const uniqueCartIds = [...new Set(sampleTransactions.map(t => t.cartId ? t.cartId.toString() : 'null'))];
         console.log(`[DEBUG] Sample cartIds in transactions:`, uniqueCartIds);
         console.log(`[DEBUG] Looking for:`, { cartId: cartId.toString(), cartObjectId: cartObjectId.toString(), cartIdString });
-        
+
         // Check if any transactions exist for this ingredient at all
         if (ingredients.length > 0) {
           const firstIngId = ingredients[0]._id;
@@ -734,7 +734,7 @@ exports.getIngredients = async (req, res) => {
           })));
         }
       }
-      
+
       // Create a Set of ingredient IDs for fast lookup (convert all to strings)
       const ingredientIdSet = new Set(
         ingredients.map(ing => {
@@ -742,14 +742,14 @@ exports.getIngredients = async (req, res) => {
           return id ? (id.toString ? id.toString() : String(id)) : null;
         }).filter(id => id !== null)
       );
-      
+
       // Filter transactions to only include those for ingredients we're showing
       const filteredTransactions = allCartTransactions.filter(txn => {
         if (!txn.ingredientId) return false;
         const txnIngId = txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId);
         return ingredientIdSet.has(txnIngId);
       });
-      
+
       if (process.env.NODE_ENV === 'development') {
         console.log(`[INVENTORY] Cart admin ${cartId}: Found ${allCartTransactions.length} total transactions, ${filteredTransactions.length} for ${ingredients.length} ingredients`);
         console.log(`[INVENTORY] Cart admin cartId: ${cartId}, cartObjectId: ${cartObjectId}, cartIdString: ${cartIdString}`);
@@ -777,16 +777,16 @@ exports.getIngredients = async (req, res) => {
           });
         }
       }
-      
+
       // Use filtered transactions
       const allCartTransactionsFiltered = filteredTransactions;
-      
+
       // Group transactions by ingredientId for efficient processing
       // CRITICAL: Handle both ObjectId and string formats for ingredientId matching
       const transactionsByIngredient = {};
       for (const txn of allCartTransactionsFiltered) {
         // Convert ingredientId to string for consistent matching
-        const ingId = txn.ingredientId 
+        const ingId = txn.ingredientId
           ? (txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId))
           : null;
         if (ingId) {
@@ -796,15 +796,15 @@ exports.getIngredients = async (req, res) => {
           transactionsByIngredient[ingId].push(txn);
         }
       }
-      
+
       // Process each ingredient
       for (const ingredient of ingredients) {
         // CRITICAL: Convert ingredient._id to string for matching
-        const ingredientId = ingredient._id 
+        const ingredientId = ingredient._id
           ? (ingredient._id.toString ? ingredient._id.toString() : String(ingredient._id))
           : null;
         const transactions = ingredientId ? (transactionsByIngredient[ingredientId] || []) : [];
-        
+
         if (process.env.NODE_ENV === 'development') {
           console.log(`[INVENTORY] ${ingredient.name} (${ingredientId}): Processing ${transactions.length} transactions`);
           if (transactions.length > 0) {
@@ -824,59 +824,59 @@ exports.getIngredients = async (req, res) => {
             console.log(`[INVENTORY] ${ingredient.name}: Using stored values - qtyOnHand=${ingredient.qtyOnHand}, currentCostPerBaseUnit=${ingredient.currentCostPerBaseUnit}`);
           }
         }
-        
+
         // FALLBACK: If no transactions found, use stored values from ingredient
         if (transactions.length === 0) {
           // CRITICAL FIX: For shared ingredients (cartId: null), do NOT use stored qtyOnHand
           // because it's shared across all carts. Each cart should only see their own inventory.
-          
+
           // For cart admins with no transactions, they have 0 inventory
           if (req.user.role === "admin") {
             ingredient.qtyOnHand = 0;  // Cart-specific: No transactions = No inventory
             ingredient.currentCostPerBaseUnit = 0;
             ingredient.lastPurchaseUnitPrice = 0;
             ingredient.lastPurchaseUom = ingredient.uom;
-            
+
             if (process.env.NODE_ENV === 'development') {
               console.log(`[INVENTORY] ${ingredient.name}: Cart admin with no transactions - stock=0 (cart-specific isolation)`);
             }
           } else {
             // For super admin or franchise admin, use stored values (they may have set default values)
-          ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
-          ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
-          ingredient.lastPurchaseUnitPrice = 0;
-          ingredient.lastPurchaseUom = ingredient.uom;
-          
-          // If stock is 0, ensure cost is 0
-          if (ingredient.qtyOnHand <= 0) {
-            ingredient.currentCostPerBaseUnit = 0;
+            ingredient.qtyOnHand = Number(ingredient.qtyOnHand) || 0;
+            ingredient.currentCostPerBaseUnit = Number(ingredient.currentCostPerBaseUnit) || 0;
             ingredient.lastPurchaseUnitPrice = 0;
-          }
-          
-          if (process.env.NODE_ENV === 'development') {
-            console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
+            ingredient.lastPurchaseUom = ingredient.uom;
+
+            // If stock is 0, ensure cost is 0
+            if (ingredient.qtyOnHand <= 0) {
+              ingredient.currentCostPerBaseUnit = 0;
+              ingredient.lastPurchaseUnitPrice = 0;
+            }
+
+            if (process.env.NODE_ENV === 'development') {
+              console.log(`[INVENTORY] ${ingredient.name}: Using stored values - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, cost=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}`);
             }
           }
           continue; // Skip transaction-based calculation
         }
-        
+
         // SIMPLE STOCK CALCULATION: Sum all IN/RETURN, subtract all OUT/WASTE
         let stock = 0;
         let stockDetails = { in: 0, return: 0, out: 0, waste: 0 };
-        
+
         if (process.env.NODE_ENV === 'development') {
           console.log(`[INVENTORY STOCK] ${ingredient.name}: Starting stock calculation with ${transactions.length} transactions`);
         }
-        
+
         for (const txn of transactions) {
           // CRITICAL: Use qtyInBaseUnit (always in base unit) for accurate calculation
           // If qtyInBaseUnit is missing or 0, try to convert from qty and uom
           let qty = Number(txn.qtyInBaseUnit);
-          
+
           if (process.env.NODE_ENV === 'development') {
             console.log(`[INVENTORY STOCK] ${ingredient.name}: Transaction ${txn.type} - qtyInBaseUnit=${txn.qtyInBaseUnit}, qty=${txn.qty}, uom=${txn.uom}, baseUnit=${ingredient.baseUnit}`);
           }
-          
+
           if (!qty || qty === 0 || isNaN(qty)) {
             // Fallback: convert from qty and uom if qtyInBaseUnit is missing
             if (txn.qty && txn.uom) {
@@ -902,12 +902,12 @@ exports.getIngredients = async (req, res) => {
               }
             }
           }
-          
+
           // Ensure qty is a valid number
           if (isNaN(qty) || !isFinite(qty)) {
             console.error(`[INVENTORY STOCK ERROR] ${ingredient.name}: Invalid qty=${qty} for transaction ${txn.type}, skipping`);
-          continue;
-        }
+            continue;
+          }
 
           if (txn.type === "IN") {
             stock += qty;
@@ -936,19 +936,19 @@ exports.getIngredients = async (req, res) => {
           }
         }
         stock = Math.max(0, stock); // Never negative
-        
+
         if (process.env.NODE_ENV === 'development') {
           console.log(`[INVENTORY] ${ingredient.name}: FINAL Calculated stock = ${stock} ${ingredient.baseUnit} (IN: ${stockDetails.in}, RETURN: ${stockDetails.return}, OUT: ${stockDetails.out}, WASTE: ${stockDetails.waste})`);
           if (stock === 0 && transactions.length > 0) {
             console.warn(`[INVENTORY] ${ingredient.name}: WARNING - Stock is 0 but has ${transactions.length} transactions!`);
           }
         }
-        
+
         // WEIGHTED AVERAGE COST: Calculate from all transactions (not just last purchase)
         let lastPurchaseUnitPrice = 0; // Last purchase unitPrice for display (per display unit)
         let lastPurchaseUom = ingredient.uom; // Unit from last purchase
         let costPerBaseUnit = 0; // Weighted average cost per base unit
-        
+
         if (stock <= 0) {
           lastPurchaseUnitPrice = 0;
           costPerBaseUnit = 0;
@@ -957,12 +957,12 @@ exports.getIngredients = async (req, res) => {
           let totalQty = 0;
           let totalValue = 0;
           let weightedAvgCost = 0;
-          
+
           // Also track last purchase for display
           const purchases = transactions
             .filter(t => t.type === "IN")
             .sort((a, b) => new Date(b.date) - new Date(a.date));
-          
+
           if (purchases.length > 0) {
             const lastPurchase = purchases[0];
             // Set last purchase price for display
@@ -971,11 +971,11 @@ exports.getIngredients = async (req, res) => {
               lastPurchaseUom = lastPurchase.uom || ingredient.uom;
             }
           }
-          
+
           // Calculate weighted average from all transactions
           for (const txn of transactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
-            
+
             if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               let txnCostPerBaseUnit = 0;
@@ -987,7 +987,7 @@ exports.getIngredients = async (req, res) => {
                 // Fallback: calculate from costAllocated
                 txnCostPerBaseUnit = txn.costAllocated / txnQty;
               }
-              
+
               if (txnQty > 0 && txnCostPerBaseUnit > 0) {
                 // Weighted average: (existing total value + new value) / (existing qty + new qty)
                 const newValue = txnQty * txnCostPerBaseUnit;
@@ -1013,10 +1013,10 @@ exports.getIngredients = async (req, res) => {
               }
             }
           }
-          
+
           // Use calculated weighted average
           costPerBaseUnit = weightedAvgCost;
-          
+
           if (process.env.NODE_ENV === 'development') {
             console.log(`[INVENTORY COST] ${ingredient.name}: Weighted average cost = ₹${costPerBaseUnit.toFixed(6)}/${ingredient.baseUnit} (calculated from ${transactions.length} transactions)`);
           }
@@ -1027,13 +1027,13 @@ exports.getIngredients = async (req, res) => {
             console.log(`[INVENTORY COST] ${ingredient.name}: No transactions, using saved cost = ₹${costPerBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
           }
         }
-        
+
         // CRITICAL: Final check - if stock is 0, cost MUST be 0 (no exceptions)
         if (stock <= 0) {
           lastPurchaseUnitPrice = 0;
           costPerBaseUnit = 0;
         }
-        
+
         // CRITICAL: Final validation before setting values
         // Ensure stock is a valid number
         if (isNaN(stock) || !isFinite(stock)) {
@@ -1041,37 +1041,37 @@ exports.getIngredients = async (req, res) => {
           stock = 0;
         }
         stock = Math.max(0, stock); // Ensure non-negative
-        
+
         // Ensure cost is valid
         if (isNaN(costPerBaseUnit) || !isFinite(costPerBaseUnit)) {
           console.error(`[INVENTORY ERROR] ${ingredient.name}: Invalid costPerBaseUnit=${costPerBaseUnit}, resetting to 0`);
           costPerBaseUnit = 0;
         }
         costPerBaseUnit = Math.max(0, costPerBaseUnit);
-        
+
         // ABSOLUTE RULE: If stock is 0, cost MUST be 0
         if (stock <= 0) {
           costPerBaseUnit = 0;
           lastPurchaseUnitPrice = 0;
         }
-        
+
         // CRITICAL: Update ingredient object with calculated values
         // Round stock to 4 decimal places to avoid floating point issues
         const finalStock = Number(stock.toFixed(4));
         const finalCost = Number(costPerBaseUnit.toFixed(6));
         const finalUnitPrice = Number(lastPurchaseUnitPrice.toFixed(2));
-        
+
         // ABSOLUTE FINAL CHECK: Ensure cost is 0 when stock is 0 (double-check)
         const finalStockValue = finalStock <= 0 ? 0 : finalStock;
         const finalCostValue = finalStockValue <= 0 ? 0 : finalCost;
         const finalUnitPriceValue = finalStockValue <= 0 ? 0 : finalUnitPrice;
-        
+
         // Set values directly on ingredient object (works for both Mongoose documents and plain objects)
         ingredient.qtyOnHand = finalStockValue;
         ingredient.currentCostPerBaseUnit = finalCostValue;
         ingredient.lastPurchaseUnitPrice = finalUnitPriceValue;
         ingredient.lastPurchaseUom = lastPurchaseUom || ingredient.uom || 'pcs';
-        
+
         // Mark as modified to ensure values are included in response (only if Mongoose document)
         if (ingredient.markModified && typeof ingredient.markModified === 'function') {
           ingredient.markModified('qtyOnHand');
@@ -1079,7 +1079,7 @@ exports.getIngredients = async (req, res) => {
           ingredient.markModified('lastPurchaseUnitPrice');
           ingredient.markModified('lastPurchaseUom');
         }
-        
+
         if (process.env.NODE_ENV === 'development') {
           console.log(`[INVENTORY] ${ingredient.name}: FINAL VALUES - stock=${ingredient.qtyOnHand} ${ingredient.baseUnit}, unitPrice=₹${ingredient.lastPurchaseUnitPrice}/${ingredient.lastPurchaseUom}, costPerBaseUnit=₹${ingredient.currentCostPerBaseUnit}/${ingredient.baseUnit}, transactions=${transactions.length}`);
           if (transactions.length > 0 && stock === 0) {
@@ -1088,17 +1088,17 @@ exports.getIngredients = async (req, res) => {
         }
       }
     }
-    
+
     // For franchise/super admin viewing shared ingredients with cart filter
     const cartIdParamForInventory = req.query.cartId || req.query.outletId; // Backward compatibility
     if ((req.user.role === "franchise_admin" || req.user.role === "super_admin") && cartIdParamForInventory) {
       const cartId = cartIdParamForInventory;
-      
+
       // Get all transactions for this cart in one query
       const allCartTransactions = await InventoryTransaction.find({
         cartId: cartId,
       }).sort({ date: 1 }).lean();
-      
+
       // Group transactions by ingredientId
       const transactionsByIngredient = {};
       for (const txn of allCartTransactions) {
@@ -1107,12 +1107,12 @@ exports.getIngredients = async (req, res) => {
         }
         transactionsByIngredient[txn.ingredientId].push(txn);
       }
-      
+
       // Process each ingredient
       for (const ingredient of ingredients) {
         const ingredientId = ingredient._id.toString();
         const transactions = transactionsByIngredient[ingredientId] || [];
-        
+
         // Calculate stock from transactions
         let stock = 0;
         for (const txn of transactions) {
@@ -1124,18 +1124,18 @@ exports.getIngredients = async (req, res) => {
           }
         }
         stock = Math.max(0, stock);
-        
+
         // Calculate weighted average cost from all transactions
         let cost = 0;
         if (stock > 0 && transactions.length > 0) {
           let totalQty = 0;
           let totalValue = 0;
           let weightedAvgCost = 0;
-          
+
           // Calculate weighted average from all transactions
           for (const txn of transactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
-            
+
             if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               if (totalQty > 0 && txnQty > 0) {
@@ -1149,7 +1149,7 @@ exports.getIngredients = async (req, res) => {
                   // Fallback: calculate from costAllocated
                   txnCostPerBaseUnit = txn.costAllocated / txnQty;
                 }
-                
+
                 // Weighted average: (existing total value + new value) / (existing qty + new qty)
                 const existingTotalValue = totalQty * (weightedAvgCost || 0);
                 const newValue = txnQty * txnCostPerBaseUnit;
@@ -1176,17 +1176,17 @@ exports.getIngredients = async (req, res) => {
               totalValue = totalQty * weightedAvgCost;
             }
           }
-          
+
           cost = weightedAvgCost;
         }
-        
+
         ingredient.qtyOnHand = stock;
         ingredient.currentCostPerBaseUnit = cost;
       }
     } else if (req.user.role === "franchise_admin" || req.user.role === "super_admin") {
       // For shared ingredients without cart filter, use existing logic
       const cartIdParamForShared = req.query.cartId || req.query.outletId; // Backward compatibility
-      
+
       for (const ingredient of ingredients) {
         let cartSpecificQty = 0;
         let cartSpecificCost = 0;
@@ -1197,7 +1197,7 @@ exports.getIngredients = async (req, res) => {
         // 1. Cart-specific transactions (cartId = cartIdParamForShared)
         // 2. Global transactions (cartId = null or missing) - for shared ingredients purchased globally
         const cartTransactions = await InventoryTransaction.find({
-              ingredientId: ingredient._id,
+          ingredientId: ingredient._id,
           $or: [
             { cartId: cartIdParamForShared },
             { cartId: null }, // Global transactions
@@ -1217,12 +1217,12 @@ exports.getIngredients = async (req, res) => {
         const allTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
         });
-        
+
         if (process.env.NODE_ENV === 'development') {
           console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name}:`, {
             ingredientId: ingredient._id,
             cartId: ingredient.cartId,
-              cartIdParam: cartIdParamForShared,
+            cartIdParam: cartIdParamForShared,
             cartSpecificTransactions: cartSpecificTransactions.length,
             globalTransactions: globalTransactions.length,
             totalTransactions: cartTransactions.length,
@@ -1237,18 +1237,18 @@ exports.getIngredients = async (req, res) => {
         // If we have transactions, calculate weighted average from them
         if (cartTransactions.length > 0) {
           console.log(`[INVENTORY COST] ${ingredient.name}: Processing ${cartTransactions.length} transactions for weighted average cost calculation`);
-          
+
           // Calculate weighted average cost from all transactions
           let totalValue = 0; // Total value of inventory in base unit
-          
+
           for (const txn of cartTransactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
             const txnType = txn.type;
-            
+
             if (process.env.NODE_ENV === 'development' && txnQty > 0) {
               console.log(`[STOCK CALC] ${ingredient.name}: ${txnType} transaction - qty=${txnQty} ${ingredient.baseUnit}, date=${txn.date}, cartId=${txn.cartId}`);
             }
-            
+
             if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               if (totalQty > 0 && txnQty > 0) {
@@ -1262,7 +1262,7 @@ exports.getIngredients = async (req, res) => {
                   // Fallback: calculate from costAllocated
                   txnCostPerBaseUnit = txn.costAllocated / txnQty;
                 }
-                
+
                 // Weighted average: (existing total value + new value) / (existing qty + new qty)
                 const existingTotalValue = totalQty * (weightedAvgCost || 0);
                 const newValue = txnQty * txnCostPerBaseUnit;
@@ -1289,9 +1289,9 @@ exports.getIngredients = async (req, res) => {
               totalValue = totalQty * weightedAvgCost;
             }
           }
-          
+
           cartSpecificQty = Math.max(0, totalQty);
-          
+
           if (process.env.NODE_ENV === 'development') {
             console.log(`[STOCK CALC] ${ingredient.name}: Final calculated stock = ${cartSpecificQty} ${ingredient.baseUnit}, weighted avg cost = ₹${weightedAvgCost.toFixed(6)}/${ingredient.baseUnit}`);
           }
@@ -1302,12 +1302,12 @@ exports.getIngredients = async (req, res) => {
           // OR if the ingredient has global stock that should be visible to all carts
           cartSpecificQty = Number(ingredient.qtyOnHand) || 0;
           weightedAvgCost = 0;
-          
+
           if (process.env.NODE_ENV === 'development') {
             console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name} has no transactions, using qtyOnHand: ${cartSpecificQty}`);
           }
         }
-        
+
         // CRITICAL: For inventory value calculation, cost MUST be 0 when stock is 0
         // This is the most important rule - no exceptions
         // Check stock FIRST before calculating cost
@@ -1326,7 +1326,7 @@ exports.getIngredients = async (req, res) => {
             cartSpecificCost = Number(ingredient.currentCostPerBaseUnit) || 0;
           }
         }
-        
+
         // ABSOLUTE FINAL CHECK: If stock is 0, cost MUST be 0 (no exceptions)
         // This overrides any previous cost calculation
         if (cartSpecificQty <= 0) {
@@ -1335,7 +1335,7 @@ exports.getIngredients = async (req, res) => {
 
         // Override qtyOnHand and currentCostPerBaseUnit with cart-specific values
         ingredient.qtyOnHand = cartSpecificQty;
-        
+
         // CRITICAL: Set cost - MUST be 0 when stock is 0 (absolute rule)
         // This check happens AFTER all cost calculations to ensure it's never overridden
         if (cartSpecificQty <= 0) {
@@ -1345,17 +1345,17 @@ exports.getIngredients = async (req, res) => {
           // Stock > 0 - use calculated cost
           ingredient.currentCostPerBaseUnit = cartSpecificCost;
         }
-        
+
         // Final safety check: ensure cost is 0 if stock is 0 (absolute guarantee)
         // This is a redundant check to catch any edge cases
         if (ingredient.qtyOnHand <= 0) {
           ingredient.currentCostPerBaseUnit = 0;
         }
-        
+
         // CRITICAL: Absolute final check - use threshold to catch any floating point issues
         const finalQtyCheck = Math.abs(Number(ingredient.qtyOnHand) || 0);
         const finalCostCheck = Math.abs(Number(ingredient.currentCostPerBaseUnit) || 0);
-        
+
         if (finalQtyCheck < 0.0001 && finalCostCheck > 0) {
           // Stock is essentially 0 but cost is > 0 - force cost to 0
           if (process.env.NODE_ENV === 'development') {
@@ -1364,7 +1364,7 @@ exports.getIngredients = async (req, res) => {
           ingredient.currentCostPerBaseUnit = 0;
           ingredient.markModified("currentCostPerBaseUnit");
         }
-        
+
         // Mark as modified so it's included in the response
         ingredient.markModified("qtyOnHand");
         ingredient.markModified("currentCostPerBaseUnit");
@@ -1393,7 +1393,7 @@ exports.getIngredients = async (req, res) => {
     for (const ingredient of ingredients) {
       const qty = Math.abs(Number(ingredient.qtyOnHand) || 0);
       let cost = Math.abs(Number(ingredient.currentCostPerBaseUnit) || 0);
-      
+
       // CRITICAL: If stock is 0 or very close to 0 (within 0.0001), cost MUST be 0
       // This catches any edge cases where stock might be 0.00001 or similar
       if (qty < 0.0001) {
@@ -1407,13 +1407,13 @@ exports.getIngredients = async (req, res) => {
           ingredient.markModified("currentCostPerBaseUnit");
         }
       }
-      
+
       // Double-check: ensure cost is exactly 0 when qty is exactly 0
       if (qty === 0 && cost !== 0) {
         ingredient.currentCostPerBaseUnit = 0;
         ingredient.markModified("currentCostPerBaseUnit");
       }
-      
+
       // TRIPLE-CHECK: Convert to plain object and verify before response
       // This ensures the value is actually 0 in the response, not just in the Mongoose document
       if (qty < 0.0001) {
@@ -1434,34 +1434,34 @@ exports.getIngredients = async (req, res) => {
     const sanitizedIngredients = ingredients.map((ing) => {
       // CRITICAL: First convert to plain object to ensure we can access all properties
       const plainIng = ing.toObject ? ing.toObject({ getters: true, virtuals: false }) : { ...ing };
-      
+
       // Extract values from plain object
       let qty = Number(plainIng.qtyOnHand) || 0;
       let cost = Number(plainIng.currentCostPerBaseUnit) || 0;
       let lastPurchaseUnitPrice = Number(plainIng.lastPurchaseUnitPrice) || 0;
       let lastPurchaseUom = plainIng.lastPurchaseUom || plainIng.uom || 'pcs';
-      
+
       // Ensure qty is non-negative and valid
       qty = Math.max(0, qty);
       if (isNaN(qty) || !isFinite(qty)) qty = 0;
-      
+
       // CRITICAL: If stock is 0, cost MUST be 0 (absolute rule)
       if (qty < 0.0001) {
         cost = 0;
         lastPurchaseUnitPrice = 0;
       }
-      
+
       // Ensure cost is valid
       if (isNaN(cost) || !isFinite(cost)) cost = 0;
       if (isNaN(lastPurchaseUnitPrice) || !isFinite(lastPurchaseUnitPrice)) lastPurchaseUnitPrice = 0;
-      
+
       // CRITICAL: Explicitly set ALL calculated values in the response
       // Round values appropriately
       plainIng.qtyOnHand = Number(qty.toFixed(4)); // Round to 4 decimal places
       plainIng.currentCostPerBaseUnit = Number(cost.toFixed(6)); // Round to 6 decimal places
       plainIng.lastPurchaseUnitPrice = Number(lastPurchaseUnitPrice.toFixed(2)); // Round to 2 decimal places
       plainIng.lastPurchaseUom = lastPurchaseUom;
-      
+
       // Debug logging for cart admin in development
       if (process.env.NODE_ENV === 'development' && req.user.role === 'admin') {
         console.log(`[RESPONSE] ${ing.name}: qtyOnHand=${plainIng.qtyOnHand}, currentCostPerBaseUnit=${plainIng.currentCostPerBaseUnit}, lastPurchaseUnitPrice=${plainIng.lastPurchaseUnitPrice}/${plainIng.lastPurchaseUom}`);
@@ -1471,7 +1471,7 @@ exports.getIngredients = async (req, res) => {
           plainIng.lastPurchaseUnitPrice = 0;
         }
       }
-      
+
       return plainIng;
     });
 
@@ -1505,7 +1505,7 @@ exports.getIngredients = async (req, res) => {
           stockValue: stockValue.toFixed(2)
         });
       });
-      
+
       // Calculate total value from response
       const totalValue = sanitizedIngredients.reduce((sum, ing) => {
         const qty = Number(ing.qtyOnHand) || 0;
@@ -1517,20 +1517,20 @@ exports.getIngredients = async (req, res) => {
 
     // CRITICAL: Always return success with data array, even if empty
     console.log(`[GET_INGREDIENTS] ✅ Sending response: ${sanitizedIngredients.length} ingredients`);
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       data: sanitizedIngredients || [],
       count: sanitizedIngredients.length,
-      message: sanitizedIngredients.length === 0 
-        ? "No ingredients found. Super admin should create ingredients with cartId: null first." 
+      message: sanitizedIngredients.length === 0
+        ? "No ingredients found. Super admin should create ingredients with cartId: null first."
         : `Found ${sanitizedIngredients.length} ingredients`
     });
   } catch (error) {
     console.error(`[GET_INGREDIENTS ERROR]`, error);
     console.error(`[GET_INGREDIENTS ERROR] Stack:`, error.stack);
     console.error(`[GET_INGREDIENTS ERROR] User:`, req.user?.role, req.user?._id);
-    res.status(500).json({ 
-      success: false, 
+    res.status(500).json({
+      success: false,
       message: error.message || "Failed to fetch ingredients",
       data: [] // Always return data array
     });
@@ -1551,7 +1551,7 @@ exports.createIngredient = async (req, res) => {
 
     // Ingredients can be shared (cartId optional) or kiosk-specific
     const data = await setOutletContext(req.user, bodyData, false);
-    
+
     // CRITICAL: For super admin, ALWAYS set cartId to null for shared ingredients
     // This ensures all super admin ingredients are visible to cart admins
     if (req.user.role === "super_admin") {
@@ -1563,18 +1563,18 @@ exports.createIngredient = async (req, res) => {
       }
       console.log(`[CREATE_INGREDIENT] Super admin - Final cartId value: ${data.cartId === null ? 'null (SHARED)' : data.cartId}`);
     }
-    
+
     console.log(`[CREATE_INGREDIENT] Creating ingredient: ${bodyData.name}`);
     console.log(`[CREATE_INGREDIENT] User role: ${req.user.role}`);
     console.log(`[CREATE_INGREDIENT] Final cartId: ${data.cartId === null ? 'null (SHARED - visible to all cart admins)' : data.cartId}`);
     console.log(`[CREATE_INGREDIENT] Body cartId: ${bodyData.cartId || 'not provided'}`);
-    
+
     // Check if ingredient with same name and cartId already exists
     // The database has a unique index on name + cartId (legacy) or name + cartId
     const existingQuery = {
       name: { $regex: new RegExp(`^${data.name.trim()}$`, 'i') }, // Case-insensitive match
     };
-    
+
     // Add cartId to query if it exists, otherwise check for null
     if (data.cartId) {
       existingQuery.cartId = data.cartId;
@@ -1585,20 +1585,20 @@ exports.createIngredient = async (req, res) => {
         { cartId: { $exists: false } }
       ];
     }
-    
+
     const existingIngredient = await Ingredient.findOne(existingQuery);
-    
+
     if (existingIngredient) {
       // Return existing ingredient with a warning instead of error
       await existingIngredient.populate("cartId", "name cafeName");
       await existingIngredient.populate("preferredSupplierId", "name");
-      
+
       // Convert to plain object to ensure all fields are included
       const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
-      
+
       const isShared = !data.cartId || data.cartId === null;
       console.log(`[CREATE_INGREDIENT] Returning existing ingredient: ${ingredientData.name} (ID: ${ingredientData._id})`);
-      
+
       return res.status(200).json({
         success: true,
         message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
@@ -1607,19 +1607,19 @@ exports.createIngredient = async (req, res) => {
         isExisting: true
       });
     }
-    
+
     const ingredient = new Ingredient(data);
-    
+
     // CRITICAL: Log before saving to verify cartId
     console.log(`[CREATE_INGREDIENT] About to save ingredient:`, {
       name: ingredient.name,
       cartId: ingredient.cartId === null ? 'null (SHARED)' : ingredient.cartId,
       role: req.user.role
     });
-    
+
     try {
       await ingredient.save();
-      
+
       // CRITICAL: Verify what was actually saved
       const savedIngredient = await Ingredient.findById(ingredient._id);
       console.log(`[CREATE_INGREDIENT] ✅ Ingredient saved successfully!`);
@@ -1629,11 +1629,11 @@ exports.createIngredient = async (req, res) => {
         cartId: savedIngredient.cartId === null ? 'null (SHARED)' : savedIngredient.cartId,
         isActive: savedIngredient.isActive
       });
-      
+
       // Verify it's accessible to cart admins
       if (req.user.role === "super_admin" && savedIngredient.cartId === null) {
         console.log(`[CREATE_INGREDIENT] ✅✅✅ VERIFIED: Ingredient saved with cartId: null - WILL BE VISIBLE TO ALL CART ADMINS`);
-        
+
         // Test: Verify a cart admin can see this ingredient
         const testCartAdminQuery = {
           $or: [
@@ -1655,10 +1655,10 @@ exports.createIngredient = async (req, res) => {
         // Extract the duplicate key from error message
         const duplicateKeyMatch = saveError.message.match(/dup key: \{ (.+?) \}/);
         const duplicateKey = duplicateKeyMatch ? duplicateKeyMatch[1] : 'unknown';
-        
+
         // Check if it's a shared ingredient (cartId: null or cartId: null)
         const isShared = duplicateKey.includes('cartId: null') || duplicateKey.includes('cartId: null') || !data.cartId;
-        
+
         // Try to find the existing ingredient to return it
         let existingIngredient = null;
         try {
@@ -1677,13 +1677,13 @@ exports.createIngredient = async (req, res) => {
         } catch (findError) {
           console.error('[CREATE_INGREDIENT] Error finding existing ingredient:', findError);
         }
-        
+
         // Return existing ingredient with warning instead of error
         if (existingIngredient) {
           // Convert to plain object to ensure all fields are included
           const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
           console.log(`[CREATE_INGREDIENT] Returning existing ingredient from duplicate key error: ${ingredientData.name} (ID: ${ingredientData._id})`);
-          
+
           return res.status(200).json({
             success: true,
             message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
@@ -1704,13 +1704,13 @@ exports.createIngredient = async (req, res) => {
       // Re-throw if it's not a duplicate key error
       throw saveError;
     }
-    
+
     await ingredient.populate("cartId", "name cafeName");
     await ingredient.populate("preferredSupplierId", "name");
 
     // Convert to plain object to ensure all fields are included in response
     const ingredientData = ingredient.toObject ? ingredient.toObject({ getters: true, virtuals: false }) : ingredient;
-    
+
     console.log(`[CREATE_INGREDIENT] ✅ Successfully created ingredient: ${ingredientData.name} (ID: ${ingredientData._id}, cartId: ${ingredientData.cartId || 'null'})`);
 
     // Emit socket event for real-time sync
@@ -1725,16 +1725,16 @@ exports.createIngredient = async (req, res) => {
       );
     }
 
-    res.status(201).json({ 
-      success: true, 
+    res.status(201).json({
+      success: true,
       data: ingredientData,
       message: `Ingredient "${ingredientData.name}" created successfully`
     });
   } catch (error) {
     console.error(`[CREATE_INGREDIENT ERROR]`, error);
-    res.status(400).json({ 
-      success: false, 
-      message: error.message || "Failed to create ingredient" 
+    res.status(400).json({
+      success: false,
+      message: error.message || "Failed to create ingredient"
     });
   }
 };
@@ -1755,7 +1755,7 @@ exports.updateIngredient = async (req, res) => {
 
     // CRITICAL: Check if this is a SHARED ingredient (cartId: null)
     const isSharedIngredient = existingIngredient.cartId === null || existingIngredient.cartId === undefined;
-    
+
     console.log(`[UPDATE_INGREDIENT] Updating ingredient: ${existingIngredient.name}`);
     console.log(`[UPDATE_INGREDIENT] Current cartId: ${existingIngredient.cartId === null ? 'null (SHARED)' : existingIngredient.cartId}`);
     console.log(`[UPDATE_INGREDIENT] User role: ${req.user.role} (${req.user._id})`);
@@ -1773,7 +1773,7 @@ exports.updateIngredient = async (req, res) => {
           message: "Access denied. You can only update ingredients belonging to your cart.",
         });
       }
-      
+
       // If updating a shared ingredient, cart admin can only update certain allowable fields
       // They CANNOT change name, category, or cartId
       if (isSharedIngredient) {
@@ -1781,7 +1781,7 @@ exports.updateIngredient = async (req, res) => {
         const allowedFields = ['qtyOnHand', 'reorderLevel', 'currentCostPerBaseUnit', 'isActive', 'storageLocation'];
         const requestedFields = Object.keys(req.body);
         const disallowedFields = requestedFields.filter(f => !allowedFields.includes(f));
-        
+
         if (disallowedFields.length > 0) {
           console.warn(`[UPDATE_INGREDIENT] ⚠️ Cart admin attempted to update disallowed fields on shared ingredient: ${disallowedFields.join(', ')}`);
           // Allow the update but log warning - or you can reject it
@@ -1818,7 +1818,7 @@ exports.updateIngredient = async (req, res) => {
     if (updateData.category) {
       updateData.category = decodeHtmlEntities(updateData.category);
     }
-    
+
     // CRITICAL FIX: Remove cartId from updateData to prevent overwriting
     // This prevents shared ingredients from being converted to cart-specific
     // when cart admins update other fields like quantity or reorder level
@@ -1828,7 +1828,7 @@ exports.updateIngredient = async (req, res) => {
       console.log(`[UPDATE_INGREDIENT] Attempted new cartId: ${updateData.cartId}`);
       delete updateData.cartId;
     }
-    
+
     // CRITICAL: For shared ingredients, ensure cartId remains null
     if (isSharedIngredient) {
       // Explicitly preserve cartId as null
@@ -1842,7 +1842,7 @@ exports.updateIngredient = async (req, res) => {
       updateData,
       { new: true, runValidators: true }
     );
-    
+
     // CRITICAL: Verify cartId was not changed
     if (isSharedIngredient && ingredient.cartId !== null) {
       console.error(`[UPDATE_INGREDIENT] ❌❌❌ CRITICAL ERROR: Shared ingredient cartId was changed to ${ingredient.cartId}!`);
@@ -2190,7 +2190,7 @@ exports.receivePurchase = async (req, res) => {
 
       // Convert to base unit
       const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, item.qty, item.uom);
-      
+
       // Calculate unit cost in base unit
       // Formula: unitCostInBaseUnit = unitPrice (per display unit) / conversionFactor (display units per base unit)
       // Example: If unitPrice is ₹608.26/kg and baseUnit is "g":
@@ -2198,14 +2198,14 @@ exports.receivePurchase = async (req, res) => {
       //   unitCostInBaseUnit = 608.26 / 1000 = 0.60826 per gram ✓
       const conversionFactor = safeConvertToBaseUnit(ingredient, 1, item.uom);
       const unitCostInBaseUnit = item.unitPrice / conversionFactor;
-      
+
       // Validate the calculated cost is reasonable
       // For ingredients with baseUnit "g" or "ml", cost per base unit should typically be < 100
       // If it's > 100, it might indicate the calculation is wrong
       if ((ingredient.baseUnit === 'g' || ingredient.baseUnit === 'ml') && unitCostInBaseUnit > 100) {
         console.error(`[PURCHASE COST ERROR] ${ingredient.name}: Calculated cost per ${ingredient.baseUnit} is ₹${unitCostInBaseUnit.toFixed(6)}, which seems too high. Unit price: ₹${item.unitPrice}/${item.uom}, Conversion factor: ${conversionFactor}`);
       }
-      
+
       // Always log purchase cost calculation for debugging
       console.log(`[PURCHASE] ${ingredient.name}: unitPrice=₹${item.unitPrice}/${item.uom}, baseUnit=${ingredient.baseUnit}, conversionFactor=${conversionFactor}, unitCostInBaseUnit=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
 
@@ -2213,12 +2213,12 @@ exports.receivePurchase = async (req, res) => {
       // Formula: (Existing Stock Qty × Existing Avg Cost + New Purchase Qty × New Purchase Cost) / (Existing Stock Qty + New Purchase Qty)
       // Use cartId for stock update
       const cartId = purchase.cartId || null;
-      
+
       // Log before update for debugging
       if (process.env.NODE_ENV === 'development') {
         console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Updating stock - qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, purchasePrice=₹${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}, cartId=${cartId}`);
       }
-      
+
       // Update stock and calculate weighted average cost
       const stockUpdateResult = await WeightedAverageService.updateWeightedAverage(
         item.ingredientId,
@@ -2226,7 +2226,7 @@ exports.receivePurchase = async (req, res) => {
         unitCostInBaseUnit, // Purchase price per base unit
         cartId
       );
-      
+
       // Log after update for debugging
       if (process.env.NODE_ENV === 'development') {
         console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Stock updated - previousQty=${stockUpdateResult.previousQty}, previousAvgCost=₹${stockUpdateResult.previousAvgCost.toFixed(6)}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, weightedAvgCost=₹${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
@@ -2240,7 +2240,7 @@ exports.receivePurchase = async (req, res) => {
       // When calculating weighted average in inventory: weightedAvgCost = costAllocated / qtyInBaseUnit
       // This should equal unitCostInBaseUnit, ensuring consistency
       const costAllocated = qtyInBaseUnit * unitCostInBaseUnit;
-      
+
       // Validate costAllocated calculation
       if (process.env.NODE_ENV === 'development') {
         const expectedCost = item.unitPrice * item.qty; // Total purchase cost
@@ -2260,7 +2260,7 @@ exports.receivePurchase = async (req, res) => {
       if (transactionCartId && mongoose.Types.ObjectId.isValid(transactionCartId)) {
         transactionCartId = new mongoose.Types.ObjectId(transactionCartId);
       }
-      
+
       const transaction = new InventoryTransaction({
         ingredientId: item.ingredientId,
         type: "IN",
@@ -2275,7 +2275,7 @@ exports.receivePurchase = async (req, res) => {
         recordedBy: req.user._id,
         cartId: transactionCartId, // CRITICAL: Must match purchase.cartId for proper stock tracking (stored as ObjectId)
       });
-      
+
       // Validate transaction before saving
       if (qtyInBaseUnit <= 0) {
         throw new Error(`Invalid qtyInBaseUnit for ${ingredient.name}: ${qtyInBaseUnit}. Original qty: ${item.qty} ${item.uom}`);
@@ -2283,9 +2283,9 @@ exports.receivePurchase = async (req, res) => {
       if (costAllocated < 0) {
         throw new Error(`Invalid costAllocated for ${ingredient.name}: ${costAllocated}`);
       }
-      
+
       await transaction.save();
-      
+
       // Log transaction creation for debugging
       if (process.env.NODE_ENV === 'development') {
         console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Transaction created - qty=${item.qty} ${item.uom}, qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, costAllocated=₹${costAllocated.toFixed(2)}, unitPrice=₹${item.unitPrice}/${item.uom}, cartId=${transactionCartId ? transactionCartId.toString() : 'null'}`);
@@ -2337,7 +2337,7 @@ exports.receivePurchase = async (req, res) => {
       const recipeFilter = {
         "ingredients.ingredientId": { $in: purchasedIngredientIds },
       };
-      
+
       // If this is a cart-specific purchase, also recalculate global recipes
       // This ensures global BOMs reflect the latest purchase prices
       if (purchase.cartId) {
@@ -2347,7 +2347,7 @@ exports.receivePurchase = async (req, res) => {
           { cartId: { $exists: false } }, // Legacy recipes
         ];
       }
-      
+
       const affectedRecipes = await Recipe.find(recipeFilter);
 
       // #region agent log
@@ -2599,6 +2599,96 @@ exports.returnToInventory = async (req, res) => {
 };
 
 /**
+ * @route   POST /api/costing-v2/inventory/direct-purchase
+ * @desc    Directly add stock with price (for mobile app/manual addition)
+ */
+exports.directPurchase = async (req, res) => {
+  try {
+    const { ingredientId, qty, uom, unitPrice, supplier, notes, cartId } = req.body;
+
+    const ingredient = await Ingredient.findById(ingredientId);
+    if (!ingredient) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Ingredient not found" });
+    }
+
+    // Determine outlet ID based on role (same logic as consumeInventory)
+    let finalOutletId = cartId;
+    if (req.user.role === "admin") {
+      finalOutletId = req.user._id;
+    } else if (req.user.role === "manager") {
+      if (req.user.cartId) {
+        finalOutletId = req.user.cartId;
+      } else if (req.user.cafeId) {
+        finalOutletId = req.user.cafeId;
+      } else if (req.user.employeeId) {
+        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      } else {
+        const employee = await require("../../models/employeeModel").findOne({
+          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
+        }).lean();
+        finalOutletId = employee?.cartId || employee?.cafeId;
+      }
+      if (!finalOutletId) {
+        return res.status(400).json({ success: false, message: "No cart associated with manager" });
+      }
+    } else if (req.user.role === "franchise_admin" || req.user.role === "super_admin") {
+      if (!cartId) {
+        return res.status(400).json({ success: false, message: "cartId is required" });
+      }
+      finalOutletId = cartId; // Assuming validation happens in middleware or trusted
+    }
+
+    // Validate inputs
+    if (qty <= 0) return res.status(400).json({ success: false, message: "Quantity must be > 0" });
+    if (unitPrice < 0) return res.status(400).json({ success: false, message: "Price cannot be negative" });
+
+    // Convert to base unit
+    const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
+
+    // Calculate cost per base unit
+    const conversionFactor = safeConvertToBaseUnit(ingredient, 1, uom);
+    const unitCostInBaseUnit = unitPrice / conversionFactor;
+
+    // Update Weighted Average
+    const result = await WeightedAverageService.updateWeightedAverage(
+      ingredientId,
+      qtyInBaseUnit,
+      unitCostInBaseUnit,
+      finalOutletId
+    );
+
+    // Create Inventory Transaction
+    // costAllocated = qtyInBaseUnit * unitCostInBaseUnit (should equal qty * unitPrice)
+    const costAllocated = qtyInBaseUnit * unitCostInBaseUnit;
+
+    const transaction = new InventoryTransaction({
+      ingredientId,
+      type: "IN",
+      qty,
+      uom,
+      qtyInBaseUnit,
+      unitPrice, // Store the price per UOM
+      costAllocated,
+      refType: "direct_purchase", // New ref type
+      date: new Date(),
+      notes: notes ? `${notes} (Supplier: ${supplier || 'N/A'})` : `Direct Purchase from ${supplier || 'N/A'}`,
+      recordedBy: req.user._id,
+      cartId: finalOutletId,
+    });
+
+    await transaction.save();
+
+    res.json({ success: true, data: { ...result, transaction } });
+  } catch (error) {
+    console.error("[DIRECT_PURCHASE] Error:", error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * @route   GET /api/costing-v2/inventory/transactions
  * @desc    Get inventory transactions
  */
@@ -2649,6 +2739,35 @@ exports.getInventoryTransactions = async (req, res) => {
         filter.cartId = cartId;
       }
       // If no cartId specified, show all transactions
+    } else if (req.user.role === "manager") {
+      // Manager - only see their own cart's transactions
+      let managerCartId = req.user.cartId || req.user.cafeId;
+      if (!managerCartId && req.user.employeeId) {
+        const employee =
+          await require("../../models/employeeModel")
+            .findById(req.user.employeeId)
+            .lean();
+        managerCartId = employee?.cartId || employee?.cafeId;
+      }
+      if (!managerCartId) {
+        const employee =
+          await require("../../models/employeeModel")
+            .findOne({
+              $or: [
+                { email: req.user.email?.toLowerCase() },
+                { userId: req.user._id },
+              ],
+            })
+            .lean();
+        managerCartId = employee?.cartId || employee?.cafeId;
+      }
+      if (!managerCartId) {
+        return res.status(403).json({
+          success: false,
+          message: "No cart associated with manager",
+        });
+      }
+      filter.cartId = managerCartId;
     }
 
     const transactions = await InventoryTransaction.find(filter)
@@ -2941,9 +3060,9 @@ exports.recordWaste = async (req, res) => {
         });
       }
       if (!(await validateOutletAccess(req.user, cartId))) {
-      return res
-        .status(403)
-        .json({ success: false, message: "Access denied to this kiosk" });
+        return res
+          .status(403)
+          .json({ success: false, message: "Access denied to this kiosk" });
       }
       finalOutletId = cartId;
     } else if (req.user.role === "super_admin") {
@@ -3012,7 +3131,7 @@ exports.recordWaste = async (req, res) => {
     });
 
     await waste.save();
-    
+
     // Update transaction with waste record ID
     transaction.refId = waste._id;
     await transaction.save();
@@ -3126,29 +3245,29 @@ exports.getRecipes = async (req, res) => {
       console.log(`[GET_RECIPES] ========================================`);
       console.log(`[GET_RECIPES] CART ADMIN REQUEST - User ID: ${req.user._id}`);
       console.log(`[GET_RECIPES] ========================================`);
-      
+
       // Cart admin: only their own cart's recipes OR global recipes (cartId: null)
       // Remove cartId from filter if it was set, as we'll use $or instead
       delete costingFilter.cartId;
-      
+
       const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId) 
-        ? new mongoose.Types.ObjectId(userCartId) 
+      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
+        ? new mongoose.Types.ObjectId(userCartId)
         : userCartId;
-      
+
       // Check database state
       const totalInDB = await Recipe.countDocuments({});
       const withCartIdNull = await Recipe.countDocuments({ cartId: null });
       const withCartIdUser = await Recipe.countDocuments({ cartId: userCartIdObj });
       const withNoCartId = await Recipe.countDocuments({ cartId: { $exists: false } });
-      
+
       console.log(`[GET_RECIPES] ========== DATABASE STATE ==========`);
       console.log(`[GET_RECIPES] Total recipes in DB: ${totalInDB}`);
       console.log(`[GET_RECIPES] Recipes with cartId=null: ${withCartIdNull}`);
       console.log(`[GET_RECIPES] Recipes with cartId=${userCartIdObj}: ${withCartIdUser}`);
       console.log(`[GET_RECIPES] Recipes without cartId field: ${withNoCartId}`);
       console.log(`[GET_RECIPES] =====================================`);
-      
+
       // Build base query for shared + cart-specific recipes
       // Use $or to get both shared (cartId: null) and cart-specific (cartId: userCartId) recipes
       const baseQuery = {
@@ -3158,7 +3277,7 @@ exports.getRecipes = async (req, res) => {
           { cartId: { $exists: false } }
         ]
       };
-      
+
       // Apply isActive filter if provided
       if (filter.isActive !== undefined) {
         if (filter.isActive === true) {
@@ -3167,7 +3286,7 @@ exports.getRecipes = async (req, res) => {
           baseQuery.isActive = false;
         }
       }
-      
+
       // Apply other filters (name/search)
       const otherFilters = {};
       if (filter.name) {
@@ -3177,7 +3296,7 @@ exports.getRecipes = async (req, res) => {
           otherFilters.name = { $regex: filter.name, $options: "i" };
         }
       }
-      
+
       // Combine all filters
       if (Object.keys(otherFilters).length > 0) {
         costingFilter = {
@@ -3189,7 +3308,7 @@ exports.getRecipes = async (req, res) => {
       } else {
         costingFilter = baseQuery;
       }
-      
+
       console.log(`[GET_RECIPES] Final query:`, JSON.stringify(costingFilter, null, 2));
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin: recipes for their franchise carts OR global recipes
@@ -3229,19 +3348,19 @@ exports.getRecipes = async (req, res) => {
     // This ensures costs are based on outlet-specific purchases, not cached global values
     if (req.user.role === "admin") {
       console.log(`[GET_RECIPES] ✅ Query executed - Found ${recipes.length} recipes`);
-      
+
       // Log sample results
       if (recipes.length > 0) {
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(req.user._id) 
-          ? new mongoose.Types.ObjectId(req.user._id) 
+        const userCartIdObj = mongoose.Types.ObjectId.isValid(req.user._id)
+          ? new mongoose.Types.ObjectId(req.user._id)
           : req.user._id;
-        
+
         console.log(`[GET_RECIPES] Sample recipes:`, recipes.slice(0, 5).map(rec => ({
           name: rec.name,
           cartId: rec.cartId ? (rec.cartId._id || rec.cartId).toString() : 'null',
           isActive: rec.isActive
         })));
-        
+
         // Count shared vs cart-specific
         const sharedCount = recipes.filter(rec => !rec.cartId || rec.cartId === null).length;
         const cartSpecificCount = recipes.filter(rec => rec.cartId && rec.cartId.toString() === userCartIdObj.toString()).length;
@@ -3250,7 +3369,7 @@ exports.getRecipes = async (req, res) => {
         console.error(`[GET_RECIPES] ❌ NO RECIPES FOUND!`);
         console.error(`[GET_RECIPES] Check if super admin has created recipes with cartId: null`);
       }
-      
+
       // #region agent log
       logDebug(
         "costingController.js:1200",
@@ -3259,7 +3378,7 @@ exports.getRecipes = async (req, res) => {
         "A"
       );
       // #endregion
-      
+
       // Recalculate costs for each recipe
       // Convert lean objects back to Mongoose documents for calculateCost method
       const RecipeModel = Recipe;
@@ -3288,7 +3407,7 @@ exports.getRecipes = async (req, res) => {
         // #endregion
         // Don't save - just recalculate for display (saves are done on explicit recalculate action)
       }
-      
+
       console.log(`[GET_RECIPES] ================================================`);
     }
 
@@ -3778,7 +3897,7 @@ exports.createMenuItem = async (req, res) => {
         const cartIdForCost = req.user.role === "admin" ? req.user._id : (data.cartId || null);
         await recipe.calculateCost(cartIdForCost);
         await recipe.save();
-        
+
         // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
       }
@@ -3799,9 +3918,9 @@ exports.createMenuItem = async (req, res) => {
     console.error("[CREATE_MENU_ITEM] Error:", error);
     // Provide more detailed error message
     if (error.message.includes("required")) {
-      return res.status(400).json({ 
-        success: false, 
-        message: `Validation error: ${error.message}. Please ensure all required fields are provided.` 
+      return res.status(400).json({
+        success: false,
+        message: `Validation error: ${error.message}. Please ensure all required fields are provided.`
       });
     }
     res.status(400).json({ success: false, message: error.message });
@@ -3874,7 +3993,7 @@ exports.updateMenuItem = async (req, res) => {
         const cartIdForCost = req.user.role === "admin" ? req.user._id : (menuItem.cartId || null);
         await recipe.calculateCost(cartIdForCost);
         await recipe.save();
-        
+
         // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
       }
@@ -3966,7 +4085,7 @@ exports.getDefaultMenuItems = async (req, res) => {
       );
 
       // Get all categories for this cart admin to map IDs to names
-      const categories = await MenuCategory.find({ 
+      const categories = await MenuCategory.find({
         $or: [
           { cartId: userId }, // New field name
           { cafeId: userId }  // Backward compatibility
@@ -4098,16 +4217,16 @@ exports.importFromDefaultMenu = async (req, res) => {
         const existingItem = await MenuItem.findOne(
           recipeId
             ? {
-                name: item.name,
-                category: item.category,
-                cartId: outletData.cartId,
-                defaultMenuPath: item.defaultMenuPath,
-              }
+              name: item.name,
+              category: item.category,
+              cartId: outletData.cartId,
+              defaultMenuPath: item.defaultMenuPath,
+            }
             : {
-                name: item.name,
-                category: item.category,
-                cartId: outletData.cartId,
-              }
+              name: item.name,
+              category: item.category,
+              cartId: outletData.cartId,
+            }
         );
 
         if (existingItem) {
@@ -4139,7 +4258,7 @@ exports.importFromDefaultMenu = async (req, res) => {
               timestamp: Date.now(),
             }),
           }
-        ).catch(() => {});
+        ).catch(() => { });
         // #endregion agent log
 
         const menuItemData = {
@@ -5691,11 +5810,11 @@ const pushToCartAdminsInternal = async (cartId = null) => {
   // NEW APPROACH: All ingredients and BOMs are SHARED (cartId: null) by default
   // Cart admins can see all shared data without need for cart-specific copies
   // This prevents duplicates and ensures data consistency
-  
+
   console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ⚠️ FUNCTION DISABLED - Using shared ingredients/BOMs approach`);
   console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Cart admins automatically see all shared (cartId: null) ingredients and BOMs`);
   console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] No cart-specific copies will be created`);
-  
+
   return {
     success: true,
     message: "Push functionality disabled - all carts use shared ingredients and BOMs (no duplication needed)",
@@ -5705,7 +5824,7 @@ const pushToCartAdminsInternal = async (cartId = null) => {
       cartAdmins: []
     }
   };
-  
+
   /* DISABLED CODE - Kept for reference
   console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Starting push - cartId: ${cartId || 'ALL'}`);
   
@@ -6133,8 +6252,8 @@ exports.debugIngredients = async (req, res) => {
     }
 
     const userId = req.user._id;
-    const userCartId = mongoose.Types.ObjectId.isValid(userId) 
-      ? new mongoose.Types.ObjectId(userId) 
+    const userCartId = mongoose.Types.ObjectId.isValid(userId)
+      ? new mongoose.Types.ObjectId(userId)
       : userId;
 
     // Get counts
@@ -6142,8 +6261,8 @@ exports.debugIngredients = async (req, res) => {
     const cartSpecificCount = await Ingredient.countDocuments({ cartId: userCartId });
     const sharedCount = await Ingredient.countDocuments({ cartId: null });
     const noCartIdCount = await Ingredient.countDocuments({ cartId: { $exists: false } });
-    const withOtherCartId = await Ingredient.countDocuments({ 
-      cartId: { $ne: null, $exists: true, $ne: userCartId } 
+    const withOtherCartId = await Ingredient.countDocuments({
+      cartId: { $ne: null, $exists: true, $ne: userCartId }
     });
     const superAdminCount = await Ingredient.countDocuments({ cartId: null, isActive: true });
 
@@ -6170,8 +6289,8 @@ exports.debugIngredients = async (req, res) => {
     // Get sample ingredients
     const cartSpecific = await Ingredient.find({ cartId: userCartId }).limit(5).select('name cartId isActive').lean();
     const shared = await Ingredient.find({ cartId: null }).limit(5).select('name cartId isActive').lean();
-    const withOtherCartIds = await Ingredient.find({ 
-      cartId: { $ne: null, $exists: true, $ne: userCartId } 
+    const withOtherCartIds = await Ingredient.find({
+      cartId: { $ne: null, $exists: true, $ne: userCartId }
     }).limit(10).select('name cartId isActive').lean();
 
     // Test the query that should be used
@@ -6202,11 +6321,11 @@ exports.debugIngredients = async (req, res) => {
           superAdminActive: superAdminCount,
           testQuery: testCount,
         },
-        issue: sharedCount === 0 
+        issue: sharedCount === 0
           ? "⚠️ NO SHARED INGREDIENTS (cartId: null) FOUND! Super admin must create ingredients with cartId: null for cart admins to see them."
           : testCount === 0 && req.user.role === "admin"
-          ? "⚠️ Query returns 0 ingredients even though shared ingredients exist. Check isActive filter."
-          : "✅ OK",
+            ? "⚠️ Query returns 0 ingredients even though shared ingredients exist. Check isActive filter."
+            : "✅ OK",
         samples: {
           cartSpecific: cartSpecific.map(i => ({
             name: i.name,
@@ -6234,7 +6353,7 @@ exports.debugIngredients = async (req, res) => {
             isActive: i.isActive,
           })),
         },
-        fix: sharedCount === 0 
+        fix: sharedCount === 0
           ? "To fix: Super admin should create ingredients. They will automatically have cartId: null. Or run MongoDB command: db.ingredientv2s.updateMany({ cartId: { $ne: null } }, { $set: { cartId: null } })"
           : null,
       },

@@ -20,6 +20,7 @@ const {
   // Inventory
   consumeInventory,
   returnToInventory,
+  directPurchase,
   getInventoryTransactions,
   getCostingInventory,
   getLowStock,
@@ -166,9 +167,14 @@ router.post(
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   returnToInventory
 );
+router.post(
+  "/inventory/direct-purchase",
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  directPurchase
+);
 router.get(
   "/inventory/transactions",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getInventoryTransactions
 );
 router.get(
