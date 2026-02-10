@@ -203,26 +203,28 @@ function formatPaymentPayload(payment) {
 }
 
 // Order status transitions
-// DINE_IN flow: Pending -> Confirmed -> Preparing -> Ready -> Served -> Paid
-// TAKEAWAY flow: Pending/Accept -> Being Prepared -> Completed -> Paid -> Exit
+// UNIFIED flow for both DINE_IN and TAKEAWAY:
+// Pending → Confirmed → Preparing → Ready → Completed → Paid
+// Legacy statuses (Served, Finalized, Accepted, Being Prepared) still supported for backward compatibility
 const transitions = {
-  // DINE_IN statuses
-  Pending: new Set(["Confirmed", "Cancelled", "Accept"]), // Allow Accept for takeaway
+  // Unified flow statuses
+  Pending: new Set(["Confirmed", "Cancelled", "Accepted"]), // Accepted for legacy takeaway accept flow
   Confirmed: new Set(["Preparing", "Cancelled"]),
   Preparing: new Set(["Ready", "Cancelled"]),
-  Ready: new Set(["Served", "Cancelled"]),
-  Served: new Set(["Paid", "Cancelled"]), // Removed Finalized - goes directly to Paid
-  Finalized: new Set(["Paid", "Cancelled"]), // Keep for existing orders that are already Finalized
+  Ready: new Set(["Completed", "Served", "Cancelled"]), // Served for legacy dine-in
+  Completed: new Set(["Paid", "Cancelled"]),
   Paid: new Set(["Returned"]),
   Cancelled: new Set([]),
   Returned: new Set([]),
-  // TAKEAWAY statuses
-  Accept: new Set(["Being Prepared", "BeingPrepared", "Cancelled"]),
-  Accepted: new Set(["Being Prepared", "BeingPrepared", "Cancelled"]),
-  "Being Prepared": new Set(["Completed", "Cancelled"]),
-  BeingPrepared: new Set(["Completed", "Cancelled"]),
-  Completed: new Set(["Paid", "Cancelled"]),
-  Exit: new Set([]), // Final status for takeaway
+  // Legacy DINE_IN statuses (backward compatibility)
+  Served: new Set(["Paid", "Completed", "Cancelled"]), // Allow transition to Completed or Paid
+  Finalized: new Set(["Paid", "Cancelled"]),
+  // Legacy TAKEAWAY statuses (backward compatibility)
+  Accept: new Set(["Preparing", "Being Prepared", "BeingPrepared", "Cancelled"]),
+  Accepted: new Set(["Preparing", "Being Prepared", "BeingPrepared", "Cancelled"]),
+  "Being Prepared": new Set(["Ready", "Completed", "Cancelled"]),
+  BeingPrepared: new Set(["Ready", "Completed", "Cancelled"]),
+  Exit: new Set([]), // Final status for legacy takeaway
 };
 
 // ---------------- CREATE ORDER ----------------
@@ -464,7 +466,7 @@ const createOrder = async (req, res) => {
         tableDoc.currentOrder &&
         (!existingOrderForTable ||
           existingOrderForTable._id.toString() !==
-            tableDoc.currentOrder.toString());
+          tableDoc.currentOrder.toString());
 
       const shouldReject =
         tableDoc.sessionToken &&
@@ -747,9 +749,8 @@ const createOrder = async (req, res) => {
           return res.status(400).json({
             message: `Delivery not available. You are ${rangeCheck.distance.toFixed(
               2,
-            )} km away, but maximum delivery radius is ${
-              cart.deliveryRadius || 5
-            } km.`,
+            )} km away, but maximum delivery radius is ${cart.deliveryRadius || 5
+              } km.`,
             distance: rangeCheck.distance,
             maxRadius: cart.deliveryRadius || 5,
           });
@@ -828,12 +829,18 @@ const createOrder = async (req, res) => {
       orderType: isPickup ? "PICKUP" : isDelivery ? "DELIVERY" : undefined,
       // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
-      // For takeaway/pickup/delivery orders, store session token to isolate each customer session
-      // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
       selectedAddons: Array.isArray(selectedAddons) ? selectedAddons : [],
       kotLines: [kot],
-      status: "Confirmed",
+      // UNIFIED STATUS FLOW:
+      // - TAKEAWAY: Start as 'Pending' (awaiting staff acceptance/confirmation)
+      // - DINE_IN: Start as 'Confirmed' (customer is already at table, order is being placed)
+      status: isTakeaway ? "Pending" : "Confirmed",
+      // Payment tracking: All orders start as UNPAID
+      paymentStatus: "UNPAID",
+      paymentMode: null,
+      // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
+      inventoryDeducted: false,
     };
 
     // Only set cartId and franchiseId if they exist (they're optional in the schema)
@@ -961,8 +968,7 @@ const createOrder = async (req, res) => {
 
         orderData.takeawayToken = nextToken;
         console.log(
-          `[ORDER] Generated takeaway token ${
-            orderData.takeawayToken
+          `[ORDER] Generated takeaway token ${orderData.takeawayToken
           } for cart ${cartId.toString()}`,
         );
       }
@@ -1012,43 +1018,13 @@ const createOrder = async (req, res) => {
     }
 
     // Order created successfully
-
-    // Consume ingredients from inventory immediately when order is created
-    // This ensures inventory is reduced as soon as order is placed
-    // Run in background (non-blocking) to not slow down order creation
-    const userIdForConsumption = req.user?._id || order.cartId;
-    if (userIdForConsumption) {
-      consumeIngredientsForOrder(order, userIdForConsumption)
-        .then((consumptionResult) => {
-          if (consumptionResult.success) {
-            console.log(
-              `[COSTING] ✅ Successfully consumed ingredients for newly created order ${order._id}`,
-            );
-          } else {
-            console.warn(
-              `[COSTING] ⚠️ Failed to consume ingredients for order ${order._id}:`,
-              consumptionResult.error || consumptionResult.message,
-            );
-            // Log detailed error for debugging
-            if (consumptionResult.summary?.errors?.length > 0) {
-              console.warn(
-                `[COSTING] Consumption errors:`,
-                consumptionResult.summary.errors,
-              );
-            }
-          }
-        })
-        .catch((consumptionError) => {
-          console.error(
-            `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
-            consumptionError,
-          );
-        });
-    } else {
-      console.warn(
-        `[COSTING] ⚠️ Cannot consume ingredients for order ${order._id}: No user ID available`,
-      );
-    }
+    // NOTE: Inventory consumption is NOT done here.
+    // Inventory is ONLY deducted when order status changes to "Preparing" or "Being Prepared"
+    // This ensures:
+    // 1. Real-time inventory deduction only when kitchen actually starts
+    // 2. No premature deductions for orders that might be cancelled
+    // 3. Accurate food cost tracking in Finance panel
+    console.log(`[ORDER] Order ${order._id} created. Inventory will be deducted when status changes to Preparing.`);
 
     // Only update table status for dine-in orders
     if (!isTakeaway && tableDoc) {
@@ -1245,8 +1221,7 @@ const createOrder = async (req, res) => {
             }
 
             console.log(
-              `✅ [ORDER] Updated customer record: ${customer.name} (${
-                customer.phone || customer.email
+              `✅ [ORDER] Updated customer record: ${customer.name} (${customer.phone || customer.email
               }) - Visit #${customer.visitCount} for order ${orderId}`,
             );
           } else {
@@ -1269,7 +1244,7 @@ const createOrder = async (req, res) => {
               : cartIdValue;
             const franchiseIdObj =
               franchiseIdValue &&
-              mongoose.Types.ObjectId.isValid(franchiseIdValue)
+                mongoose.Types.ObjectId.isValid(franchiseIdValue)
                 ? typeof franchiseIdValue === "string"
                   ? new mongoose.Types.ObjectId(franchiseIdValue)
                   : franchiseIdValue
@@ -1309,8 +1284,7 @@ const createOrder = async (req, res) => {
             try {
               customer = await Customer.create(newCustomerData);
               console.log(
-                `✅ [ORDER] Created new customer record: ${customer.name} (${
-                  customer.phone || customer.email
+                `✅ [ORDER] Created new customer record: ${customer.name} (${customer.phone || customer.email
                 }) for order ${orderId}`,
               );
               console.log("[ORDER] Created customer details:", {
@@ -1349,10 +1323,10 @@ const createOrder = async (req, res) => {
                     foundCustomers: testCustomers.length,
                     sampleCustomer: testCustomers[0]
                       ? {
-                          id: testCustomers[0]._id.toString(),
-                          name: testCustomers[0].name,
-                          cartId: testCustomers[0].cartId?.toString(),
-                        }
+                        id: testCustomers[0]._id.toString(),
+                        name: testCustomers[0].name,
+                        cartId: testCustomers[0].cartId?.toString(),
+                      }
                       : null,
                   },
                 );
@@ -1492,9 +1466,8 @@ const addKot = async (req, res) => {
         order.status,
       );
       return res.status(400).json({
-        message: `Cannot add items to order with status: ${
-          order.status
-        }. Order is already ${order.status.toLowerCase()}.`,
+        message: `Cannot add items to order with status: ${order.status
+          }. Order is already ${order.status.toLowerCase()}.`,
         currentStatus: order.status,
       });
     }
@@ -1685,16 +1658,13 @@ const addKot = async (req, res) => {
             customer.lastVisitAt = new Date();
             await customer.save();
             console.log(
-              `✅ [ORDER] addKot - Updated customer record: ${customer.name} (${
-                customer.phone || customer.email
+              `✅ [ORDER] addKot - Updated customer record: ${customer.name} (${customer.phone || customer.email
               }) for order ${order._id}`,
             );
           } else {
             console.log(
-              `[ORDER] addKot - Customer not found for order ${
-                order._id
-              } (phone: ${normalizedPhone || "N/A"}, email: ${
-                normalizedEmail || "N/A"
+              `[ORDER] addKot - Customer not found for order ${order._id
+              } (phone: ${normalizedPhone || "N/A"}, email: ${normalizedEmail || "N/A"
               })`,
             );
           }
@@ -2301,6 +2271,8 @@ const acceptOrder = async (req, res) => {
     };
 
     // Atomic update: first to accept wins
+    // UNIFIED FLOW: Transition to 'Confirmed' (same as dine-in)
+    // The acceptedBy field tracks who accepted the order
     const updatedOrder = await Order.findOneAndUpdate(
       {
         _id: orderId,
@@ -2309,7 +2281,7 @@ const acceptOrder = async (req, res) => {
       },
       {
         $set: {
-          status: "Accepted",
+          status: "Confirmed",  // UNIFIED: Same as dine-in flow
           acceptedBy,
         },
       },
@@ -2487,11 +2459,14 @@ const updateOrderStatus = async (req, res) => {
       updateData.cancellationReason = reason;
     }
 
+    // Handle status-specific updates
     if (status === "Paid") {
       updateData.paidAt = new Date();
+      updateData.paymentStatus = "PAID";
     } else if (status === "Returned") {
       updateData.returnedAt = new Date();
       updateData.paidAt = null;
+      updateData.paymentStatus = "REFUNDED";
       if (Array.isArray(order.kotLines)) {
         order.kotLines.forEach((kot, index) => {
           const kotLine = order.kotLines[index];
@@ -2511,6 +2486,17 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
+    // CRITICAL: Inventory deduction ONLY happens when status changes to "Preparing" or "Being Prepared"
+    // AND only if inventory hasn't already been deducted (inventoryDeducted flag)
+    const isPreparingStatus = ["Preparing", "Being Prepared", "BeingPrepared"].includes(status);
+    const needsInventoryDeduction = isPreparingStatus && !order.inventoryDeducted;
+
+    if (needsInventoryDeduction) {
+      // Set the flag BEFORE consumption to prevent race conditions
+      updateData.inventoryDeducted = true;
+      updateData.inventoryDeductedAt = new Date();
+    }
+
     // Use findByIdAndUpdate for faster atomic update (instead of find + save)
     const updatedOrder = await Order.findByIdAndUpdate(
       req.params.id,
@@ -2527,39 +2513,24 @@ const updateOrderStatus = async (req, res) => {
     // Update local order object for socket emission
     Object.assign(order, updatedOrder);
 
-    // Automatically consume ingredients when order is marked as Preparing, Ready, Paid, Finalized, or Completed
-    // This ensures ingredients are consumed when order starts being prepared
-    // Run in background to not block status update response
-    const consumptionTriggerStatuses = [
-      "Preparing",
-      "Ready",
-      "Paid",
-      "Finalized",
-      "Completed",
-      "Served",
-      "Exit",
-      "Being Prepared",
-      "BeingPrepared",
-      "Confirmed",
-      "Accepted",
-    ];
-
-    const shouldConsumeIngredients =
-      consumptionTriggerStatuses.includes(status);
-
-    if (shouldConsumeIngredients) {
-      // Selective token consumption: only run when we have a valid User ObjectId (required by InventoryTransactionV2.recordedBy)
+    // INVENTORY CONSUMPTION - ONLY when changing to PREPARING status
+    // This ensures:
+    // 1. Real-time inventory deduction when kitchen starts
+    // 2. No double deduction (flag is set above)
+    // 3. Finance panel accuracy
+    if (needsInventoryDeduction) {
       const userId = req.user
         ? req.user._id
         : updatedOrder.cartId &&
-          (updatedOrder.cartId._id || updatedOrder.cartId);
+        (updatedOrder.cartId._id || updatedOrder.cartId);
+
       if (!userId) {
         console.warn(
           `[COSTING] Skipping consumption for order ${updatedOrder._id}: no req.user and no order.cartId`,
         );
       } else {
         console.log(
-          `[COSTING] Status update to ${status} for order ${order._id} - Triggering consumption (User: ${userId})`,
+          `[COSTING] 🔥 Status changed to ${status} for order ${order._id} - Triggering REAL-TIME inventory deduction (User: ${userId})`,
         );
 
         // Run ingredient consumption in background (non-blocking)
@@ -2567,7 +2538,7 @@ const updateOrderStatus = async (req, res) => {
           .then((consumptionResult) => {
             if (consumptionResult.success) {
               console.log(
-                `[COSTING] ✅ Successfully consumed ingredients for order ${order._id}`,
+                `[COSTING] ✅ Successfully consumed ingredients for order ${order._id} (status: ${status})`,
               );
             } else {
               // It's normal to have "already processed" or "no items" - log as info, not error/warn
@@ -2589,8 +2560,8 @@ const updateOrderStatus = async (req, res) => {
                 } else {
                   console.warn(
                     consumptionResult.error ||
-                      consumptionResult.message ||
-                      "Unknown error",
+                    consumptionResult.message ||
+                    "Unknown error",
                   );
                 }
               }
@@ -2603,6 +2574,10 @@ const updateOrderStatus = async (req, res) => {
             );
           });
       }
+    } else if (isPreparingStatus && order.inventoryDeducted) {
+      console.log(
+        `[COSTING] ℹ️ Order ${order._id} already had inventory deducted - skipping duplicate consumption`,
+      );
     }
 
     // Handle payment updates in background (non-blocking)
@@ -2756,21 +2731,20 @@ const cancelOrderByCustomer = async (req, res) => {
     const allowedStatuses =
       status === "Cancelled"
         ? [
-            "Pending",
-            "Confirmed",
-            "Preparing",
-            "Ready",
-            "Served",
-            "Finalized",
-            "Completed",
-          ]
+          "Pending",
+          "Confirmed",
+          "Preparing",
+          "Ready",
+          "Served",
+          "Finalized",
+          "Completed",
+        ]
         : ["Paid"];
 
     if (!allowedStatuses.includes(order.status)) {
       return res.status(400).json({
-        message: `Cannot ${status.toLowerCase()} order with status ${
-          order.status
-        }`,
+        message: `Cannot ${status.toLowerCase()} order with status ${order.status
+          }`,
         currentStatus: order.status,
         allowedStatuses,
       });
@@ -2895,35 +2869,19 @@ const confirmPaymentByCustomer = async (req, res) => {
 
     const io = req.app.get("io");
 
-    // Update order status to Paid
+    // Update order status to Paid and set payment fields
     order.status = "Paid";
     order.paidAt = new Date();
+    order.paymentStatus = "PAID";
+    order.paymentMode = paymentMethod || "CASH";
     await order.save();
 
-    // Consume ingredients for costing (user is "customer" via QR -> attribute to cart admin)
-    // Use cartId as the user, since cartId points to the User (cart admin)
-    const userId = order.cartId;
-    if (userId) {
-      consumeIngredientsForOrder(order, userId)
-        .then((result) => {
-          if (result.success)
-            console.log(
-              `[COSTING] Customer paid order ${order._id} consumption success`,
-            );
-          else
-            console.warn(
-              `[COSTING] Customer paid order ${order._id} consumption failed: ${result.message}`,
-            );
-        })
-        .catch((err) =>
-          console.error(
-            `[COSTING] Customer paid order ${order._id} consumption error:`,
-            err,
-          ),
-        );
-    } else {
+    // NOTE: Inventory consumption is NOT done here.
+    // Inventory should already have been deducted when order status changed to "Preparing"
+    // This prevents double deduction and keeps finance numbers accurate
+    if (!order.inventoryDeducted) {
       console.warn(
-        `[COSTING] Skipping consumption for customer payment - no cartId on order ${order._id}`,
+        `[COSTING] ⚠️ Order ${order._id} was paid but inventory was never deducted (order may not have gone through Preparing status)`,
       );
     }
 
@@ -3084,9 +3042,8 @@ const returnItems = async (req, res) => {
     // Check if order can be modified (admin can remove items from any status except Cancelled/Returned)
     if (["Cancelled", "Returned"].includes(order.status)) {
       return res.status(400).json({
-        message: `Cannot remove items from order with status ${
-          order.status
-        }. Order is already ${order.status.toLowerCase()}.`,
+        message: `Cannot remove items from order with status ${order.status
+          }. Order is already ${order.status.toLowerCase()}.`,
       });
     }
 

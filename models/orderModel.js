@@ -87,24 +87,45 @@ const orderSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-        "Pending",
-        "Confirmed",
-        "Preparing",
-        "Ready",
-        "Served",
-        "Finalized",
-        "Paid",
-        "Cancelled",
-        "Returned",
-        // Takeaway-specific statuses
+        // Unified flow for DINE_IN + TAKEAWAY
+        "Pending",      // Order created, awaiting confirmation
+        "Confirmed",    // Order confirmed by staff
+        "Preparing",    // Kitchen started preparing (INVENTORY DEDUCTED HERE)
+        "Ready",        // Food ready for pickup/serving
+        "Completed",    // Order completed (for takeaway: handed over)
+        "Served",       // Legacy: keep for backward compat (treat as Completed)
+        "Finalized",    // Legacy: keep for backward compat
+        "Paid",         // Payment received
+        "Cancelled",    // Order cancelled
+        "Returned",     // Order returned after payment
+        // Legacy takeaway statuses - kept for backward compatibility
         "Accept",
         "Accepted",
         "Being Prepared",
         "BeingPrepared",
-        "Completed",
         "Exit",
       ],
       default: "Pending",
+    },
+    // Payment tracking (separate from order status)
+    paymentStatus: {
+      type: String,
+      enum: ["UNPAID", "PAID", "FAILED", "REFUNDED"],
+      default: "UNPAID",
+    },
+    paymentMode: {
+      type: String,
+      enum: ["CASH", "ONLINE", "CARD", null],
+      default: null,
+    },
+    // Inventory tracking - prevents double deduction
+    inventoryDeducted: {
+      type: Boolean,
+      default: false,
+    },
+    inventoryDeductedAt: {
+      type: Date,
+      default: null,
     },
     paidAt: Date,
     returnedAt: Date,
