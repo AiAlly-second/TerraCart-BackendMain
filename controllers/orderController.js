@@ -639,9 +639,15 @@ const createOrder = async (req, res) => {
         cartId.toString(),
       );
     } else if (isTakeaway && requestCartId && !isPickup && !isDelivery) {
-      // For regular takeaway orders (not pickup/delivery), use cartId from request body (sent by customer frontend)
-      // Validate that the cartId exists and is an active admin
+      // For regular takeaway orders (not pickup/delivery), accept either:
+      // 1) cart admin user id (legacy), or
+      // 2) Cart document id (used by some frontend flows).
       const User = require("../models/userModel");
+      const Cart = require("../models/cartModel");
+
+      let cartAdminId = null;
+
+      // Try requestCartId directly as cart admin user id
       cartAdmin = await User.findById(requestCartId)
         .select("_id franchiseId role isActive isApproved")
         .lean();
@@ -651,14 +657,37 @@ const createOrder = async (req, res) => {
         cartAdmin.isActive &&
         cartAdmin.isApproved
       ) {
-        cartId = requestCartId;
+        cartAdminId = cartAdmin._id;
+      } else {
+        // Try requestCartId as Cart document id
+        const cartDoc = await Cart.findById(requestCartId)
+          .select("_id cartAdminId isActive")
+          .lean();
+        if (cartDoc && cartDoc.isActive && cartDoc.cartAdminId) {
+          const resolvedAdmin = await User.findById(cartDoc.cartAdminId)
+            .select("_id franchiseId role isActive isApproved")
+            .lean();
+          if (
+            resolvedAdmin &&
+            resolvedAdmin.role === "admin" &&
+            resolvedAdmin.isActive &&
+            resolvedAdmin.isApproved
+          ) {
+            cartAdmin = resolvedAdmin;
+            cartAdminId = resolvedAdmin._id;
+          }
+        }
+      }
+
+      if (cartAdminId) {
+        cartId = cartAdminId;
         console.log(
-          "[ORDER] Using cartId from request body for takeaway:",
+          "[ORDER] Using resolved cart admin id for takeaway:",
           cartId.toString(),
         );
       } else {
         console.warn(
-          `[ORDER] WARNING: Invalid cartId in request (${requestCartId}). Cart admin not found or not active/approved. Falling back to first active cafe.`,
+          `[ORDER] WARNING: Invalid cartId in request (${requestCartId}). Could not resolve active/approved cart admin. Falling back to first active cafe.`,
         );
         // Fall through to fallback logic below
       }
@@ -2367,19 +2396,8 @@ const acceptOrder = async (req, res) => {
       ? req.user?.role || "admin"
       : employee.employeeRole || req.user?.role || null;
 
-    // A staff member can work only one active accepted order at a time.
-    const alreadyAssignedOrder = await Order.findOne({
-      _id: { $ne: orderId },
-      cartId: order.cartId,
-      "acceptedBy.employeeId": accepterId,
-      status: { $nin: FINAL_ORDER_STATUSES },
-    }).select("_id");
-
-    if (alreadyAssignedOrder) {
-      return res.status(409).json({
-        message: `You already have an active accepted order (${alreadyAssignedOrder._id}). Complete it before accepting a new one.`,
-      });
-    }
+    // Intentionally allow multiple active accepted orders per accepter.
+    // First-come-first-serve lock per order remains unchanged below.
 
     const acceptedBy = {
       employeeId: accepterId,
