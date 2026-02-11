@@ -20,6 +20,7 @@ const {
   authorize,
   optionalProtect,
 } = require("../middleware/authMiddleware");
+const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
 
 const router = express.Router();
 
@@ -58,18 +59,21 @@ router.patch(
     "captain",
     "manager",
   ]),
+  blockActionsIfCheckedOut,
   updateOrderStatus,
 );
 router.patch(
   "/:id/accept",
   protect,
-  authorize(["waiter", "captain", "manager"]),
+  authorize(["waiter", "captain", "manager", "admin"]),
+  blockActionsIfCheckedOut,
   acceptOrder,
 );
 router.patch(
   "/:id/print-status",
   protect,
   authorize(["admin", "manager", "waiter", "captain"]),
+  blockActionsIfCheckedOut,
   updatePrintStatus,
 );
 router.post(

@@ -2,8 +2,18 @@ const mongoose = require("mongoose");
 
 const taskSchema = new mongoose.Schema(
   {
+    taskId: {
+      type: String,
+      index: true,
+    },
     title: { type: String, required: true },
     description: { type: String },
+    assignedBy: {
+      type: String,
+      enum: ["admin", "self"],
+      default: "self",
+      index: true,
+    },
     status: {
       type: String,
       enum: ["pending", "in_progress", "completed", "cancelled", "late", "half_day"],
@@ -66,6 +76,13 @@ taskSchema.index({ assignedTo: 1, status: 1 });
 taskSchema.index({ assignedToUser: 1, status: 1 });
 taskSchema.index({ franchiseId: 1, status: 1 });
 taskSchema.index({ dueDate: 1, status: 1 });
+
+taskSchema.pre("save", function ensureTaskId(next) {
+  if (!this.taskId) {
+    this.taskId = this._id.toString();
+  }
+  next();
+});
 
 module.exports = mongoose.model("Task", taskSchema);
 

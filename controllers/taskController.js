@@ -479,6 +479,12 @@ exports.createTask = async (req, res) => {
     const taskData = { ...req.body };
     const user = req.user;
 
+    if (["admin", "franchise_admin", "super_admin"].includes(user.role)) {
+      taskData.assignedBy = taskData.assignedBy || "admin";
+    } else {
+      taskData.assignedBy = taskData.assignedBy || "self";
+    }
+
     // Set hierarchy relationships
     if (user.role === "admin") {
       taskData.cartId = user._id; // Task model uses cartId, not cafeId
@@ -565,6 +571,10 @@ exports.createTask = async (req, res) => {
     }
 
     const task = await Task.create(taskData);
+    if (!task.taskId) {
+      task.taskId = task._id.toString();
+      await task.save();
+    }
     await task.populate("assignedTo", "name mobile employeeRole");
     await task.populate("assignedToUser", "name email role");
 
@@ -645,6 +655,12 @@ exports.updateTask = async (req, res) => {
         task[key] = updates[key];
       }
     });
+
+    // Keep assignedToUser in sync when assignedTo changes.
+    if (updates.assignedTo) {
+      const assignedEmployee = await Employee.findById(updates.assignedTo).lean();
+      task.assignedToUser = assignedEmployee?.userId || undefined;
+    }
 
     // If status changed to completed, set completedAt and completedBy
     if (updates.status === "completed" && task.status !== "completed") {
@@ -752,14 +768,14 @@ exports.deleteTask = async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
-    const cafeId = task.cafeId;
+    const taskCartId = task.cartId || task.cafeId;
     await Task.deleteOne({ _id: id });
 
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && cafeId) {
-      emitToCafe(io, cafeId.toString(), "task:deleted", { id });
+    if (io && emitToCafe && taskCartId) {
+      emitToCafe(io, taskCartId.toString(), "task:deleted", { id });
     }
 
     return res.json({ message: "Task deleted successfully" });

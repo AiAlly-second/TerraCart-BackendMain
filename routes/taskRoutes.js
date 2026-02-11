@@ -12,6 +12,7 @@ const {
   getTaskStats,
 } = require("../controllers/taskController");
 const { protect, authorize } = require("../middleware/authMiddleware");
+const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
 
 router.use(protect);
 
@@ -31,17 +32,17 @@ router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "mana
 router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTaskById);
 
 // Create task - allow all roles
-router.post("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), createTask);
+router.post("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, createTask);
 
 // Update task - allow all roles
-router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), updateTask);
-router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), updateTask);
+router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, updateTask);
+router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, updateTask);
 
 // Complete task
-router.post("/:id/complete", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), completeTask);
+router.post("/:id/complete", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, completeTask);
 
 // Delete task
-router.delete("/:id", authorize(["admin", "franchise_admin", "super_admin", "manager"]), deleteTask);
+router.delete("/:id", authorize(["admin", "franchise_admin", "super_admin", "manager"]), blockActionsIfCheckedOut, deleteTask);
 
 module.exports = router;
 

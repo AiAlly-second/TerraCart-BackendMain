@@ -201,8 +201,29 @@ exports.authorize = (allowedRoles = []) => async (req, res, next) => {
     }
   }
   
+  const normalizedUserRole = String(userRole || "").toLowerCase();
+  const normalizedAllowedRoles = allowedRoles.map((role) =>
+    String(role || "").toLowerCase(),
+  );
+
+  // Backward-compatible safety: allow admins to accept orders even if route
+  // allowlist is still waiter/captain/manager in older deployments.
+  const isOrderAcceptEndpoint =
+    req.baseUrl === "/api/orders" &&
+    /\/[^/]+\/accept\/?$/.test(req.path || "") &&
+    req.method === "PATCH";
+  const isLegacyAcceptAllowlist =
+    normalizedAllowedRoles.length === 3 &&
+    normalizedAllowedRoles.includes("waiter") &&
+    normalizedAllowedRoles.includes("captain") &&
+    normalizedAllowedRoles.includes("manager");
+  const adminAcceptFallback =
+    isOrderAcceptEndpoint &&
+    isLegacyAcceptAllowlist &&
+    normalizedUserRole === "admin";
+
   // Check if user role is in allowed roles
-  if (!allowedRoles.includes(userRole)) {
+  if (!normalizedAllowedRoles.includes(normalizedUserRole) && !adminAcceptFallback) {
     return res.status(403).json({ 
       message: `Not authorized for this action. Required roles: ${allowedRoles.join(', ')}` 
     });

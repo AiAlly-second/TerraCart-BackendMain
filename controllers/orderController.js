@@ -76,6 +76,9 @@ const mapAcceptedByToAssignedStaff = (acceptedBy, fallbackRole = null) => {
   };
 };
 
+const resolveAssignmentDisplayType = (role) =>
+  String(role || "").toUpperCase() === "ADMIN" ? "TEAM" : "INDIVIDUAL";
+
 const buildNewOrderAvailablePayload = (order) => {
   const latestKot =
     Array.isArray(order?.kotLines) && order.kotLines.length > 0
@@ -1745,6 +1748,9 @@ const addKot = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
       if (order.acceptedBy && order.acceptedBy.employeeId) {
+        const assignmentDisplayType = resolveAssignmentDisplayType(
+          order.acceptedBy?.employeeRole || null,
+        );
         emitToCafe(
           io,
           order.cartId.toString(),
@@ -1753,6 +1759,7 @@ const addKot = async (req, res) => {
             orderId: order._id,
             status: order.status,
             assignedStaff: mapAcceptedByToAssignedStaff(order.acceptedBy),
+            assignmentDisplayType,
             order,
           },
         );
@@ -2317,8 +2324,14 @@ const acceptOrder = async (req, res) => {
       });
     }
 
-    // Check cart access for waiter/captain/manager
-    const userCartId = (req.user.cartId || req.user.cafeId)?.toString();
+    const isAdminAccepter = String(req.user?.role || "").toLowerCase() === "admin";
+
+    // Check cart access for waiter/captain/manager/admin
+    const userCartId = (
+      isAdminAccepter
+        ? req.user._id
+        : req.user.cartId || req.user.cafeId
+    )?.toString();
     if (!userCartId) {
       return res
         .status(403)
@@ -2330,23 +2343,35 @@ const acceptOrder = async (req, res) => {
         .json({ message: "Order does not belong to your cart/kiosk" });
     }
 
-    // Lookup employee by userId
-    const employee = await Employee.findOne({
-      userId: req.user._id,
-      cartId: order.cartId,
-      isActive: true,
-    });
-    if (!employee) {
-      return res.status(403).json({
-        message: "Employee record not found for your account",
+    // Lookup employee by userId for staff roles.
+    // Admin accept path uses admin user identity directly.
+    let employee = null;
+    if (!isAdminAccepter) {
+      employee = await Employee.findOne({
+        userId: req.user._id,
+        cartId: order.cartId,
+        isActive: true,
       });
+      if (!employee) {
+        return res.status(403).json({
+          message: "Employee record not found for your account",
+        });
+      }
     }
+
+    const accepterId = isAdminAccepter ? req.user._id : employee._id;
+    const accepterName = isAdminAccepter
+      ? req.user?.name || "Admin"
+      : employee.name || "Staff";
+    const accepterRole = isAdminAccepter
+      ? req.user?.role || "admin"
+      : employee.employeeRole || req.user?.role || null;
 
     // A staff member can work only one active accepted order at a time.
     const alreadyAssignedOrder = await Order.findOne({
       _id: { $ne: orderId },
       cartId: order.cartId,
-      "acceptedBy.employeeId": employee._id,
+      "acceptedBy.employeeId": accepterId,
       status: { $nin: FINAL_ORDER_STATUSES },
     }).select("_id");
 
@@ -2357,15 +2382,19 @@ const acceptOrder = async (req, res) => {
     }
 
     const acceptedBy = {
-      employeeId: employee._id,
-      employeeName: employee.name || "Staff",
-      employeeRole: employee.employeeRole || req.user?.role || null,
+      employeeId: accepterId,
+      employeeName: accepterName,
+      employeeRole: accepterRole,
       disability: {
-        hasDisability: employee.disability?.hasDisability ?? false,
-        type: employee.disability?.type || null,
+        hasDisability: isAdminAccepter
+          ? false
+          : employee.disability?.hasDisability ?? false,
+        type: isAdminAccepter ? null : employee.disability?.type || null,
       },
       acceptedAt: new Date(),
     };
+
+    const assignmentDisplayType = resolveAssignmentDisplayType(accepterRole);
 
     // Atomic update: first to accept wins.
     // For takeaway flows we normalize Pending -> Confirmed when accepted.
@@ -2403,7 +2432,7 @@ const acceptOrder = async (req, res) => {
     if (io && updatedOrder.cartId && emitToCafe) {
       assignedStaff = mapAcceptedByToAssignedStaff(
         updatedOrder.acceptedBy,
-        employee.employeeRole || req.user?.role || null,
+        accepterRole,
       );
 
       emitToCafe(
@@ -2426,6 +2455,7 @@ const acceptOrder = async (req, res) => {
           orderId: updatedOrder._id,
           status: updatedOrder.status,
           assignedStaff,
+          assignmentDisplayType,
           order: updatedOrder,
         },
       );
@@ -2436,6 +2466,7 @@ const acceptOrder = async (req, res) => {
         ? updatedOrder.toObject()
         : updatedOrder;
     responseOrder.assignedStaff = assignedStaff;
+    responseOrder.assignmentDisplayType = assignmentDisplayType;
     return res.json(responseOrder);
   } catch (err) {
     console.error("[ORDER] acceptOrder error:", err);

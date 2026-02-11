@@ -51,6 +51,34 @@ const employeeAttendanceSchema = new mongoose.Schema(
       type: Boolean,
       default: false, // Indicates if employee is currently on break
     },
+    attendanceStatus: {
+      type: String,
+      enum: ["not_checked_in", "checked_in", "on_break", "checked_out", "absent"],
+      default: "not_checked_in",
+      index: true,
+    },
+    checkInStatus: {
+      type: String,
+      enum: ["not_checked_in", "checked_in", "checked_out", "absent"],
+      default: "not_checked_in",
+      index: true,
+    },
+    canTakeBreak: {
+      type: Boolean,
+      default: false,
+    },
+    isCheckedOut: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    breaks: [
+      {
+        breakStart: { type: Date },
+        breakEnd: { type: Date },
+        durationMinutes: { type: Number, default: 0 },
+      },
+    ],
     // Hierarchy relationships
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },

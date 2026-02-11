@@ -12,6 +12,7 @@ const {
   getRequestStats,
 } = require("../controllers/customerRequestController");
 const { protect, authorize } = require("../middleware/authMiddleware");
+const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
 
 // Public endpoint for customers to create requests (no auth required)
 router.post("/", createRequest);
@@ -32,17 +33,17 @@ router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "mana
 router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getRequestById);
 
 // Update request
-router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), updateRequest);
-router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), updateRequest);
+router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, updateRequest);
+router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, updateRequest);
 
 // Acknowledge request
-router.post("/:id/acknowledge", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), acknowledgeRequest);
+router.post("/:id/acknowledge", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, acknowledgeRequest);
 
 // Resolve request
-router.post("/:id/resolve", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), resolveRequest);
+router.post("/:id/resolve", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, resolveRequest);
 
 // Delete request
-router.delete("/:id", authorize(["admin", "franchise_admin", "super_admin", "manager"]), deleteRequest);
+router.delete("/:id", authorize(["admin", "franchise_admin", "super_admin", "manager"]), blockActionsIfCheckedOut, deleteRequest);
 
 module.exports = router;
 
