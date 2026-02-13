@@ -3,6 +3,7 @@ const { Payment, PAYMENT_METHODS, PAYMENT_STATUSES } = require("../models/paymen
 const Order = require("../models/orderModel");
 const PaymentQR = require("../models/paymentQrModel");
 const { releaseTableForOrder } = require("./orderController");
+const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
 
 const buildUpiPayload = async (orderId, amount, cafeId = null) => {
   // Try to get UPI ID from admin uploaded QR code
@@ -319,6 +320,11 @@ exports.markPaymentPaid = async (req, res) => {
     if (order) {
       order.status = "Paid";
       order.paidAt = new Date();
+      const needsFallbackConsumption = !order.inventoryDeducted;
+      if (needsFallbackConsumption) {
+        order.inventoryDeducted = true;
+        order.inventoryDeductedAt = new Date();
+      }
       await order.save();
       const io = req.app.get("io");
       const emitToCafe = req.app.get("emitToCafe");
@@ -327,6 +333,45 @@ exports.markPaymentPaid = async (req, res) => {
         io.emit("orderUpdated", order);
       }
       await releaseTableForOrder(order, io, emitToCafe);
+
+      if (needsFallbackConsumption) {
+        const userId =
+          req.user && req.user._id
+            ? req.user._id
+            : order.cartId && (order.cartId._id || order.cartId);
+        if (userId) {
+          console.log(
+            `[COSTING] Fallback: Order ${order._id} paid via markPaymentPaid - triggering consumption`,
+          );
+          consumeIngredientsForOrder(order, userId)
+            .then((consumptionResult) => {
+              if (consumptionResult.success) {
+                console.log(
+                  `[COSTING] Fallback consumption success for order ${order._id}`,
+                );
+              } else {
+                const isBenign =
+                  consumptionResult.alreadyProcessed ||
+                  consumptionResult.message?.includes("No new items");
+                if (!isBenign && consumptionResult.summary?.errors) {
+                  consumptionResult.summary.errors.forEach((e) =>
+                    console.warn(`[COSTING] ${e.item}: ${e.error}`),
+                  );
+                }
+              }
+            })
+            .catch((err) =>
+              console.error(
+                `[COSTING] Fallback consumption error for order ${order._id}:`,
+                err,
+              ),
+            );
+        } else {
+          console.warn(
+            `[COSTING] Skipping fallback consumption for order ${order._id}: no userId`,
+          );
+        }
+      }
     }
 
     return res.json(formatPaymentResponse(payment));

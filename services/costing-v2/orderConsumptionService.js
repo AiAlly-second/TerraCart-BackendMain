@@ -13,6 +13,9 @@ const RecipeV2 = require("../../models/costing-v2/recipeModel");
 const IngredientV2 = require("../../models/costing-v2/ingredientModel");
 const WeightedAverageService = require("./weightedAverageService");
 const InventoryTransactionV2 = require("../../models/costing-v2/inventoryTransactionModel");
+const { MenuItem } = require("../../models/menuItemModel");
+const MenuCategory = require("../../models/menuCategoryModel");
+const User = require("../../models/userModel");
 
 /**
  * Consume ingredients for an order when it's marked as Preparing, Ready, Paid, Finalized, or Completed
@@ -34,6 +37,12 @@ async function consumeIngredientsForOrder(order, userId) {
       cartId = cartId.toString();
     }
 
+    // Use ObjectId for Mongoose queries (MongoDB does not match ObjectId fields with string)
+    const cartIdObj =
+      cartId && mongoose.Types.ObjectId.isValid(cartId)
+        ? new mongoose.Types.ObjectId(cartId)
+        : null;
+
     if (!cartId) {
       console.warn(
         `[COSTING] Order ${order._id} has no cartId, skipping consumption`
@@ -45,6 +54,22 @@ async function consumeIngredientsForOrder(order, userId) {
       return {
         success: false,
         message: "Order has no cartId association",
+      };
+    }
+
+    // recordedBy must be valid ObjectId (required by InventoryTransactionV2) - use cartId as fallback
+    const recordedById =
+      userId && mongoose.Types.ObjectId.isValid(String(userId))
+        ? new mongoose.Types.ObjectId(String(userId))
+        : cartIdObj;
+
+    if (!recordedById) {
+      console.warn(
+        `[COSTING] Order ${order._id}: no valid userId or cartId for recordedBy, skipping consumption`
+      );
+      return {
+        success: false,
+        message: "No valid user/cart ID for recording consumption",
       };
     }
 
@@ -130,61 +155,154 @@ async function consumeIngredientsForOrder(order, userId) {
         try {
           // Normalize item name for matching (trim and lowercase)
           const normalizedItemName = itemName.trim();
+          const nameRegex = new RegExp(
+            `^${normalizedItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+            "i"
+          );
 
           // Find menu item in NEW costing-v2 system (Finances Panel)
           console.log(`[COSTING] Checking NEW costing-v2 system (Finances Panel) for "${itemName}"...`);
-          
-          // Find menu item by name - try multiple strategies
-          // Use cartId to match against cartId in menu items (cartId = cartId for cart admin)
-          let menuItem = await MenuItemV2.findOne({
-            $or: [
-              { name: normalizedItemName, cartId: cartId, isActive: true },
-              {
-                name: {
-                  $regex: new RegExp(
-                    `^${normalizedItemName.replace(
-                      /[.*+?^${}()|[\]\\]/g,
-                      "\\$&"
-                    )}$`,
-                    "i"
-                  ),
-                },
-                cartId: cartId,
-                isActive: true,
-              },
-            ],
-          });
 
-          // If not found, try without cartId filter (for shared menu items)
+          let menuItem = null;
+
+          // Strategy 1: Direct lookup by menuItemId if provided (from frontend)
+          const menuItemId = orderItem.menuItemId || orderItem.costingMenuItemId;
+          if (menuItemId) {
+            menuItem = await MenuItemV2.findOne({
+              _id: menuItemId,
+              isActive: true,
+              $or: [{ cartId: cartIdObj || cartId }, { cartId: null }],
+            });
+          }
+
+          // Strategy 2: Lookup by name + cartId (cart-specific)
+          if (!menuItem) {
+            menuItem = await MenuItemV2.findOne({
+              $or: [
+                { name: normalizedItemName, cartId: cartIdObj || cartId, isActive: true },
+                {
+                  name: { $regex: nameRegex },
+                  cartId: cartIdObj || cartId,
+                  isActive: true,
+                },
+                { defaultMenuItemName: normalizedItemName, cartId: cartIdObj || cartId, isActive: true },
+                {
+                  defaultMenuItemName: { $regex: nameRegex },
+                  cartId: cartIdObj || cartId,
+                  isActive: true,
+                },
+              ],
+            });
+          }
+
+          // Strategy 3: Lookup by name with cartId (prefer cart-specific in shared query)
+          if (!menuItem) {
+            menuItem = await MenuItemV2.findOne({
+              cartId: cartIdObj || cartId,
+              $or: [
+                { name: normalizedItemName, isActive: true },
+                { name: { $regex: nameRegex }, isActive: true },
+                { defaultMenuItemName: normalizedItemName, isActive: true },
+                { defaultMenuItemName: { $regex: nameRegex }, isActive: true },
+              ],
+            });
+          }
+
+          // Strategy 4: Fallback via cart MenuItem - get canonical name from cart menu
+          let cartMenuItem = null;
+          if (!menuItem) {
+            cartMenuItem = await MenuItem.findOne({
+              $or: [{ cafeId: cartIdObj || cartId }, { cartId: cartIdObj || cartId }],
+              name: { $regex: nameRegex },
+            }).lean();
+            if (cartMenuItem && cartMenuItem.name) {
+              const canonicalName = cartMenuItem.name.trim();
+              menuItem = await MenuItemV2.findOne({
+                cartId: cartIdObj || cartId,
+                isActive: true,
+                $or: [
+                  { name: canonicalName },
+                  { name: { $regex: new RegExp(`^${canonicalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } },
+                  { defaultMenuItemName: canonicalName },
+                  { defaultMenuItemName: { $regex: new RegExp(`^${canonicalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } },
+                ],
+              });
+            }
+          }
+
+          // Strategy 4.5: Auto-create MenuItemV2 when cart item found but not in Finances (connects BOM to orders)
+          // Works for both franchise and standalone cart admins (franchiseId can be null)
+          if (!menuItem && cartMenuItem && cartMenuItem.name && cartIdObj) {
+            let franchiseId = order.franchiseId;
+            if (!franchiseId) {
+              const cartUser = await User.findById(cartId).select("franchiseId").lean();
+              franchiseId = cartUser?.franchiseId;
+            }
+            // Allow auto-create for standalone carts (franchiseId null) - use cartId-only scope for recipes
+            {
+              const createItemName = cartMenuItem.name.trim();
+              const newPrice = Number(cartMenuItem.price) || 0;
+              if (newPrice > 0) {
+                try {
+                  let categoryName = "General";
+                  if (cartMenuItem.category) {
+                    const cat = await MenuCategory.findById(cartMenuItem.category).select("name").lean();
+                    if (cat?.name) categoryName = cat.name;
+                  }
+                  let recipeId = null;
+                  const nameNormalized = createItemName.replace(/\s+/g, " ").toLowerCase();
+                  const recipeRegex = new RegExp(
+                    `^${createItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+                    "i"
+                  );
+                  const matchingRecipe = await RecipeV2.findOne({
+                    isActive: true,
+                    $and: [
+                      { $or: [{ nameNormalized }, { name: { $regex: recipeRegex } }] },
+                      {
+                        $or: [
+                          { cartId: cartIdObj },
+                          { cartId: null, franchiseId },
+                          { franchiseId },
+                        ],
+                      },
+                    ],
+                  }).lean();
+                  if (matchingRecipe) recipeId = matchingRecipe._id;
+
+                  const newCostingItem = new MenuItemV2({
+                    name: createItemName,
+                    category: categoryName,
+                    sellingPrice: newPrice,
+                    recipeId,
+                    cartId: cartIdObj,
+                    franchiseId,
+                    defaultMenuItemName: createItemName,
+                    defaultMenuCategoryName: categoryName,
+                  });
+                  await newCostingItem.save();
+                  console.log(
+                    `[COSTING] Auto-created costing menu item "${createItemName}" for cart ${cartId} (BOM linked: ${!!recipeId})`,
+                  );
+                  menuItem = newCostingItem;
+                } catch (createErr) {
+                  console.error(
+                    `[COSTING] Error auto-creating MenuItemV2 for "${createItemName}":`,
+                    createErr.message,
+                  );
+                }
+              }
+            }
+          }
+
+          // Strategy 5: Shared menu items (no cartId filter) as last resort
           if (!menuItem) {
             menuItem = await MenuItemV2.findOne({
               $or: [
                 { name: normalizedItemName, isActive: true },
-                {
-                  name: {
-                    $regex: new RegExp(
-                      `^${normalizedItemName.replace(
-                        /[.*+?^${}()|[\]\\]/g,
-                        "\\$&"
-                      )}$`,
-                      "i"
-                    ),
-                  },
-                  isActive: true,
-                },
+                { name: { $regex: nameRegex }, isActive: true },
                 { defaultMenuItemName: normalizedItemName, isActive: true },
-                {
-                  defaultMenuItemName: {
-                    $regex: new RegExp(
-                      `^${normalizedItemName.replace(
-                        /[.*+?^${}()|[\]\\]/g,
-                        "\\$&"
-                      )}$`,
-                      "i"
-                    ),
-                  },
-                  isActive: true,
-                },
+                { defaultMenuItemName: { $regex: nameRegex }, isActive: true },
               ],
             });
           }
@@ -201,7 +319,41 @@ async function consumeIngredientsForOrder(order, userId) {
             continue;
           }
 
-          // Skip if menu item has no recipe
+          // If menu item has no recipe, try to auto-link by name (same cart/franchise)
+          if (!menuItem.recipeId) {
+            const nameNorm = (menuItem.name || normalizedItemName).trim().replace(/\s+/g, " ").toLowerCase();
+            const recipeRegex = new RegExp(
+              `^${(menuItem.name || normalizedItemName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i"
+            );
+            const matchingRecipe = await RecipeV2.findOne({
+              isActive: true,
+              $and: [
+                {
+                  $or: [
+                    { nameNormalized: nameNorm },
+                    { name: { $regex: recipeRegex } },
+                  ],
+                },
+                {
+                  $or: [
+                    { cartId: cartIdObj || cartId },
+                    { cartId: null, franchiseId: menuItem.franchiseId },
+                    { franchiseId: menuItem.franchiseId },
+                  ],
+                },
+              ],
+            });
+            if (matchingRecipe) {
+              menuItem.recipeId = matchingRecipe._id;
+              await menuItem.save();
+              console.log(
+                `[COSTING] Auto-linked BOM "${matchingRecipe.name}" to menu item "${menuItem.name}"`
+              );
+            }
+          }
+
+          // Skip if menu item still has no recipe
           if (!menuItem.recipeId) {
             console.warn(
               `[COSTING] Menu item "${itemName}" has no recipe linked. Skipping consumption. (ID: ${menuItem._id})`
@@ -295,7 +447,7 @@ async function consumeIngredientsForOrder(order, userId) {
                 qtyInBaseUnit,
                 "order",
                 order._id,
-                userId,
+                recordedById,
                 cartId,
                 true // allowNegativeStock: true (Brute Force)
               );
@@ -311,8 +463,8 @@ async function consumeIngredientsForOrder(order, userId) {
                 refId: order._id,
                 date: new Date(),
                 costAllocated: consumeResult.costAllocated,
-                recordedBy: userId,
-                cartId: cartId || null,
+                recordedBy: recordedById,
+                cartId: cartIdObj || null,
                 notes: `KOT:${kotId}`, // Mark which KOT this belongs to
               });
               await transaction.save();
@@ -369,6 +521,13 @@ async function consumeIngredientsForOrder(order, userId) {
       totalCost: consumptionSummary.totalCost,
       errors: consumptionSummary.errors.length,
     });
+
+    if (consumptionSummary.errors.length > 0) {
+      console.warn(
+        `[COSTING] Order ${order._id} consumption had ${consumptionSummary.errors.length} error(s):`,
+        consumptionSummary.errors,
+      );
+    }
 
     return {
       success: consumptionSummary.errors.length === 0,

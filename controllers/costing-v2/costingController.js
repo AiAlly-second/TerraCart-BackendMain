@@ -90,9 +90,12 @@ const {
   setOutletContext,
 } = require("../../utils/costing-v2/accessControl");
 
-/** Safe ObjectId conversion (Mongoose 6+ requires `new`). Use everywhere instead of mongoose.Types.ObjectId(id). */
-const toObjectIdSafe = (id) =>
-  id == null || id === "" ? null : new mongoose.Types.ObjectId(String(id));
+/** Safe ObjectId conversion - returns null for invalid IDs instead of throwing. */
+const toObjectIdSafe = (id) => {
+  if (id == null || id === "") return null;
+  const str = String(id);
+  return mongoose.Types.ObjectId.isValid(str) ? new mongoose.Types.ObjectId(str) : null;
+};
 
 /**
  * Decode HTML entities in a string
@@ -2784,6 +2787,138 @@ exports.getInventoryTransactions = async (req, res) => {
 };
 
 /**
+ * @route   GET /api/costing-v2/diagnose-consumption
+ * @desc    Diagnostic endpoint for zero order consumption - returns order transaction count, sample orders, cart vs Finances menu coverage
+ */
+exports.diagnoseConsumption = async (req, res) => {
+  try {
+    const { cartId: queryCartId } = req.query;
+
+    // Resolve target cartId(s) based on role
+    let cartIds = [];
+    if (req.user.role === "admin") {
+      cartIds = [req.user._id];
+    } else if (req.user.role === "franchise_admin") {
+      if (queryCartId) {
+        const outlet = await User.findById(queryCartId);
+        if (!outlet || outlet.franchiseId?.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ success: false, message: "Outlet not in your franchise" });
+        }
+        cartIds = [queryCartId];
+      } else {
+        const outlets = await User.find({ role: "admin", franchiseId: req.user._id, isActive: true }).select("_id");
+        cartIds = outlets.map((o) => o._id);
+      }
+    } else if (req.user.role === "super_admin") {
+      if (queryCartId) {
+        cartIds = [queryCartId];
+      } else {
+        const outlets = await User.find({ role: "admin", isActive: true }).select("_id").limit(100);
+        cartIds = outlets.map((o) => o._id);
+      }
+    } else {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const cartIdObjs = cartIds.map((id) => toObjectIdSafe(id)).filter(Boolean);
+    if (cartIdObjs.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          orderTransactionCount: 0,
+          orderTransactionsSample: [],
+          ordersWithCartId: 0,
+          ordersWithoutCartId: 0,
+          ordersWithoutCartIdSample: [],
+          cartMenuCount: 0,
+          financesMenuCount: 0,
+          financesMenuWithBom: 0,
+          cartItemsMissingInFinances: [],
+          message: "No outlets found for this user",
+        },
+      });
+    }
+
+    // Count order transactions for this outlet
+    const orderTransactionCount = await InventoryTransaction.countDocuments({
+      refType: "order",
+      cartId: cartIdObjs.length === 1 ? cartIdObjs[0] : { $in: cartIdObjs },
+    });
+
+    const orderTransactionsSample = await InventoryTransaction.find({
+      refType: "order",
+      cartId: cartIdObjs.length === 1 ? cartIdObjs[0] : { $in: cartIdObjs },
+    })
+      .select("refId cartId date costAllocated")
+      .sort({ date: -1 })
+      .limit(5)
+      .lean();
+
+    // Sample orders with/without cartId
+    const orderFilter = cartIdObjs.length === 1 ? { cartId: cartIdObjs[0] } : { cartId: { $in: cartIdObjs } };
+    const ordersWithCartId = await Order.countDocuments(orderFilter);
+
+    // Orders with no cartId (system-wide - potential consumption skip)
+    const ordersWithoutCartId = await Order.countDocuments({
+      $or: [{ cartId: null }, { cartId: { $exists: false } }],
+    });
+
+    const ordersWithoutCartIdSample = await Order.find({
+      $or: [{ cartId: null }, { cartId: { $exists: false } }],
+    })
+      .select("_id status cartId franchiseId createdAt")
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .lean();
+
+    // Cart menu vs Finances (MenuItemV2) coverage - use first cart for simplicity
+    const targetCartId = cartIdObjs[0];
+    const cartMenuItems = await OperationalMenuItem.find({
+      $or: [{ cafeId: targetCartId }, { cartId: targetCartId }],
+    })
+      .select("name")
+      .lean();
+
+    const costingMenuItems = await MenuItem.find({
+      $or: [{ cartId: targetCartId }, { cartId: null }],
+    })
+      .populate("recipeId", "name")
+      .select("name defaultMenuItemName recipeId")
+      .lean();
+
+    const cartItemsMissingInFinances = cartMenuItems.filter((m) => {
+      const n = (m.name || "").trim().toLowerCase();
+      return !costingMenuItems.some(
+        (c) =>
+          (c.name || "").trim().toLowerCase() === n ||
+          (c.defaultMenuItemName || "").trim().toLowerCase() === n
+      );
+    });
+
+    const financesMenuWithBom = costingMenuItems.filter((m) => m.recipeId && m.recipeId._id).length;
+
+    res.json({
+      success: true,
+      data: {
+        orderTransactionCount,
+        orderTransactionsSample,
+        ordersWithCartId,
+        ordersWithoutCartId,
+        ordersWithoutCartIdSample,
+        cartMenuCount: cartMenuItems.length,
+        financesMenuCount: costingMenuItems.length,
+        financesMenuWithBom,
+        cartItemsMissingInFinances: cartItemsMissingInFinances.map((m) => m.name),
+        cartIds: cartIds.map((id) => id.toString()),
+      },
+    });
+  } catch (error) {
+    console.error("[DIAGNOSE_CONSUMPTION] Error:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
  * @route   GET /api/costing-v2/inventory
  * @desc    Get inventory items from costing-v2 ingredients for mobile app
  */
@@ -4853,13 +4988,22 @@ exports.getFoodCostReport = async (req, res) => {
       if (to) transactionDateFilter.date.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
     }
 
-    // Build outlet filter based on role (normalize cartId to ObjectId for reliable match with InventoryTransactionV2)
+    // Build outlet filter based on role (match both ObjectId and string cartId for type consistency)
     let transactionOutletFilter = {};
+    const buildCartIdFilter = (id) => {
+      const objId = toObjectIdSafe(id);
+      const strId = id ? (typeof id === "string" ? id : id.toString?.() || String(id)) : null;
+      const vals = [];
+      if (objId) vals.push(objId);
+      if (strId && strId !== objId?.toString?.()) vals.push(strId);
+      return vals.length > 1 ? { $in: vals } : vals[0] || null;
+    };
+
     if (req.user.role === "admin") {
-      transactionOutletFilter.cartId = toObjectIdSafe(req.user._id);
+      transactionOutletFilter.cartId = buildCartIdFilter(req.user._id);
       console.log(
         "[FOOD_COST_REPORT] Cart admin filter - cartId:",
-        transactionOutletFilter.cartId?.toString()
+        transactionOutletFilter.cartId?.toString?.() || JSON.stringify(transactionOutletFilter.cartId)
       );
     } else if (req.user.role === "franchise_admin") {
       if (cartId) {
@@ -4873,18 +5017,22 @@ exports.getFoodCostReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
+        transactionOutletFilter.cartId = buildCartIdFilter(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        transactionOutletFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
+        transactionOutletFilter.cartId = { $in: outlets.flatMap((o) => {
+          const objId = toObjectIdSafe(o._id);
+          const strId = o._id?.toString?.() || String(o._id);
+          return objId ? [objId, strId] : (strId ? [strId] : []);
+        }) };
       }
     } else if (req.user.role === "super_admin") {
       if (cartId) {
-        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
+        transactionOutletFilter.cartId = buildCartIdFilter(cartId);
       }
     }
 
@@ -5846,6 +5994,92 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
         message:
           syncResult.error ||
           `Successfully synced ${syncResult.updated || 0} menu items`,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+/**
+ * @route   POST /api/costing-v2/menu-items/link-matching-boms
+ * @desc    Bulk link menu items without recipeId to matching BOMs by name
+ */
+exports.linkMatchingBoms = async (req, res) => {
+  try {
+    const { cartId: bodyCartId } = req.body;
+    let cartId = bodyCartId;
+
+    if (req.user.role === "admin") {
+      cartId = req.user._id;
+    } else if (req.user.role === "franchise_admin" && !cartId) {
+      return res.status(400).json({
+        success: false,
+        message: "Franchise admin must provide cartId",
+      });
+    }
+
+    const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
+    const RecipeV2 = require("../../models/costing-v2/recipeModel");
+
+    const filter = {
+      $or: [{ recipeId: null }, { recipeId: { $exists: false } }],
+      isActive: true,
+    };
+    if (cartId) filter.cartId = cartId;
+
+    const menuItemsWithoutRecipe = await MenuItemV2.find(filter).lean();
+    let linked = 0;
+    const errors = [];
+
+    for (const mi of menuItemsWithoutRecipe) {
+      try {
+        const nameNorm = (mi.name || "").trim().replace(/\s+/g, " ").toLowerCase();
+        if (!nameNorm) continue;
+
+        const nameRegex = new RegExp(
+          `^${(mi.name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+          "i"
+        );
+
+        const matchingRecipe = await RecipeV2.findOne({
+          isActive: true,
+          $and: [
+            {
+              $or: [
+                { nameNormalized: nameNorm },
+                { name: { $regex: nameRegex } },
+              ],
+            },
+            {
+              $or: [
+                { cartId: mi.cartId },
+                { cartId: null, franchiseId: mi.franchiseId },
+                { franchiseId: mi.franchiseId },
+              ],
+            },
+          ],
+        });
+
+        if (matchingRecipe) {
+          await MenuItemV2.updateOne(
+            { _id: mi._id },
+            { $set: { recipeId: matchingRecipe._id } }
+          );
+          linked++;
+        }
+      } catch (err) {
+        errors.push({ item: mi.name, error: err.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        linked,
+        totalWithoutRecipe: menuItemsWithoutRecipe.length,
+        errors: errors.length > 0 ? errors : undefined,
+        message: `Linked ${linked} menu item(s) to matching BOMs`,
       },
     });
   } catch (error) {

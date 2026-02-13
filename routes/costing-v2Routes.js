@@ -22,6 +22,7 @@ const {
   returnToInventory,
   directPurchase,
   getInventoryTransactions,
+  diagnoseConsumption,
   getCostingInventory,
   getLowStock,
   // Waste
@@ -64,6 +65,7 @@ const {
   createExpenseCategory,
   // Sync
   syncMenuItemsFromDefault,
+  linkMatchingBoms,
   // Push
   pushToCartAdmins,
 } = require("../controllers/costing-v2/costingController");
@@ -176,6 +178,11 @@ router.get(
   "/inventory/transactions",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getInventoryTransactions
+);
+router.get(
+  "/diagnose-consumption",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  diagnoseConsumption
 );
 router.get(
   "/low-stock",
@@ -350,6 +357,11 @@ router.post(
   "/menu-items/sync-from-default",
   authorize(["super_admin", "franchise_admin", "admin"]),
   syncMenuItemsFromDefault
+);
+router.post(
+  "/menu-items/link-matching-boms",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  linkMatchingBoms
 );
 
 // ==================== PUSH ====================

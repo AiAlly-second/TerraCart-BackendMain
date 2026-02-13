@@ -4,6 +4,7 @@
  */
 
 const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
+const RecipeV2 = require("../../models/costing-v2/recipeModel");
 const DefaultMenu = require("../../models/defaultMenuModel");
 const { MenuItem } = require("../../models/menuItemModel");
 const MenuCategory = require("../../models/menuCategoryModel");
@@ -28,8 +29,10 @@ async function syncCartMenuToCosting(cartId, filterCartId = null) {
       );
     }
 
-    // Get all menu items for this cart admin
-    const cartMenuItems = await MenuItem.find({ cafeId: cartId }).lean();
+    // Get all menu items for this cart admin (support both cafeId and cartId for legacy/new schema)
+    const cartMenuItems = await MenuItem.find({
+      $or: [{ cafeId: cartId }, { cartId }],
+    }).lean();
 
     if (!cartMenuItems || cartMenuItems.length === 0) {
       console.log(`[COSTING SYNC] No menu items found for cart: ${cartId}`);
@@ -156,10 +159,43 @@ async function syncCartMenuToCosting(cartId, filterCartId = null) {
           }
 
           try {
+            // Auto-link Recipe (BOM) by name if one exists for same cart/franchise
+            let recipeId = null;
+            const nameNormalized = itemName.trim().replace(/\s+/g, " ").toLowerCase();
+            const nameRegex = new RegExp(
+              `^${itemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i"
+            );
+            const matchingRecipe = await RecipeV2.findOne({
+              isActive: true,
+              $and: [
+                {
+                  $or: [
+                    { nameNormalized },
+                    { name: { $regex: nameRegex } },
+                  ],
+                },
+                {
+                  $or: [
+                    { cartId: outletObjectId },
+                    { cartId: null, franchiseId: cartUser.franchiseId },
+                    { franchiseId: cartUser.franchiseId },
+                  ],
+                },
+              ],
+            }).lean();
+            if (matchingRecipe) {
+              recipeId = matchingRecipe._id;
+              console.log(
+                `[COSTING SYNC] Auto-linked BOM "${matchingRecipe.name}" to menu item "${itemName}"`
+              );
+            }
+
             const newCostingItem = new MenuItemV2({
               name: itemName,
               category: categoryName,
               sellingPrice: newPrice,
+              recipeId: recipeId,
               cartId: outletObjectId,
               franchiseId: cartUser.franchiseId,
               defaultMenuItemName: itemName,

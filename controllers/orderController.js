@@ -156,6 +156,14 @@ function buildKot(items) {
       returned: Boolean(it.returned),
     };
 
+    // Pass-through menuItemId/costingMenuItemId for Finances consumption matching
+    if (it.menuItemId && mongoose.Types.ObjectId.isValid(it.menuItemId)) {
+      itemData.menuItemId = typeof it.menuItemId === "string" ? new mongoose.Types.ObjectId(it.menuItemId) : it.menuItemId;
+    }
+    if (it.costingMenuItemId && mongoose.Types.ObjectId.isValid(it.costingMenuItemId)) {
+      itemData.costingMenuItemId = typeof it.costingMenuItemId === "string" ? new mongoose.Types.ObjectId(it.costingMenuItemId) : it.costingMenuItemId;
+    }
+
     // Include extras in order if any were added
     if (itemExtras.length > 0) {
       itemData.extras = itemExtras;
@@ -691,9 +699,29 @@ const createOrder = async (req, res) => {
         );
         // Fall through to fallback logic below
       }
-    } else if (!isTakeaway && tableDoc && tableDoc.cartId) {
-      cartId = tableDoc.cartId;
-      console.log("[ORDER] Using cartId from table:", cartId.toString());
+    } else if (!isTakeaway && tableDoc) {
+      if (tableDoc.cartId) {
+        cartId = tableDoc.cartId;
+        console.log("[ORDER] Using cartId from table:", cartId.toString());
+      } else if (tableDoc.franchiseId) {
+        // Fallback: table has no cartId but has franchiseId - use first cart under franchise
+        const User = require("../models/userModel");
+        const firstCafe = await User.findOne({
+          role: "admin",
+          franchiseId: tableDoc.franchiseId,
+          isActive: true,
+          isApproved: true,
+        })
+          .select("_id")
+          .lean();
+        if (firstCafe) {
+          cartId = firstCafe._id;
+          console.log(
+            "[ORDER] Using cartId from first cafe in table's franchise (table had no cartId):",
+            cartId.toString(),
+          );
+        }
+      }
     }
 
     // For PICKUP/DELIVERY orders, validate cart configuration and delivery eligibility
@@ -1585,6 +1613,25 @@ const addKot = async (req, res) => {
         if (!order.cartId && tableDoc.cartId) {
           order.cartId = tableDoc.cartId;
           needsSave = true;
+        } else if (!order.cartId && tableDoc.franchiseId) {
+          // Fallback: table has no cartId but has franchiseId - use first cart under franchise
+          const User = require("../models/userModel");
+          const firstCafe = await User.findOne({
+            role: "admin",
+            franchiseId: tableDoc.franchiseId,
+            isActive: true,
+            isApproved: true,
+          })
+            .select("_id franchiseId")
+            .lean();
+          if (firstCafe) {
+            order.cartId = firstCafe._id;
+            needsSave = true;
+            if (!order.franchiseId && firstCafe.franchiseId) {
+              order.franchiseId = firstCafe.franchiseId;
+              needsSave = true;
+            }
+          }
         }
         if (!order.franchiseId && tableDoc.franchiseId) {
           order.franchiseId = tableDoc.franchiseId;
@@ -1836,9 +1883,11 @@ const finalizeOrder = async (req, res) => {
     }
 
     order.status = "Finalized";
+    order.inventoryDeducted = true;
+    order.inventoryDeductedAt = new Date();
     await order.save();
 
-    // Selective token consumption: only when we have a valid User ObjectId (InventoryTransactionV2.recordedBy)
+    // Await consumption to surface failures (MenuItemV2 not found, no recipe) for diagnostics
     const userId = req.user
       ? req.user._id
       : order.cartId && (order.cartId._id || order.cartId);
@@ -1846,23 +1895,29 @@ const finalizeOrder = async (req, res) => {
       console.log(
         `[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`,
       );
-      consumeIngredientsForOrder(order, userId)
-        .then((result) => {
-          if (result.success)
-            console.log(
-              `[COSTING] Finalized order ${order._id} consumption success`,
-            );
-          else
+      try {
+        const result = await consumeIngredientsForOrder(order, userId);
+        if (result.success) {
+          console.log(
+            `[COSTING] Finalized order ${order._id} consumption success`,
+          );
+        } else {
+          console.warn(
+            `[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`,
+          );
+          if (result.summary?.errors?.length) {
             console.warn(
-              `[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`,
+              `[COSTING] Consumption errors:`,
+              result.summary.errors,
             );
-        })
-        .catch((err) =>
-          console.error(
-            `[COSTING] Finalized order ${order._id} consumption error:`,
-            err,
-          ),
+          }
+        }
+      } catch (err) {
+        console.error(
+          `[COSTING] Finalized order ${order._id} consumption error:`,
+          err,
         );
+      }
     } else {
       console.warn(
         `[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`,
@@ -2665,8 +2720,17 @@ const updateOrderStatus = async (req, res) => {
     const isPreparingStatus = ["Preparing", "Being Prepared", "BeingPrepared"].includes(status);
     const needsInventoryDeduction = isPreparingStatus && !order.inventoryDeducted;
 
+    // Fallback: If order reaches Completed, Paid, Ready, Served, or Exit without consumption, trigger now
+    // Served: cart admin may mark dine-in as "Served" without going through Preparing/Ready (e.g. one-click serve)
+    const isCompletionStatus = ["Completed", "Paid", "Ready", "Served", "Exit"].includes(status);
+    const needsFallbackConsumption = isCompletionStatus && !order.inventoryDeducted;
+
     if (needsInventoryDeduction) {
       // Set the flag BEFORE consumption to prevent race conditions
+      updateData.inventoryDeducted = true;
+      updateData.inventoryDeductedAt = new Date();
+    } else if (needsFallbackConsumption) {
+      // Set flag so we consume once and avoid duplicate runs
       updateData.inventoryDeducted = true;
       updateData.inventoryDeductedAt = new Date();
     }
@@ -2752,6 +2816,60 @@ const updateOrderStatus = async (req, res) => {
       console.log(
         `[COSTING] ℹ️ Order ${order._id} already had inventory deducted - skipping duplicate consumption`,
       );
+    } else if (needsFallbackConsumption) {
+      const userId = req.user
+        ? req.user._id
+        : updatedOrder.cartId &&
+        (updatedOrder.cartId._id || updatedOrder.cartId);
+
+      if (!userId) {
+        console.warn(
+          `[COSTING] Skipping fallback consumption for order ${updatedOrder._id}: no req.user and no order.cartId`,
+        );
+      } else {
+        console.log(
+          `[COSTING] 🔥 Fallback: Order ${updatedOrder._id} reached ${status} without consumption - triggering now`,
+        );
+
+        consumeIngredientsForOrder(updatedOrder, userId)
+          .then((consumptionResult) => {
+            if (consumptionResult.success) {
+              console.log(
+                `[COSTING] ✅ Fallback consumption success for order ${order._id}`,
+              );
+            } else {
+              const isBenign =
+                consumptionResult.alreadyProcessed ||
+                consumptionResult.message?.includes("No new items");
+              if (isBenign) {
+                console.log(
+                  `[COSTING] ℹ️ Fallback consumption skipped for ${order._id}: ${consumptionResult.message}`,
+                );
+              } else {
+                console.warn(
+                  `[COSTING] ❌ Fallback consumption failed for order ${order._id}:`,
+                );
+                if (consumptionResult.summary?.errors) {
+                  consumptionResult.summary.errors.forEach((e) => {
+                    console.warn(` - ${e.item}: ${e.error}`);
+                  });
+                } else {
+                  console.warn(
+                    consumptionResult.error ||
+                    consumptionResult.message ||
+                    "Unknown error",
+                  );
+                }
+              }
+            }
+          })
+          .catch((consumptionError) => {
+            console.error(
+              `[COSTING] ❌ Fallback consumption error for order ${order._id}:`,
+              consumptionError,
+            );
+          });
+      }
     }
 
     // Handle payment updates in background (non-blocking)
@@ -3048,15 +3166,53 @@ const confirmPaymentByCustomer = async (req, res) => {
     order.paidAt = new Date();
     order.paymentStatus = "PAID";
     order.paymentMode = paymentMethod || "CASH";
+
+    // Fallback: trigger inventory consumption if order reached Paid without going through Preparing/Completed
+    const needsFallbackConsumption = !order.inventoryDeducted;
+    if (needsFallbackConsumption) {
+      order.inventoryDeducted = true;
+      order.inventoryDeductedAt = new Date();
+    }
     await order.save();
 
-    // NOTE: Inventory consumption is NOT done here.
-    // Inventory should already have been deducted when order status changed to "Preparing"
-    // This prevents double deduction and keeps finance numbers accurate
-    if (!order.inventoryDeducted) {
-      console.warn(
-        `[COSTING] ⚠️ Order ${order._id} was paid but inventory was never deducted (order may not have gone through Preparing status)`,
-      );
+    // Run consumption when customer confirms payment (no req.user in this flow)
+    if (needsFallbackConsumption) {
+      const userId =
+        req.user && req.user._id
+          ? req.user._id
+          : order.cartId && (order.cartId._id || order.cartId);
+      if (userId) {
+        console.log(
+          `[COSTING] Fallback: Order ${order._id} paid via customer confirm - triggering consumption`,
+        );
+        consumeIngredientsForOrder(order, userId)
+          .then((consumptionResult) => {
+            if (consumptionResult.success) {
+              console.log(
+                `[COSTING] Fallback consumption success for order ${order._id}`,
+              );
+            } else {
+              const isBenign =
+                consumptionResult.alreadyProcessed ||
+                consumptionResult.message?.includes("No new items");
+              if (!isBenign && consumptionResult.summary?.errors) {
+                consumptionResult.summary.errors.forEach((e) =>
+                  console.warn(`[COSTING] ${e.item}: ${e.error}`),
+                );
+              }
+            }
+          })
+          .catch((err) =>
+            console.error(
+              `[COSTING] Fallback consumption error for order ${order._id}:`,
+              err,
+            ),
+          );
+      } else {
+        console.warn(
+          `[COSTING] Skipping fallback consumption for order ${order._id}: no userId (req.user or order.cartId)`,
+        );
+      }
     }
 
     // Create or update payment record

@@ -8,6 +8,9 @@ const itemSchema = new mongoose.Schema(
     price: { type: Number, required: true, min: 0 },
     returned: { type: Boolean, default: false },
     convertedToTakeaway: { type: Boolean, default: false },
+    // Optional: Finances MenuItemV2 ID for reliable consumption matching (pass-through from frontend)
+    menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: "MenuItemV2", default: null },
+    costingMenuItemId: { type: mongoose.Schema.Types.ObjectId, ref: "MenuItemV2", default: null },
     // Extras/add-ons selected for this item
     extras: [
       {

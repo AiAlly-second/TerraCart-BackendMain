@@ -332,6 +332,7 @@ class WeightedAverageService {
         availableQty = ingredient.qtyOnHand || 0;
         avgCost = ingredient.currentCostPerBaseUnit || 0;
       }
+      // When no purchase history exists, avgCost uses ingredient.currentCostPerBaseUnit (set via Purchases or manual) for food cost.
     } else {
       // Global/shared ingredient - no cartId specified
       availableQty = ingredient.qtyOnHand || 0;
