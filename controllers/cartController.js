@@ -3,6 +3,26 @@ const User = require("../models/userModel");
 const Franchise = require("../models/franchiseModel");
 const { isWithinDeliveryRange, calculateDistance } = require("../utils/distanceCalculator");
 
+function pickFirstNonEmptyString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function resolveCartDisplayName(cart) {
+  return (
+    pickFirstNonEmptyString(
+      cart?.cartAdminId?.cartName,
+      cart?.name,
+      cart?.cartAdminId?.cafeName,
+      cart?.cartAdminId?.name
+    ) || "Cart"
+  );
+}
+
 /**
  * Get nearby carts based on customer location
  * @route GET /api/carts/nearby
@@ -32,7 +52,7 @@ exports.getNearbyCarts = async (req, res) => {
           }
         ]
       })
-        .populate("cartAdminId", "name cafeName email isActive")
+        .populate("cartAdminId", "name cartName cafeName email isActive")
         .populate("franchiseId", "name")
         .lean();
 
@@ -46,11 +66,13 @@ exports.getNearbyCarts = async (req, res) => {
       for (const cart of cartsWithActiveAdmin) {
         const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
         const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
+        const resolvedName = resolveCartDisplayName(cart);
 
         // Only include carts with delivery enabled
         if (deliveryEnabled) {
           nearbyCarts.push({
             ...cart,
+            name: resolvedName,
             distance: null, // Distance not calculated for pin code match
             canDeliver: true, // Assume can deliver if pin code matches
             canPickup: pickupEnabled,
@@ -98,7 +120,7 @@ exports.getNearbyCarts = async (req, res) => {
         { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
@@ -110,6 +132,7 @@ exports.getNearbyCarts = async (req, res) => {
     const nearbyCarts = [];
 
     for (const cart of cartsWithActiveAdmin) {
+      const resolvedName = resolveCartDisplayName(cart);
       // Handle existing carts that don't have new fields - use defaults
       const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true; // Default true for existing carts
       const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false; // Default false
@@ -122,6 +145,7 @@ exports.getNearbyCarts = async (req, res) => {
         if (orderType === "PICKUP" && pickupEnabled) {
           nearbyCarts.push({
             ...cart,
+            name: resolvedName,
             distance: null,
             canDeliver: false,
             canPickup: true,
@@ -172,6 +196,7 @@ exports.getNearbyCarts = async (req, res) => {
       ) {
         nearbyCarts.push({
           ...cart,
+          name: resolvedName,
           distance: distance,
           canDeliver,
           canPickup,
@@ -214,7 +239,7 @@ exports.getCartById = async (req, res) => {
     const { latitude, longitude, orderType } = req.query;
 
     const cart = await Cart.findById(id)
-      .populate("cartAdminId", "name cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
@@ -277,9 +302,10 @@ exports.getCartById = async (req, res) => {
       success: true,
       data: {
         ...cart,
+        name: resolveCartDisplayName(cart),
         distance,
         canDeliver,
-        canPickup: cart.pickupEnabled,
+        canPickup: cart.pickupEnabled !== undefined ? cart.pickupEnabled : true,
         deliveryInfo,
       },
     });
@@ -363,9 +389,13 @@ exports.updateCartSettings = async (req, res) => {
     await Cart.findByIdAndUpdate(cart._id, { $set: updateData }, { new: true });
 
     const updatedCart = await Cart.findById(cart._id)
-      .populate("cartAdminId", "name cafeName email")
+      .populate("cartAdminId", "name cartName cafeName email")
       .populate("franchiseId", "name")
       .lean();
+
+    if (updatedCart) {
+      updatedCart.name = resolveCartDisplayName(updatedCart);
+    }
 
     res.json({
       success: true,
@@ -397,7 +427,7 @@ exports.getAvailableCarts = async (req, res) => {
         { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive")
       .populate("franchiseId", "name")
       .lean();
 
@@ -409,6 +439,7 @@ exports.getAvailableCarts = async (req, res) => {
     const availableCarts = [];
 
     for (const cart of cartsWithActiveAdmin) {
+      const resolvedName = resolveCartDisplayName(cart);
       // Handle existing carts that don't have new fields - use defaults
       const pickupEnabled = cart.pickupEnabled !== undefined ? cart.pickupEnabled : true;
       const deliveryEnabled = cart.deliveryEnabled !== undefined ? cart.deliveryEnabled : false;
@@ -423,6 +454,7 @@ exports.getAvailableCarts = async (req, res) => {
       ) {
         availableCarts.push({
           ...cart,
+          name: resolvedName,
           distance: null, // Will be calculated when location is available
           canDeliver: deliveryEnabled,
           canPickup: pickupEnabled,
@@ -463,7 +495,7 @@ exports.getMyCartSettings = async (req, res) => {
 
     // Find cart by cartAdminId
     let cart = await Cart.findOne({ cartAdminId: req.user._id })
-      .populate("cartAdminId", "name cafeName email")
+      .populate("cartAdminId", "name cartName cafeName email")
       .populate("franchiseId", "name")
       .lean();
 
@@ -497,9 +529,13 @@ exports.getMyCartSettings = async (req, res) => {
 
       // Populate and return
       cart = await Cart.findById(newCart._id)
-        .populate("cartAdminId", "name cafeName email")
+        .populate("cartAdminId", "name cartName cafeName email")
         .populate("franchiseId", "name")
         .lean();
+    }
+
+    if (cart) {
+      cart.name = resolveCartDisplayName(cart);
     }
 
     res.json({
@@ -514,4 +550,3 @@ exports.getMyCartSettings = async (req, res) => {
     });
   }
 };
-

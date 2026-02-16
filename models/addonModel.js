@@ -29,7 +29,7 @@ const addonSchema = new mongoose.Schema(
     },
     icon: {
       type: String, // Emoji or icon identifier
-      default: "➕",
+      default: "",
     },
     sortOrder: {
       type: Number,
@@ -61,5 +61,4 @@ addonSchema.index({ cartId: 1, sortOrder: 1 });
 const Addon = mongoose.model("Addon", addonSchema);
 
 module.exports = Addon;
-
 

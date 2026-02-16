@@ -54,6 +54,12 @@ const toPaise = (n) => Math.round(Number(n) * 100);
 const toRupees = (p) => Number((p / 100).toFixed(2));
 
 const FINAL_ORDER_STATUSES = ["Paid", "Cancelled", "Finalized", "Returned", "Exit"];
+const sanitizeAddonName = (value) => {
+  const normalized = String(value || "")
+    .replace(/^\(\s*\+\s*\)\s*/u, "")
+    .trim();
+  return normalized || "Add-on";
+};
 
 const normalizeSelectedAddons = (addons) => {
   if (!Array.isArray(addons)) return [];
@@ -62,7 +68,7 @@ const normalizeSelectedAddons = (addons) => {
     .map((addon) => {
       if (!addon || typeof addon !== "object") return null;
 
-      const name = String(addon.name || "").trim() || "Add-on";
+      const name = sanitizeAddonName(addon.name);
       const priceValue = Number(addon.price);
       const price = Number.isFinite(priceValue) && priceValue >= 0 ? priceValue : 0;
       const qtyValue = Number(addon.quantity);

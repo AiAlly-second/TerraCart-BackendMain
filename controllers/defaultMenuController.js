@@ -68,7 +68,7 @@ const syncAddonTemplatesToCart = async ({
         $set: {
           description: String(addon.description || ""),
           price: Number(addon.price) || 0,
-          icon: addon.icon || "+",
+          icon: addon.icon || "",
           sortOrder: Number(addon.sortOrder) || 0,
           isAvailable: addon.isAvailable !== false,
           cartId: cartObjectId,
@@ -471,7 +471,6 @@ exports.updateDefaultMenu = async (req, res) => {
 exports.pushToFranchise = async (req, res) => {
   try {
     const { franchiseId } = req.params;
-    const includeAddons = req.body?.includeAddons === true;
 
     // Franchise admin can only push to their own franchise
     if (req.user.role === "franchise_admin") {
@@ -556,7 +555,7 @@ exports.pushToFranchise = async (req, res) => {
     const result = await pushDefaultMenuToFranchise(franchiseId, franchiseId, true);
 
     let addonsResult = null;
-    if (includeAddons && req.user.role === "super_admin") {
+    if (req.user.role === "super_admin") {
       addonsResult = await pushGlobalAddonsToFranchise(franchiseId);
     }
     
@@ -577,7 +576,6 @@ exports.pushToFranchise = async (req, res) => {
 exports.pushToCafe = async (req, res) => {
   try {
     const { cartId } = req.params;
-    const includeAddons = req.body?.includeAddons === true;
 
     const cafe = await User.findById(cartId);
     if (!cafe || cafe.role !== "admin") {
@@ -598,7 +596,7 @@ exports.pushToCafe = async (req, res) => {
     const result = await pushDefaultMenuToCafe(cartId, franchiseId, true);
 
     let addonsResult = null;
-    if (includeAddons && req.user.role === "super_admin") {
+    if (req.user.role === "super_admin") {
       addonsResult = await pushGlobalAddonsToCafe(cartId);
     }
 

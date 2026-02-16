@@ -14,6 +14,7 @@ const {
   logoutUser,
   updateUser,
   toggleFranchiseStatus,
+  bulkUpdateAdministrativeStatus,
   deleteUser,
   uploadFranchiseDocs,
   uploadCafeAdminDocs,
@@ -84,6 +85,12 @@ router.get(
   "/stats/carts",
   authorize(["super_admin", "franchise_admin"]),
   getCartStatistics
+);
+
+router.patch(
+  "/bulk-status",
+  authorize(["super_admin"]),
+  bulkUpdateAdministrativeStatus
 );
 
 router.get("/:id", validateObjectId("id"), getUserById);

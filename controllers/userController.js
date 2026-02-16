@@ -1,5 +1,6 @@
 const User = require("../models/userModel");
 const Employee = require("../models/employeeModel");
+const Cart = require("../models/cartModel");
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
 const path = require("path");
@@ -1662,6 +1663,58 @@ exports.updateUser = async (req, res) => {
     // Save the user (this will trigger password hashing if password was changed)
     await user.save();
 
+    // Keep customer-facing Cart document in sync with cart admin profile updates.
+    // This ensures Pickup/Delivery store name reflects latest admin updates.
+    const shouldSyncCartRecord =
+      user.role === "admin" &&
+      (cartName !== undefined || name !== undefined || location !== undefined);
+    if (shouldSyncCartRecord) {
+      try {
+        const syncedCartName =
+          (typeof user.cartName === "string" && user.cartName.trim()) ||
+          (typeof user.name === "string" && user.name.trim()) ||
+          "Cart";
+        const cartUpdate = { name: syncedCartName };
+        if (location !== undefined) {
+          cartUpdate.location =
+            typeof user.location === "string" ? user.location : "";
+        }
+
+        if (user.franchiseId) {
+          await Cart.findOneAndUpdate(
+            { cartAdminId: user._id },
+            {
+              $set: cartUpdate,
+              $setOnInsert: {
+                name: syncedCartName,
+                franchiseId: user.franchiseId,
+                cartAdminId: user._id,
+                location:
+                  typeof user.location === "string" ? user.location : "",
+                pickupEnabled: true,
+                deliveryEnabled: false,
+                deliveryRadius: 5,
+                deliveryCharge: 0,
+                isActive: user.isActive !== false,
+              },
+            },
+            { upsert: true }
+          );
+        } else {
+          await Cart.findOneAndUpdate(
+            { cartAdminId: user._id },
+            { $set: cartUpdate },
+            { upsert: false }
+          );
+        }
+      } catch (syncError) {
+        console.error(
+          `[UPDATE_USER] Cart sync failed for admin ${user._id}:`,
+          syncError.message
+        );
+      }
+    }
+
     // Don't send password in response
     const userResponse = user.toObject();
     delete userResponse.password;
@@ -1723,6 +1776,134 @@ exports.toggleFranchiseStatus = async (req, res) => {
   } catch (error) {
     console.error("[TOGGLE] Error:", error);
     res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Bulk activate/deactivate administrative users by persona (super admin only)
+// @route   PATCH /api/users/bulk-status
+exports.bulkUpdateAdministrativeStatus = async (req, res) => {
+  try {
+    const persona = String(req.body?.persona || "")
+      .trim()
+      .toLowerCase();
+    const { isActive } = req.body || {};
+
+    if (!["franchise_admin", "cart_admin"].includes(persona)) {
+      return res.status(400).json({
+        message:
+          "Invalid persona. Allowed values: franchise_admin, cart_admin",
+      });
+    }
+
+    if (typeof isActive !== "boolean") {
+      return res.status(400).json({
+        message: "isActive must be a boolean value",
+      });
+    }
+
+    let updatedFranchises = 0;
+    let updatedCarts = 0;
+    let skippedCarts = 0;
+
+    if (persona === "franchise_admin") {
+      const franchises = await User.find({ role: "franchise_admin" })
+        .select("_id")
+        .lean();
+      const franchiseIds = franchises.map((f) => f._id);
+
+      const franchiseUpdateResult = await User.updateMany(
+        { role: "franchise_admin", isActive: { $ne: isActive } },
+        { $set: { isActive } }
+      );
+      updatedFranchises = Number(franchiseUpdateResult?.modifiedCount || 0);
+
+      if (franchiseIds.length > 0) {
+        const cartUpdateResult = await User.updateMany(
+          {
+            role: { $in: ["admin", "cart_admin"] },
+            franchiseId: { $in: franchiseIds },
+            isActive: { $ne: isActive },
+          },
+          { $set: { isActive } }
+        );
+        updatedCarts = Number(cartUpdateResult?.modifiedCount || 0);
+      }
+
+      return res.json({
+        success: true,
+        message: `Franchise admins ${
+          isActive ? "activated" : "deactivated"
+        } successfully`,
+        data: {
+          persona,
+          isActive,
+          updatedFranchises,
+          updatedCarts,
+          totalUpdated: updatedFranchises + updatedCarts,
+        },
+      });
+    }
+
+    // persona === "cart_admin"
+    if (isActive) {
+      const activeFranchises = await User.find({
+        role: "franchise_admin",
+        isActive: { $ne: false },
+      })
+        .select("_id")
+        .lean();
+      const activeFranchiseIds = activeFranchises.map((f) => f._id);
+
+      const cartUpdateResult = await User.updateMany(
+        {
+          role: { $in: ["admin", "cart_admin"] },
+          isActive: { $ne: true },
+          $or: [
+            { franchiseId: { $in: activeFranchiseIds } },
+            { franchiseId: null },
+            { franchiseId: { $exists: false } },
+          ],
+        },
+        {
+          $set: {
+            isActive: true,
+            isApproved: true,
+            approvedBy: req.user._id,
+            approvedAt: new Date(),
+          },
+        }
+      );
+      updatedCarts = Number(cartUpdateResult?.modifiedCount || 0);
+
+      skippedCarts = await User.countDocuments({
+        role: { $in: ["admin", "cart_admin"] },
+        isActive: { $ne: true },
+        franchiseId: { $exists: true, $ne: null, $nin: activeFranchiseIds },
+      });
+    } else {
+      const cartUpdateResult = await User.updateMany(
+        { role: { $in: ["admin", "cart_admin"] }, isActive: { $ne: false } },
+        { $set: { isActive: false } }
+      );
+      updatedCarts = Number(cartUpdateResult?.modifiedCount || 0);
+    }
+
+    return res.json({
+      success: true,
+      message: `Cart admins ${
+        isActive ? "activated" : "deactivated"
+      } successfully`,
+      data: {
+        persona,
+        isActive,
+        updatedCarts,
+        skippedCarts,
+        totalUpdated: updatedCarts,
+      },
+    });
+  } catch (error) {
+    console.error("[BULK USER STATUS] Error:", error);
+    return res.status(500).json({ message: error.message });
   }
 };
 

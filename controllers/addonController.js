@@ -10,6 +10,12 @@ const toObjectId = (value) => {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
   return new mongoose.Types.ObjectId(id);
 };
+const sanitizeAddonName = (value) => {
+  const normalized = String(value || "")
+    .replace(/^\(\s*\+\s*\)\s*/u, "")
+    .trim();
+  return normalized || "Add-on";
+};
 
 const resolveCartAdminFromRef = async (cartRef) => {
   const objectId = toObjectId(cartRef);
@@ -95,10 +101,17 @@ exports.getAddons = async (req, res) => {
     }
 
     const addons = await Addon.find(filter).sort({ sortOrder: 1, name: 1 });
+    const normalizedAddons = addons.map((addon) => {
+      const data = addon.toObject ? addon.toObject() : addon;
+      return {
+        ...data,
+        name: sanitizeAddonName(data?.name),
+      };
+    });
 
     res.json({
       success: true,
-      data: addons,
+      data: normalizedAddons,
     });
   } catch (error) {
     console.error("Error fetching add-ons:", error);
@@ -194,9 +207,13 @@ exports.getPublicAddons = async (req, res) => {
         .lean();
     }
 
+    const normalizedAddons = (addons || []).map((addon) => ({
+      ...addon,
+      name: sanitizeAddonName(addon?.name),
+    }));
     res.json({
       success: true,
-      data: addons,
+      data: normalizedAddons,
     });
   } catch (error) {
     console.error("Error fetching public add-ons:", error);
@@ -223,10 +240,10 @@ exports.createAddon = async (req, res) => {
     }
 
     const addonData = {
-      name: name.trim(),
+      name: sanitizeAddonName(name),
       description: description || "",
       price: Number(price) || 0,
-      icon: icon || "+",
+      icon: icon || "",
       sortOrder: Number(sortOrder) || 0,
       isAvailable: true,
     };
@@ -354,7 +371,7 @@ exports.updateAddon = async (req, res) => {
     if (req.user.role === "admin") {
       if (isAvailable !== undefined) addon.isAvailable = Boolean(isAvailable);
     } else {
-      if (name !== undefined) addon.name = String(name).trim();
+      if (name !== undefined) addon.name = sanitizeAddonName(name);
       if (description !== undefined) addon.description = description;
       if (price !== undefined) addon.price = Number(price);
       if (icon !== undefined) addon.icon = icon;
