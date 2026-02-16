@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const DefaultMenu = require("../models/defaultMenuModel");
 const MenuCategory = require("../models/menuCategoryModel");
 const { MenuItem } = require("../models/menuItemModel");
+const Addon = require("../models/addonModel");
 const User = require("../models/userModel");
 
 // Helper function to decode HTML entities in image URLs
@@ -24,6 +25,182 @@ const syncLocks = new Map(); // Map<cartId, Promise>
 // SYNC TIMESTAMP: Track when last sync completed for each cafe (prevent rapid re-syncs)
 const lastSyncTime = new Map(); // Map<cartId, timestamp>
 const SYNC_COOLDOWN_MS = 30000; // 30 seconds - don't sync again within this time
+
+const toObjectId = (value) => {
+  if (!value) return null;
+  const id = String(value).trim();
+  if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
+  return new mongoose.Types.ObjectId(id);
+};
+
+const getGlobalAddonTemplates = async () => {
+  return Addon.find({
+    $and: [
+      { $or: [{ franchiseId: null }, { franchiseId: { $exists: false } }] },
+      { $or: [{ cartId: null }, { cartId: { $exists: false } }] },
+    ],
+  })
+    .sort({ sortOrder: 1, name: 1 })
+    .lean();
+};
+
+const syncAddonTemplatesToCart = async ({
+  cartAdminId,
+  franchiseId,
+  templates = [],
+}) => {
+  const cartObjectId = toObjectId(cartAdminId);
+  const franchiseObjectId = toObjectId(franchiseId);
+  if (!cartObjectId || !franchiseObjectId) {
+    return { upserted: 0, modified: 0, matched: 0 };
+  }
+  if (!Array.isArray(templates) || templates.length === 0) {
+    return { upserted: 0, modified: 0, matched: 0 };
+  }
+
+  const operations = templates.map((addon) => ({
+    updateOne: {
+      filter: {
+        cartId: cartObjectId,
+        name: String(addon.name || "").trim(),
+      },
+      update: {
+        $set: {
+          description: String(addon.description || ""),
+          price: Number(addon.price) || 0,
+          icon: addon.icon || "+",
+          sortOrder: Number(addon.sortOrder) || 0,
+          isAvailable: addon.isAvailable !== false,
+          cartId: cartObjectId,
+          franchiseId: franchiseObjectId,
+        },
+        $setOnInsert: {
+          createdAt: new Date(),
+        },
+      },
+      upsert: true,
+    },
+  }));
+
+  const bulkResult = await Addon.bulkWrite(operations, { ordered: false });
+  return {
+    upserted: Number(bulkResult?.upsertedCount || 0),
+    modified: Number(bulkResult?.modifiedCount || 0),
+    matched: Number(bulkResult?.matchedCount || 0),
+  };
+};
+
+const pushGlobalAddonsToFranchise = async (franchiseId) => {
+  const franchiseObjectId = toObjectId(franchiseId);
+  if (!franchiseObjectId) {
+    return {
+      success: false,
+      message: "Invalid franchiseId for add-on push",
+      cartsUpdated: 0,
+      templatesFound: 0,
+      upserted: 0,
+      modified: 0,
+    };
+  }
+
+  const templates = await getGlobalAddonTemplates();
+  if (templates.length === 0) {
+    return {
+      success: false,
+      message: "No global add-ons found to push",
+      cartsUpdated: 0,
+      templatesFound: 0,
+      upserted: 0,
+      modified: 0,
+    };
+  }
+
+  const carts = await User.find({
+    role: "admin",
+    franchiseId: franchiseObjectId,
+  })
+    .select("_id")
+    .lean();
+
+  let cartsUpdated = 0;
+  let upserted = 0;
+  let modified = 0;
+
+  for (const cart of carts) {
+    const syncResult = await syncAddonTemplatesToCart({
+      cartAdminId: cart._id,
+      franchiseId: franchiseObjectId,
+      templates,
+    });
+    cartsUpdated += 1;
+    upserted += syncResult.upserted;
+    modified += syncResult.modified;
+  }
+
+  return {
+    success: true,
+    message: "Global add-ons pushed to franchise carts",
+    cartsUpdated,
+    templatesFound: templates.length,
+    upserted,
+    modified,
+  };
+};
+
+const pushGlobalAddonsToCafe = async (cartId) => {
+  const cartObjectId = toObjectId(cartId);
+  if (!cartObjectId) {
+    return {
+      success: false,
+      message: "Invalid cartId for add-on push",
+      cartsUpdated: 0,
+      templatesFound: 0,
+      upserted: 0,
+      modified: 0,
+    };
+  }
+
+  const cart = await User.findOne({ _id: cartObjectId, role: "admin" })
+    .select("_id franchiseId")
+    .lean();
+  if (!cart || !cart.franchiseId) {
+    return {
+      success: false,
+      message: "Target cart or franchise not found for add-on push",
+      cartsUpdated: 0,
+      templatesFound: 0,
+      upserted: 0,
+      modified: 0,
+    };
+  }
+
+  const templates = await getGlobalAddonTemplates();
+  if (templates.length === 0) {
+    return {
+      success: false,
+      message: "No global add-ons found to push",
+      cartsUpdated: 0,
+      templatesFound: 0,
+      upserted: 0,
+      modified: 0,
+    };
+  }
+
+  const syncResult = await syncAddonTemplatesToCart({
+    cartAdminId: cart._id,
+    franchiseId: cart.franchiseId,
+    templates,
+  });
+
+  return {
+    success: true,
+    message: "Global add-ons pushed to cart",
+    cartsUpdated: 1,
+    templatesFound: templates.length,
+    upserted: syncResult.upserted,
+    modified: syncResult.modified,
+  };
+};
 
 // Get default menu (franchise admin gets their franchise menu, super admin gets global)
 exports.getDefaultMenu = async (req, res) => {
@@ -294,6 +471,7 @@ exports.updateDefaultMenu = async (req, res) => {
 exports.pushToFranchise = async (req, res) => {
   try {
     const { franchiseId } = req.params;
+    const includeAddons = req.body?.includeAddons === true;
 
     // Franchise admin can only push to their own franchise
     if (req.user.role === "franchise_admin") {
@@ -376,12 +554,18 @@ exports.pushToFranchise = async (req, res) => {
     // For franchise admin: uses their own menu
     // For super admin: uses the menu we just copied above
     const result = await pushDefaultMenuToFranchise(franchiseId, franchiseId, true);
+
+    let addonsResult = null;
+    if (includeAddons && req.user.role === "super_admin") {
+      addonsResult = await pushGlobalAddonsToFranchise(franchiseId);
+    }
     
     return res.json({
       message: req.user.role === "super_admin" 
         ? "Global menu copied to franchise and pushed to all carts successfully" 
         : "Default menu updated for all carts successfully (previous menus replaced)",
       ...result,
+      addonsResult,
     });
   } catch (err) {
     console.error("[DEFAULT MENU] Error in pushToFranchise:", err);
@@ -393,6 +577,7 @@ exports.pushToFranchise = async (req, res) => {
 exports.pushToCafe = async (req, res) => {
   try {
     const { cartId } = req.params;
+    const includeAddons = req.body?.includeAddons === true;
 
     const cafe = await User.findById(cartId);
     if (!cafe || cafe.role !== "admin") {
@@ -411,9 +596,16 @@ exports.pushToCafe = async (req, res) => {
     const franchiseId = req.user.role === "franchise_admin" ? req.user._id : null;
     // Use replace mode to replace existing menu
     const result = await pushDefaultMenuToCafe(cartId, franchiseId, true);
+
+    let addonsResult = null;
+    if (includeAddons && req.user.role === "super_admin") {
+      addonsResult = await pushGlobalAddonsToCafe(cartId);
+    }
+
     return res.json({
       message: "Default menu updated for cafe successfully (previous menu replaced)",
       ...result,
+      addonsResult,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -1384,4 +1576,3 @@ async function pushDefaultMenuToCafe(cartId, franchiseId = null, replaceMode = f
 // Export helper functions for use in user creation
 module.exports.pushDefaultMenuToFranchise = pushDefaultMenuToFranchise;
 module.exports.pushDefaultMenuToCafe = pushDefaultMenuToCafe;
-

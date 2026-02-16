@@ -118,6 +118,7 @@ async function consumeIngredientsForOrder(order, userId) {
     }
 
     let anythingProcessed = false;
+    const orderFranchiseId = order.franchiseId || null;
 
     // Iterate through KOTs using index as stable ID (since KOTs are append-only)
     for (let i = 0; i < order.kotLines.length; i++) {
@@ -264,19 +265,22 @@ async function consumeIngredientsForOrder(order, userId) {
                           { cartId: cartIdObj },
                           { cartId: null, franchiseId },
                           { franchiseId },
+                          { cartId: null, franchiseId: null },
+                          { cartId: { $exists: false }, franchiseId: { $exists: false } },
                         ],
                       },
                     ],
                   }).lean();
                   if (matchingRecipe) recipeId = matchingRecipe._id;
 
+                  const resolvedFranchiseId = franchiseId || cartIdObj;
                   const newCostingItem = new MenuItemV2({
                     name: createItemName,
                     category: categoryName,
                     sellingPrice: newPrice,
                     recipeId,
                     cartId: cartIdObj,
-                    franchiseId,
+                    franchiseId: resolvedFranchiseId,
                     defaultMenuItemName: createItemName,
                     defaultMenuCategoryName: categoryName,
                   });
@@ -308,15 +312,53 @@ async function consumeIngredientsForOrder(order, userId) {
           }
 
           if (!menuItem) {
-            console.warn(
-              `[COSTING] Menu item not found in costing-v2 system (Finances Panel): "${itemName}" for cart ${cartId}`
+            const recipeNameNorm = normalizedItemName.replace(/\s+/g, " ").toLowerCase();
+            const recipeNameRegex = new RegExp(
+              `^${normalizedItemName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i"
             );
-            consumptionSummary.errors.push({
-              item: itemName,
-              error:
-                "Menu item not found in Finances Panel. Please add this item to Finances → Menu Items.",
-            });
-            continue;
+            const directRecipe = await RecipeV2.findOne({
+              isActive: true,
+              $and: [
+                {
+                  $or: [
+                    { nameNormalized: recipeNameNorm },
+                    { name: { $regex: recipeNameRegex } },
+                  ],
+                },
+                {
+                  $or: [
+                    { cartId: cartIdObj || cartId },
+                    { cartId: null, franchiseId: orderFranchiseId },
+                    { franchiseId: orderFranchiseId },
+                    { cartId: null, franchiseId: null },
+                    { cartId: { $exists: false }, franchiseId: { $exists: false } },
+                  ],
+                },
+              ],
+            }).lean();
+
+            if (directRecipe) {
+              menuItem = {
+                _id: null,
+                name: itemName,
+                recipeId: directRecipe._id,
+                franchiseId: orderFranchiseId,
+              };
+              console.log(
+                `[COSTING] Fallback matched recipe "${directRecipe.name}" directly for item "${itemName}"`,
+              );
+            } else {
+              console.warn(
+                `[COSTING] Menu item not found in costing-v2 system (Finances Panel): "${itemName}" for cart ${cartId}`
+              );
+              consumptionSummary.errors.push({
+                item: itemName,
+                error:
+                  "Menu item not found in Finances Panel. Please add this item to Finances -> Menu Items.",
+              });
+              continue;
+            }
           }
 
           // If menu item has no recipe, try to auto-link by name (same cart/franchise)
@@ -338,8 +380,10 @@ async function consumeIngredientsForOrder(order, userId) {
                 {
                   $or: [
                     { cartId: cartIdObj || cartId },
-                    { cartId: null, franchiseId: menuItem.franchiseId },
-                    { franchiseId: menuItem.franchiseId },
+                    { cartId: null, franchiseId: menuItem.franchiseId || orderFranchiseId },
+                    { franchiseId: menuItem.franchiseId || orderFranchiseId },
+                    { cartId: null, franchiseId: null },
+                    { cartId: { $exists: false }, franchiseId: { $exists: false } },
                   ],
                 },
               ],
@@ -366,7 +410,7 @@ async function consumeIngredientsForOrder(order, userId) {
             continue;
           }
 
-          console.log(`[COSTING] ✅ Found "${itemName}" in costing-v2 system (Finances Panel), consuming ingredients...`);
+          console.log(`[COSTING] Found "${itemName}" in costing-v2 system (Finances Panel), consuming ingredients...`);
 
           // Get recipe
           const recipe = await RecipeV2.findById(menuItem.recipeId);
@@ -491,7 +535,7 @@ async function consumeIngredientsForOrder(order, userId) {
           }
 
           consumptionSummary.itemsProcessed++;
-          console.log(`[COSTING] ✅ Successfully consumed "${itemName}" from costing-v2 system (Finances Panel)`);
+          console.log(`[COSTING] Successfully consumed "${itemName}" from costing-v2 system (Finances Panel)`);
         } catch (itemError) {
           console.error(
             `[COSTING] Error processing item ${itemName} for order ${order._id}:`,

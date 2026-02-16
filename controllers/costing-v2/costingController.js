@@ -6056,6 +6056,8 @@ exports.linkMatchingBoms = async (req, res) => {
                 { cartId: mi.cartId },
                 { cartId: null, franchiseId: mi.franchiseId },
                 { franchiseId: mi.franchiseId },
+                { cartId: null, franchiseId: null },
+                { cartId: { $exists: false }, franchiseId: { $exists: false } },
               ],
             },
           ],
@@ -6653,4 +6655,3 @@ exports.debugIngredients = async (req, res) => {
     });
   }
 };
-

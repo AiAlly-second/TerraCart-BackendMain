@@ -55,6 +55,44 @@ const toRupees = (p) => Number((p / 100).toFixed(2));
 
 const FINAL_ORDER_STATUSES = ["Paid", "Cancelled", "Finalized", "Returned", "Exit"];
 
+const normalizeSelectedAddons = (addons) => {
+  if (!Array.isArray(addons)) return [];
+
+  return addons
+    .map((addon) => {
+      if (!addon || typeof addon !== "object") return null;
+
+      const name = String(addon.name || "").trim() || "Add-on";
+      const priceValue = Number(addon.price);
+      const price = Number.isFinite(priceValue) && priceValue >= 0 ? priceValue : 0;
+      const qtyValue = Number(addon.quantity);
+      const quantity =
+        Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 1;
+
+      const normalized = {
+        name,
+        price,
+        quantity,
+      };
+
+      const rawAddonId = addon.addonId || addon._id || addon.id;
+      const addonIdString =
+        rawAddonId && typeof rawAddonId.toString === "function"
+          ? rawAddonId.toString()
+          : rawAddonId;
+
+      if (addonIdString && mongoose.Types.ObjectId.isValid(addonIdString)) {
+        normalized.addonId =
+          typeof rawAddonId === "string"
+            ? new mongoose.Types.ObjectId(addonIdString)
+            : rawAddonId;
+      }
+
+      return normalized;
+    })
+    .filter(Boolean);
+};
+
 const mapAcceptedByToAssignedStaff = (acceptedBy, fallbackRole = null) => {
   if (!acceptedBy || !acceptedBy.employeeId) {
     return null;
@@ -283,6 +321,31 @@ const transitions = {
   "Being Prepared": new Set(["Ready", "Completed", "Cancelled"]),
   BeingPrepared: new Set(["Ready", "Completed", "Cancelled"]),
   Exit: new Set([]), // Final status for legacy takeaway
+};
+
+const resetInventoryDeductionFlag = async (orderId) => {
+  if (!orderId) return;
+  try {
+    await Order.findByIdAndUpdate(orderId, {
+      inventoryDeducted: false,
+      inventoryDeductedAt: null,
+    });
+  } catch (err) {
+    console.error(
+      `[COSTING] Failed to reset inventoryDeducted for order ${orderId}:`,
+      err.message,
+    );
+  }
+};
+
+const shouldResetInventoryDeduction = (result) => {
+  if (!result) return true;
+  if (result.success || result.alreadyProcessed) return false;
+  const consumedCount = Array.isArray(result.summary?.ingredientsConsumed)
+    ? result.summary.ingredientsConsumed.length
+    : 0;
+  const processedCount = Number(result.summary?.itemsProcessed || 0);
+  return consumedCount === 0 && processedCount === 0;
 };
 
 // ---------------- CREATE ORDER ----------------
@@ -937,7 +1000,7 @@ const createOrder = async (req, res) => {
       // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
-      selectedAddons: Array.isArray(selectedAddons) ? selectedAddons : [],
+      selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
       // UNIFIED STATUS FLOW:
       // - TAKEAWAY: Start as 'Pending' (awaiting staff acceptance/confirmation)
@@ -1911,17 +1974,22 @@ const finalizeOrder = async (req, res) => {
               result.summary.errors,
             );
           }
+          if (shouldResetInventoryDeduction(result)) {
+            await resetInventoryDeductionFlag(order._id);
+          }
         }
       } catch (err) {
         console.error(
           `[COSTING] Finalized order ${order._id} consumption error:`,
           err,
         );
+        await resetInventoryDeductionFlag(order._id);
       }
     } else {
       console.warn(
         `[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`,
       );
+      await resetInventoryDeductionFlag(order._id);
     }
 
     // Release table when order is finalized
@@ -2380,6 +2448,97 @@ const addItemsToOrder = async (req, res) => {
   }
 };
 
+// ---------------- UPDATE ORDER ADD-ONS (ADMIN) ----------------
+const updateOrderAddons = async (req, res) => {
+  try {
+    const { selectedAddons } = req.body;
+    const orderId = req.params.id;
+
+    if (!Array.isArray(selectedAddons)) {
+      return res.status(400).json({
+        message: "selectedAddons must be an array",
+      });
+    }
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Check access permissions (aligned with addItemsToOrder)
+    if (req.user && req.user.role === "admin" && req.user._id) {
+      // Cafe admin:
+      // - For DINE_IN orders, enforce strict cart ownership
+      // - For TAKEAWAY orders, allow modification even if cartId is missing/mismatched
+      if (order.serviceType !== "TAKEAWAY") {
+        if (
+          !order.cartId ||
+          order.cartId.toString() !== req.user._id.toString()
+        ) {
+          return res
+            .status(403)
+            .json({ message: "Order does not belong to your cafe" });
+        }
+      }
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
+      if (
+        !order.franchiseId ||
+        order.franchiseId.toString() !== req.user._id.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your franchise" });
+      }
+    } else if (
+      req.user &&
+      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
+    ) {
+      if (!req.user.cafeId) {
+        return res
+          .status(403)
+          .json({ message: "No cart/kiosk assigned to your account" });
+      }
+      if (
+        !order.cartId ||
+        order.cartId.toString() !== req.user.cafeId.toString()
+      ) {
+        return res
+          .status(403)
+          .json({ message: "Order does not belong to your cart/kiosk" });
+      }
+    }
+
+    // Same modification rules as add-items endpoint
+    if (["Paid", "Cancelled", "Returned"].includes(order.status)) {
+      return res.status(400).json({
+        message: `Cannot update add-ons for order with status: ${order.status}. Add-ons can only be updated on unpaid active orders.`,
+        currentStatus: order.status,
+      });
+    }
+
+    order.selectedAddons = normalizeSelectedAddons(selectedAddons);
+    order.markModified("selectedAddons");
+    await order.save();
+
+    // Emit socket event to cafe room
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (order.cartId && emitToCafe) {
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+    }
+
+    return res.json(order);
+  } catch (err) {
+    console.error("[ORDER] updateOrderAddons - Error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // ---------------- ACCEPT ORDER (first-come-first-serve) ----------------
 const acceptOrder = async (req, res) => {
   try {
@@ -2773,7 +2932,7 @@ const updateOrderStatus = async (req, res) => {
 
         // Run ingredient consumption in background (non-blocking)
         consumeIngredientsForOrder(updatedOrder, userId)
-          .then((consumptionResult) => {
+          .then(async (consumptionResult) => {
             if (consumptionResult.success) {
               console.log(
                 `[COSTING] ✅ Successfully consumed ingredients for order ${order._id} (status: ${status})`,
@@ -2802,15 +2961,22 @@ const updateOrderStatus = async (req, res) => {
                     "Unknown error",
                   );
                 }
+                if (shouldResetInventoryDeduction(consumptionResult)) {
+                  await resetInventoryDeductionFlag(updatedOrder._id);
+                }
               }
             }
           })
-          .catch((consumptionError) => {
+          .catch(async (consumptionError) => {
             console.error(
               `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
               consumptionError,
             );
+            await resetInventoryDeductionFlag(updatedOrder._id);
           });
+      }
+      if (!userId) {
+        await resetInventoryDeductionFlag(updatedOrder._id);
       }
     } else if (isPreparingStatus && order.inventoryDeducted) {
       console.log(
@@ -2832,7 +2998,7 @@ const updateOrderStatus = async (req, res) => {
         );
 
         consumeIngredientsForOrder(updatedOrder, userId)
-          .then((consumptionResult) => {
+          .then(async (consumptionResult) => {
             if (consumptionResult.success) {
               console.log(
                 `[COSTING] ✅ Fallback consumption success for order ${order._id}`,
@@ -2860,15 +3026,22 @@ const updateOrderStatus = async (req, res) => {
                     "Unknown error",
                   );
                 }
+                if (shouldResetInventoryDeduction(consumptionResult)) {
+                  await resetInventoryDeductionFlag(updatedOrder._id);
+                }
               }
             }
           })
-          .catch((consumptionError) => {
+          .catch(async (consumptionError) => {
             console.error(
               `[COSTING] ❌ Fallback consumption error for order ${order._id}:`,
               consumptionError,
             );
+            await resetInventoryDeductionFlag(updatedOrder._id);
           });
+      }
+      if (!userId) {
+        await resetInventoryDeductionFlag(updatedOrder._id);
       }
     }
 
@@ -3186,7 +3359,7 @@ const confirmPaymentByCustomer = async (req, res) => {
           `[COSTING] Fallback: Order ${order._id} paid via customer confirm - triggering consumption`,
         );
         consumeIngredientsForOrder(order, userId)
-          .then((consumptionResult) => {
+          .then(async (consumptionResult) => {
             if (consumptionResult.success) {
               console.log(
                 `[COSTING] Fallback consumption success for order ${order._id}`,
@@ -3200,18 +3373,23 @@ const confirmPaymentByCustomer = async (req, res) => {
                   console.warn(`[COSTING] ${e.item}: ${e.error}`),
                 );
               }
+              if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
+                await resetInventoryDeductionFlag(order._id);
+              }
             }
           })
-          .catch((err) =>
+          .catch(async (err) => {
             console.error(
               `[COSTING] Fallback consumption error for order ${order._id}:`,
               err,
-            ),
-          );
+            );
+            await resetInventoryDeductionFlag(order._id);
+          });
       } else {
         console.warn(
           `[COSTING] Skipping fallback consumption for order ${order._id}: no userId (req.user or order.cartId)`,
         );
+        await resetInventoryDeductionFlag(order._id);
       }
     }
 
@@ -3709,6 +3887,7 @@ module.exports = {
   createOrder,
   addKot,
   addItemsToOrder,
+  updateOrderAddons,
   finalizeOrder,
   getOrders,
   getOrderById,

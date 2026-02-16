@@ -47,6 +47,7 @@ const orderSchema = new mongoose.Schema(
         },
         name: { type: String, required: true },
         price: { type: Number, required: true, min: 0 },
+        quantity: { type: Number, min: 1, default: 1 },
       },
     ],
     table: { type: mongoose.Schema.Types.ObjectId, ref: "Table" },

@@ -28,6 +28,21 @@ const {
 // Load env vars
 dotenv.config();
 
+// Silence backend runtime console output by default.
+// Set BACKEND_ENABLE_CONSOLE_LOGS=true to re-enable logs when needed.
+const muteRuntimeConsole =
+  String(process.env.BACKEND_ENABLE_CONSOLE_LOGS || "").toLowerCase() !==
+  "true";
+if (muteRuntimeConsole) {
+  const noop = () => {};
+  console.log = noop;
+  console.info = noop;
+  console.warn = noop;
+  console.error = noop;
+  console.debug = noop;
+  console.trace = noop;
+}
+
 // Validate critical environment variables
 const validateEnv = () => {
   const warnings = [];

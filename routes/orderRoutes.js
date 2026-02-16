@@ -14,6 +14,7 @@ const {
   returnItems,
   convertToTakeaway,
   addItemsToOrder,
+  updateOrderAddons,
 } = require("../controllers/orderController");
 const {
   protect,
@@ -81,6 +82,12 @@ router.post(
   protect,
   authorize(["admin", "franchise_admin", "super_admin"]),
   addItemsToOrder,
+);
+router.patch(
+  "/:id/addons",
+  protect,
+  authorize(["admin", "franchise_admin", "super_admin"]),
+  updateOrderAddons,
 );
 router.patch(
   "/:id/return-items",

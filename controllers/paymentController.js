@@ -5,6 +5,31 @@ const PaymentQR = require("../models/paymentQrModel");
 const { releaseTableForOrder } = require("./orderController");
 const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
 
+const resetInventoryDeductionFlag = async (orderId) => {
+  if (!orderId) return;
+  try {
+    await Order.findByIdAndUpdate(orderId, {
+      inventoryDeducted: false,
+      inventoryDeductedAt: null,
+    });
+  } catch (err) {
+    console.error(
+      `[COSTING] Failed to reset inventoryDeducted for order ${orderId}:`,
+      err.message,
+    );
+  }
+};
+
+const shouldResetInventoryDeduction = (result) => {
+  if (!result) return true;
+  if (result.success || result.alreadyProcessed) return false;
+  const consumedCount = Array.isArray(result.summary?.ingredientsConsumed)
+    ? result.summary.ingredientsConsumed.length
+    : 0;
+  const processedCount = Number(result.summary?.itemsProcessed || 0);
+  return consumedCount === 0 && processedCount === 0;
+};
+
 const buildUpiPayload = async (orderId, amount, cafeId = null) => {
   // Try to get UPI ID from admin uploaded QR code
   let payee = process.env.UPI_PAYEE_VPA || "sarvacafe@upi";
@@ -344,7 +369,7 @@ exports.markPaymentPaid = async (req, res) => {
             `[COSTING] Fallback: Order ${order._id} paid via markPaymentPaid - triggering consumption`,
           );
           consumeIngredientsForOrder(order, userId)
-            .then((consumptionResult) => {
+            .then(async (consumptionResult) => {
               if (consumptionResult.success) {
                 console.log(
                   `[COSTING] Fallback consumption success for order ${order._id}`,
@@ -358,18 +383,23 @@ exports.markPaymentPaid = async (req, res) => {
                     console.warn(`[COSTING] ${e.item}: ${e.error}`),
                   );
                 }
+                if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
+                  await resetInventoryDeductionFlag(order._id);
+                }
               }
             })
-            .catch((err) =>
+            .catch(async (err) => {
               console.error(
                 `[COSTING] Fallback consumption error for order ${order._id}:`,
                 err,
-              ),
-            );
+              );
+              await resetInventoryDeductionFlag(order._id);
+            });
         } else {
           console.warn(
             `[COSTING] Skipping fallback consumption for order ${order._id}: no userId`,
           );
+          await resetInventoryDeductionFlag(order._id);
         }
       }
     }
@@ -422,5 +452,3 @@ exports.syncPaidOrders = async (req, res) => {
     return res.status(500).json({ message: err.message });
   }
 };
-
-

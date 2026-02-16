@@ -3,11 +3,20 @@
  * For a given cartId: lists MenuItem (cart menu) vs MenuItemV2 (Finances) vs RecipeV2.
  * Reports: items in cart menu with no MenuItemV2, MenuItemV2 with no recipeId, name mismatches.
  *
- * Usage: node backend/scripts/diagnose-bom-inventory.js [cartId]
+ * Usage (from project root):
+ *   node backend/scripts/diagnose-bom-inventory.js
+ *   node backend/scripts/diagnose-bom-inventory.js <cartAdminUserId>
  * If cartId omitted, uses first active cart admin.
+ * On PowerShell, pass the ID in quotes: node backend/scripts/diagnose-bom-inventory.js "USER_ID_HERE"
  */
 
-require("dotenv").config();
+const path = require("path");
+require("dotenv").config({ path: path.join(__dirname, "../.env") });
+if (!process.env.MONGO_URI) {
+  console.error("MONGO_URI is not set. Add MONGO_URI to backend/.env (or run from backend with: node scripts/diagnose-bom-inventory.js)");
+  process.exit(1);
+}
+
 const mongoose = require("mongoose");
 const { MenuItem } = require("../models/menuItemModel");
 const MenuItemV2 = require("../models/costing-v2/menuItemModel");
