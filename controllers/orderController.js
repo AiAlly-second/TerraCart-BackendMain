@@ -128,6 +128,11 @@ const buildNewOrderAvailablePayload = (order) => {
     Array.isArray(order?.kotLines) && order.kotLines.length > 0
       ? order.kotLines[order.kotLines.length - 1]
       : null;
+  const acceptedByEmployeeId =
+    order?.acceptedBy?.employeeId &&
+    typeof order.acceptedBy.employeeId?.toString === "function"
+      ? order.acceptedBy.employeeId.toString()
+      : order?.acceptedBy?.employeeId || null;
 
   return {
     orderId:
@@ -136,6 +141,8 @@ const buildNewOrderAvailablePayload = (order) => {
     serviceType: order?.serviceType || null,
     tableNo: order?.tableNumber || null,
     takeaway: order?.serviceType === "TAKEAWAY",
+    isAssigned: !!acceptedByEmployeeId,
+    acceptedByEmployeeId: acceptedByEmployeeId || null,
     createdAt: order?.createdAt || new Date(),
     orderSummary: (latestKot?.items || []).map((item) => ({
       name: item?.name || "Item",
@@ -146,6 +153,79 @@ const buildNewOrderAvailablePayload = (order) => {
 
 const ACCEPTABLE_ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Served"];
 const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
+const AUTO_ASSIGN_CREATOR_ROLES = new Set([
+  "waiter",
+  "captain",
+  "manager",
+  "admin",
+]);
+
+const buildCreatorAcceptedBy = async ({ req, cartId }) => {
+  if (!req?.user) return null;
+
+  const creatorRole = String(req.user.role || "").toLowerCase();
+  if (!AUTO_ASSIGN_CREATOR_ROLES.has(creatorRole)) {
+    return null;
+  }
+
+  const isAdminCreator = creatorRole === "admin";
+  if (isAdminCreator) {
+    return {
+      employeeId: req.user._id,
+      employeeName: req.user?.name || "Admin",
+      employeeRole: req.user?.role || "admin",
+      disability: {
+        hasDisability: false,
+        type: null,
+      },
+      acceptedAt: new Date(),
+    };
+  }
+
+  const normalizedCartId =
+    cartId && typeof cartId.toString === "function" ? cartId.toString() : cartId;
+
+  let employee = null;
+  if (req.user.employeeId) {
+    employee = await Employee.findById(req.user.employeeId).lean();
+  }
+
+  if (!employee) {
+    const employeeQuery = {
+      userId: req.user._id,
+      isActive: true,
+    };
+    if (normalizedCartId) {
+      employeeQuery.cartId = normalizedCartId;
+    }
+    employee = await Employee.findOne(employeeQuery).lean();
+  }
+
+  if (!employee && req.user.email) {
+    const employeeQueryByEmail = {
+      email: String(req.user.email).toLowerCase(),
+      isActive: true,
+    };
+    if (normalizedCartId) {
+      employeeQueryByEmail.cartId = normalizedCartId;
+    }
+    employee = await Employee.findOne(employeeQueryByEmail).lean();
+  }
+
+  const fallbackEmployeeId = req.user.employeeId || req.user._id;
+  const resolvedEmployeeId = employee?._id || fallbackEmployeeId;
+
+  return {
+    employeeId: resolvedEmployeeId,
+    employeeName: employee?.name || req.user?.name || "Staff",
+    employeeRole: employee?.employeeRole || req.user?.role || null,
+    disability: {
+      hasDisability: employee?.disability?.hasDisability ?? false,
+      type: employee?.disability?.type || null,
+    },
+    acceptedAt: new Date(),
+  };
+};
 
 // Build KOT
 function buildKot(items) {
@@ -1147,6 +1227,19 @@ const createOrder = async (req, res) => {
           `[ORDER] Generated takeaway token ${orderData.takeawayToken
           } for cart ${cartId.toString()}`,
         );
+      }
+    }
+
+    // Auto-assign orders created from authenticated staff/admin sessions.
+    // Customer/public orders remain unassigned and continue through accept flow.
+    const creatorAssignment = await buildCreatorAcceptedBy({
+      req,
+      cartId: orderData.cartId || cartId || null,
+    });
+    if (creatorAssignment) {
+      orderData.acceptedBy = creatorAssignment;
+      if (orderData.serviceType !== "DINE_IN" && orderData.status === "Pending") {
+        orderData.status = "Confirmed";
       }
     }
 
