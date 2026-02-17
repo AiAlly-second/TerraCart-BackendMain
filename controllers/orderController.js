@@ -550,10 +550,17 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ message: "Invalid service type" });
     }
 
+    // Preserve subtype even when clients omit orderType but send serviceType=PICKUP/DELIVERY.
+    const effectiveOrderType =
+      orderType ||
+      (serviceType === "PICKUP" || serviceType === "DELIVERY"
+        ? serviceType
+        : undefined);
+
     // For PICKUP/DELIVERY, validate orderType
     if (
       (serviceType === "PICKUP" || serviceType === "DELIVERY") &&
-      !orderType
+      !effectiveOrderType
     ) {
       return res.status(400).json({
         message:
@@ -566,8 +573,10 @@ const createOrder = async (req, res) => {
       serviceType === "TAKEAWAY" ||
       serviceType === "PICKUP" ||
       serviceType === "DELIVERY";
-    const isPickup = serviceType === "PICKUP" || orderType === "PICKUP";
-    const isDelivery = serviceType === "DELIVERY" || orderType === "DELIVERY";
+    const isPickup =
+      serviceType === "PICKUP" || effectiveOrderType === "PICKUP";
+    const isDelivery =
+      serviceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -1126,6 +1135,11 @@ const createOrder = async (req, res) => {
       }
     }
 
+    // Store special instructions for all order types
+    if (specialInstructions && specialInstructions.trim()) {
+      orderData.specialInstructions = specialInstructions.trim();
+    }
+
     // Add customer information for takeaway/pickup/delivery orders
     if (isTakeaway || isPickup || isDelivery) {
       // Customer fields are required for pickup/delivery
@@ -1161,11 +1175,6 @@ const createOrder = async (req, res) => {
         };
       }
 
-      // Store special instructions
-      if (specialInstructions && specialInstructions.trim()) {
-        orderData.specialInstructions = specialInstructions.trim();
-      }
-
       // Store delivery info for delivery orders
       if (isDelivery && deliveryInfo) {
         orderData.deliveryInfo = deliveryInfo;
@@ -1184,9 +1193,10 @@ const createOrder = async (req, res) => {
         }
       }
 
-      // Generate simple takeaway token (1, 2, 3, etc.) per cart
+      // Generate simple takeaway token (1, 2, 3, etc.) per cart.
+      // Do not assign takeaway token for DELIVERY orders.
       // REUSABLE: when orders are Paid/Cancelled/Returned, their tokens become free again.
-      if (cartId) {
+      if (cartId && !isDelivery) {
         // Consider ONLY active takeaway orders for this cart
         const activeStatuses = [
           "Pending",
@@ -1204,6 +1214,7 @@ const createOrder = async (req, res) => {
         const existingTokens = await Order.find({
           cartId,
           serviceType: "TAKEAWAY",
+          orderType: { $ne: "DELIVERY" },
           status: { $in: activeStatuses },
           takeawayToken: { $ne: null },
         })
@@ -1689,7 +1700,7 @@ const addKot = async (req, res) => {
     JSON.stringify(req.body, null, 2),
   );
   try {
-    const { items } = req.body;
+    const { items, specialInstructions } = req.body;
 
     // Enhanced validation with detailed error messages
     if (!items) {
@@ -1876,6 +1887,15 @@ const addKot = async (req, res) => {
     }
 
     order.kotLines.push(newKot);
+
+    // Allow customer to attach/update special instructions when adding KOT
+    if (
+      typeof specialInstructions === "string" &&
+      specialInstructions.trim().length > 0
+    ) {
+      order.specialInstructions = specialInstructions.trim();
+    }
+
     try {
       await order.save();
       console.log("[ORDER] addKot - Order updated successfully:", order._id);

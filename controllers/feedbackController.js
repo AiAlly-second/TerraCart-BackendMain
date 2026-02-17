@@ -3,20 +3,28 @@ const Feedback = require("../models/feedbackModel");
 const Customer = require("../models/customerModel");
 const Order = require("../models/orderModel");
 
+const toObjectIdIfValid = (value) => {
+  if (!value) return value;
+  return mongoose.Types.ObjectId.isValid(value)
+    ? new mongoose.Types.ObjectId(value)
+    : value;
+};
+
 // Helper function to build query based on user role
 // CRITICAL: Cart admins must only see their own data (filtered by cartId)
 const buildHierarchyQuery = (user) => {
   const query = {};
   if (user.role === "admin") {
     // CRITICAL: Cart admin - ONLY see feedback from their own cart
-    // Feedback model uses cartId (not cafeId)
-    query.cartId = user._id; // Support both cartId and cafeId for backward compatibility
+    // Support both cartId (new) and cafeId (legacy) feedback docs.
+    const cartId = toObjectIdIfValid(user._id?._id || user._id);
+    query.$or = [{ cartId }, { cafeId: cartId }];
     console.log(
-      `[FEEDBACK_QUERY] Cart admin ${user._id} - filtering by cartId: ${user._id}`
+      `[FEEDBACK_QUERY] Cart admin ${user._id} - filtering by cartId/cafeId: ${cartId}`
     );
   } else if (user.role === "franchise_admin") {
     // Franchise admin - see feedback from all carts under their franchise
-    query.franchiseId = user._id;
+    query.franchiseId = toObjectIdIfValid(user._id?._id || user._id);
   }
   return query;
 };
@@ -72,18 +80,23 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
     const cartIdObj = mongoose.Types.ObjectId.isValid(cartIdValue) 
       ? new mongoose.Types.ObjectId(cartIdValue) 
       : cartIdValue;
+    const cartScopeCondition = {
+      $or: [{ cartId: cartIdObj }, { cafeId: cartIdObj }],
+    };
     
     // Remove $or from top level if it exists and move to $and
     if (query.$or) {
       const orCondition = query.$or;
-      delete query.$or;
-      query.$and = [
+      query = {
+        $and: [
         { $or: orCondition },
-        { cartId: cartIdObj } // Customer model uses cartId
-      ];
+        cartScopeCondition,
+      ],
+      };
     } else {
-      // No $or condition, just add cartId filter
-      query.cartId = cartIdObj; // Customer model uses cartId
+      query = {
+        $and: [query, cartScopeCondition],
+      };
     }
   } else if (franchiseId) {
     const franchiseIdValue = franchiseId._id || franchiseId;
@@ -112,7 +125,7 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
     name: customer.name,
     phone: customer.phone,
     email: customer.email,
-    cafeId: customer.cafeId ? customer.cafeId.toString() : null,
+    cartId: customer.cartId ? customer.cartId.toString() : null,
   } : { found: false });
 
   if (customer) {
@@ -181,7 +194,7 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
     // Phone is required in schema, so use a placeholder if only email provided
     const phoneForNewCustomer = normalizedPhone || `email-${Date.now()}`;
 
-    // Customer model uses cafeId (not cartId)
+    // Customer model uses cartId (not cafeId)
     const cafeIdValue = cafeId ? (cafeId._id || cafeId) : null;
     const cafeIdObj = cafeIdValue && mongoose.Types.ObjectId.isValid(cafeIdValue) 
       ? new mongoose.Types.ObjectId(cafeIdValue) 
@@ -196,7 +209,7 @@ const findOrCreateCustomer = async (customerData, cafeId, franchiseId) => {
       name: name ? name.trim() : "Guest",
       email: normalizedEmail || null,
       phone: phoneForNewCustomer,
-      cafeId: cafeIdObj, // Customer model uses cafeId
+      cartId: cafeIdObj, // Customer model uses cartId
       franchiseId: franchiseIdObj,
       visitCount: 1,
       firstVisitAt: new Date(),
@@ -254,25 +267,26 @@ exports.createFeedback = async (req, res) => {
     let cafeId = null;
     let franchiseId = null;
     let customer = null;
+    let resolvedOrder = null;
 
     // If orderId is provided, fetch order to get cafeId, franchiseId, and tableId
     if (feedbackData.orderId) {
       try {
         // Order._id is a String, not ObjectId, so use findById with the string directly
-        const order = await Order.findById(feedbackData.orderId);
-        if (order) {
+        resolvedOrder = await Order.findById(feedbackData.orderId);
+        if (resolvedOrder) {
           // Order model uses cartId, and feedback model also uses cartId
           // Map cartId to cartId for feedback
-          feedbackData.cartId = order.cartId
-            ? order.cartId._id || order.cartId
+          feedbackData.cartId = resolvedOrder.cartId
+            ? resolvedOrder.cartId._id || resolvedOrder.cartId
             : null;
-          feedbackData.franchiseId = order.franchiseId
-            ? order.franchiseId._id || order.franchiseId
+          feedbackData.franchiseId = resolvedOrder.franchiseId
+            ? resolvedOrder.franchiseId._id || resolvedOrder.franchiseId
             : null;
           cafeId = feedbackData.cartId; // Keep cafeId variable for customer lookup (Customer model uses cartId)
           franchiseId = feedbackData.franchiseId;
-          if (order.table && !feedbackData.tableId) {
-            feedbackData.tableId = order.table._id || order.table;
+          if (resolvedOrder.table && !feedbackData.tableId) {
+            feedbackData.tableId = resolvedOrder.table._id || resolvedOrder.table;
           }
           console.log(`✅ Found order ${feedbackData.orderId} - cafeId: ${cafeId}, franchiseId: ${franchiseId}`);
         } else {
@@ -319,6 +333,39 @@ exports.createFeedback = async (req, res) => {
       email: feedbackData.customerEmail || req.body.email,
       phone: feedbackData.customerPhone || req.body.phone,
     };
+
+    // Fallback customer identity from order when feedback form omits contact fields.
+    if (resolvedOrder) {
+      if (!customerInfo.name && resolvedOrder.customerName) {
+        customerInfo.name = resolvedOrder.customerName;
+      }
+      if (!customerInfo.email && resolvedOrder.customerEmail) {
+        customerInfo.email = resolvedOrder.customerEmail;
+      }
+      if (!customerInfo.phone && resolvedOrder.customerMobile) {
+        customerInfo.phone = resolvedOrder.customerMobile;
+      }
+    }
+
+    if (customerInfo.name && !feedbackData.customerName) {
+      feedbackData.customerName = String(customerInfo.name).trim();
+    }
+
+    if (customerInfo.email) {
+      const normalizedEmail = String(customerInfo.email).trim().toLowerCase();
+      customerInfo.email = normalizedEmail || null;
+      if (normalizedEmail) {
+        feedbackData.customerEmail = normalizedEmail;
+      }
+    }
+
+    if (customerInfo.phone) {
+      const normalizedPhone = normalizePhone(String(customerInfo.phone));
+      customerInfo.phone = normalizedPhone || null;
+      if (normalizedPhone) {
+        feedbackData.customerPhone = normalizedPhone;
+      }
+    }
 
     // If customer info is provided (phone OR email), find or create customer
     if (customerInfo.phone || customerInfo.email) {

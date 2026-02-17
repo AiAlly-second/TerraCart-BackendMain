@@ -1,8 +1,28 @@
 const PaymentQR = require("../models/paymentQrModel");
+const Order = require("../models/orderModel");
 const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const mongoose = require("mongoose");
+
+const toObjectIdIfValid = (value) => {
+  if (!value) return value;
+  return mongoose.Types.ObjectId.isValid(value)
+    ? new mongoose.Types.ObjectId(value)
+    : value;
+};
+
+const buildScopeOrFilter = (scopeId) => {
+  if (!scopeId) return null;
+  const normalizedScopeId = toObjectIdIfValid(scopeId);
+  return [
+    { userId: normalizedScopeId },
+    { cartId: normalizedScopeId },
+    // Legacy fallback if some old docs still use cafeId
+    { cafeId: normalizedScopeId },
+  ];
+};
 
 const fileFilter = (req, file, cb) => {
   // Accept only image files
@@ -34,26 +54,26 @@ exports.uploadPaymentQR = async (req, res) => {
     }
 
     const { upiId, gatewayName } = req.body;
-    const userId = req.user?._id;
-    const cafeId = req.user?.franchiseId || req.user?._id;
+    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
+    // Cart admin uploads are scoped to their own cart by default.
+    const scopeCartId = toObjectIdIfValid(req.body?.cartId || req.query?.cartId || req.user?._id);
 
     // Construct image URL
     // Use helper to get URL (handles S3 vs Local)
     const qrImageUrl = getFileUrl(req, req.file, "payment-qr");
 
-    // Deactivate existing active QR codes for this cafe/user
-    await PaymentQR.updateMany(
-      {
-        $or: [{ userId }, { cafeId }],
-        isActive: true,
-      },
-      { isActive: false }
-    );
+    // Deactivate existing active QR codes for this scope/user
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
+    const deactivateFilter = {
+      isActive: true,
+      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
+    };
+    await PaymentQR.updateMany(deactivateFilter, { isActive: false });
 
     // Create new QR code entry
     const paymentQR = await PaymentQR.create({
       userId,
-      cafeId,
+      cartId: scopeCartId,
       qrImageUrl,
       upiId,
       gatewayName,
@@ -86,14 +106,17 @@ exports.uploadPaymentQR = async (req, res) => {
  */
 exports.getActivePaymentQR = async (req, res) => {
   try {
-    const userId = req.user?._id;
-    const cafeId = req.user?.franchiseId || req.user?._id;
+    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
+    const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
 
-    // Try to find cafe-specific QR first, then user-specific, then global
-    let qrCode = await PaymentQR.findOne({
-      $or: [{ cafeId }, { userId }],
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
+    const query = {
       isActive: true,
-    }).sort({ createdAt: -1 });
+      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
+    };
+
+    // Try to find scope-specific QR first
+    let qrCode = await PaymentQR.findOne(query).sort({ createdAt: -1 });
 
     // If no specific QR found, get any active global QR
     if (!qrCode) {
@@ -123,8 +146,28 @@ exports.getActivePaymentQR = async (req, res) => {
  */
 exports.getActivePaymentQRPublic = async (req, res) => {
   try {
-    // Get any active QR code (most recent)
-    const qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    let scopeCartId = req.query?.cartId || null;
+    const orderId = req.query?.orderId || null;
+
+    if (!scopeCartId && orderId) {
+      const order = await Order.findById(orderId).select("cartId cafeId").lean();
+      if (order) {
+        scopeCartId = order.cartId || order.cafeId || null;
+      }
+    }
+
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId);
+    const scopedQuery = scopeOrFilter
+      ? { isActive: true, $or: scopeOrFilter }
+      : { isActive: true };
+
+    // Get active QR code, preferring scoped/cart QR when scope is available.
+    let qrCode = await PaymentQR.findOne(scopedQuery).sort({ createdAt: -1 });
+
+    // Fallback to any active QR so older/global setups continue to work.
+    if (!qrCode && scopeOrFilter) {
+      qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    }
 
     if (!qrCode) {
       // Return 200 with null instead of 404 - no active QR code is a valid state
@@ -148,11 +191,12 @@ exports.getActivePaymentQRPublic = async (req, res) => {
  */
 exports.listPaymentQRs = async (req, res) => {
   try {
-    const userId = req.user?._id;
-    const cafeId = req.user?.franchiseId || req.user?._id;
+    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
+    const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
 
     const qrCodes = await PaymentQR.find({
-      $or: [{ userId }, { cafeId }],
+      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
     })
       .sort({ createdAt: -1 })
       .lean();
@@ -179,12 +223,13 @@ exports.listPaymentQRs = async (req, res) => {
 exports.deletePaymentQR = async (req, res) => {
   try {
     const { id } = req.params;
-    const userId = req.user?._id;
-    const cafeId = req.user?.franchiseId || req.user?._id;
+    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
+    const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
 
     const qrCode = await PaymentQR.findOne({
       _id: id,
-      $or: [{ userId }, { cafeId }],
+      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
     });
 
     if (!qrCode) {

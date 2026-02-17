@@ -5,6 +5,13 @@ const PaymentQR = require("../models/paymentQrModel");
 const { releaseTableForOrder } = require("./orderController");
 const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
 
+const toObjectIdIfValid = (value) => {
+  if (!value) return value;
+  return mongoose.Types.ObjectId.isValid(value)
+    ? new mongoose.Types.ObjectId(value)
+    : value;
+};
+
 const resetInventoryDeductionFlag = async (orderId) => {
   if (!orderId) return;
   try {
@@ -30,17 +37,23 @@ const shouldResetInventoryDeduction = (result) => {
   return consumedCount === 0 && processedCount === 0;
 };
 
-const buildUpiPayload = async (orderId, amount, cafeId = null) => {
+const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
   // Try to get UPI ID from admin uploaded QR code
   let payee = process.env.UPI_PAYEE_VPA || "sarvacafe@upi";
   let payeeName = process.env.UPI_PAYEE_NAME || "Terra Cart";
   
   try {
-    // Try to find cafe-specific QR first, then any active QR
+    // Try to find cart-specific/admin QR first, then any active QR
     let qrCode = null;
-    if (cafeId) {
+    if (cartScopeId) {
+      const normalizedScopeId = toObjectIdIfValid(cartScopeId);
       qrCode = await PaymentQR.findOne({
-        $or: [{ cafeId }, { userId: cafeId }],
+        $or: [
+          { cartId: normalizedScopeId },
+          { userId: normalizedScopeId },
+          // Legacy fallback if older docs were saved with cafeId
+          { cafeId: normalizedScopeId },
+        ],
         isActive: true,
       }).sort({ createdAt: -1 });
     }
@@ -186,9 +199,9 @@ exports.createPaymentIntent = async (req, res) => {
     };
 
     if (method === "ONLINE") {
-      // Get cafeId from order to find cafe-specific UPI QR
-      const cafeId = order.cafeId ? order.cafeId.toString() : null;
-      payload.upiPayload = await buildUpiPayload(orderId, amount, cafeId);
+      // Get cart scope from order to find cart-admin uploaded UPI QR
+      const cartScopeId = order.cartId || order.cafeId || null;
+      payload.upiPayload = await buildUpiPayload(orderId, amount, cartScopeId);
     }
 
     const payment = await Payment.create(payload);

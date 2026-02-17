@@ -17,6 +17,29 @@ function calculateOrderRevenue(orders) {
   }, 0);
 }
 
+function isValidDateValue(date) {
+  return date instanceof Date && !Number.isNaN(date.getTime());
+}
+
+function parseDateFilter(value, endOfDay = false) {
+  if (!value) return null;
+  const parsed = new Date(value);
+  if (!isValidDateValue(parsed)) return null;
+  if (endOfDay) {
+    parsed.setHours(23, 59, 59, 999);
+  } else {
+    parsed.setHours(0, 0, 0, 0);
+  }
+  return parsed;
+}
+
+function resolveOrderPaidDate(order) {
+  const candidate = order?.paidAt || order?.updatedAt || null;
+  if (!candidate) return null;
+  const parsed = new Date(candidate);
+  return isValidDateValue(parsed) ? parsed : null;
+}
+
 // Calculate and store daily revenue
 // IMPORTANT: Only includes revenue from ACTIVE franchises
 exports.calculateDailyRevenue = async (req, res) => {
@@ -601,6 +624,8 @@ exports.getCurrentRevenue = async (req, res) => {
 exports.getFranchiseRevenue = async (req, res) => {
   try {
     const franchiseId = req.user._id.toString();
+    const startDateParam = req.query?.startDate;
+    const endDateParam = req.query?.endDate;
     
     if (req.user.role !== "franchise_admin") {
       return res.status(403).json({
@@ -621,18 +646,57 @@ exports.getFranchiseRevenue = async (req, res) => {
         message: "Invalid franchise ID format",
       });
     }
+
+    const hasStartDateParam =
+      typeof startDateParam === "string" && startDateParam.trim() !== "";
+    const hasEndDateParam =
+      typeof endDateParam === "string" && endDateParam.trim() !== "";
+
+    if (hasStartDateParam !== hasEndDateParam) {
+      return res.status(400).json({
+        success: false,
+        message: "Both startDate and endDate are required for date range filtering",
+      });
+    }
+
+    const rangeStart = hasStartDateParam
+      ? parseDateFilter(startDateParam, false)
+      : null;
+    const rangeEnd = hasEndDateParam ? parseDateFilter(endDateParam, true) : null;
+
+    if ((hasStartDateParam && !rangeStart) || (hasEndDateParam && !rangeEnd)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid date format. Use YYYY-MM-DD",
+      });
+    }
+
+    if (rangeStart && rangeEnd && rangeStart > rangeEnd) {
+      return res.status(400).json({
+        success: false,
+        message: "startDate cannot be after endDate",
+      });
+    }
+    const isDateRangeApplied = Boolean(rangeStart && rangeEnd);
     
     const orders = await Order.find({
       status: "Paid",
       franchiseId: franchiseObjectId,
     }).lean();
 
-    const totalRevenue = calculateOrderRevenue(orders);
+    const filteredOrders = isDateRangeApplied
+      ? orders.filter((order) => {
+          const paidDate = resolveOrderPaidDate(order);
+          return paidDate && paidDate >= rangeStart && paidDate <= rangeEnd;
+        })
+      : orders;
+
+    const totalRevenue = calculateOrderRevenue(filteredOrders);
 
     // Get cart breakdown for this franchise
     const cartMap = new Map();
 
-    for (const order of orders) {
+    for (const order of filteredOrders) {
       const cartId = order.cartId?.toString() || order.cartId;
 
       if (cartId) {
@@ -666,41 +730,88 @@ exports.getFranchiseRevenue = async (req, res) => {
       orderCount: data.orderCount,
     }));
 
-    // Get revenue by date range (last 30 days)
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    thirtyDaysAgo.setHours(0, 0, 0, 0);
+    const buildDateKey = (date) => {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    };
 
-    // Get recent orders - use paidAt if available, otherwise use updatedAt as fallback
-    const recentOrders = orders.filter(order => {
-      const paidDate = order.paidAt ? new Date(order.paidAt) : (order.updatedAt ? new Date(order.updatedAt) : null);
-      return paidDate && paidDate >= thirtyDaysAgo;
-    });
+    const getOrderTotal = (order) =>
+      (order.kotLines || []).reduce(
+        (sum, kot) => sum + Number(kot.totalAmount || 0),
+        0,
+      );
 
-    const recentRevenue = calculateOrderRevenue(recentOrders);
+    let recentRevenue = 0;
+    let dailyBreakdown = [];
 
-    // Get daily breakdown for last 30 days
-    const dailyBreakdown = [];
-    for (let i = 29; i >= 0; i--) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      date.setHours(0, 0, 0, 0);
-      
-      const endDate = new Date(date);
-      endDate.setHours(23, 59, 59, 999);
+    if (isDateRangeApplied) {
+      recentRevenue = totalRevenue;
 
-      const dayOrders = recentOrders.filter(order => {
-        // Use paidAt if available, otherwise fallback to updatedAt
-        const paidDate = order.paidAt ? new Date(order.paidAt) : (order.updatedAt ? new Date(order.updatedAt) : null);
-        return paidDate && paidDate >= date && paidDate <= endDate;
+      const dayMap = new Map();
+      filteredOrders.forEach((order) => {
+        const paidDate = resolveOrderPaidDate(order);
+        if (!paidDate) return;
+        const dateKey = buildDateKey(paidDate);
+        if (!dayMap.has(dateKey)) {
+          dayMap.set(dateKey, { revenue: 0, orderCount: 0 });
+        }
+        const bucket = dayMap.get(dateKey);
+        bucket.revenue += getOrderTotal(order);
+        bucket.orderCount += 1;
       });
 
-      const dayRevenue = calculateOrderRevenue(dayOrders);
-      dailyBreakdown.push({
-        date: date.toISOString().split('T')[0],
-        revenue: dayRevenue,
-        orderCount: dayOrders.length,
+      for (
+        let cursor = new Date(rangeStart);
+        cursor <= rangeEnd;
+        cursor.setDate(cursor.getDate() + 1)
+      ) {
+        const dateKey = buildDateKey(cursor);
+        const bucket = dayMap.get(dateKey) || { revenue: 0, orderCount: 0 };
+        dailyBreakdown.push({
+          date: dateKey,
+          revenue: bucket.revenue,
+          orderCount: bucket.orderCount,
+        });
+      }
+    } else {
+      // Get revenue by date range (last 30 days)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      thirtyDaysAgo.setHours(0, 0, 0, 0);
+
+      // Get recent orders - use paidAt if available, otherwise use updatedAt as fallback
+      const recentOrders = orders.filter((order) => {
+        const paidDate = resolveOrderPaidDate(order);
+        return paidDate && paidDate >= thirtyDaysAgo;
       });
+
+      recentRevenue = calculateOrderRevenue(recentOrders);
+
+      // Get daily breakdown for last 30 days
+      dailyBreakdown = [];
+      for (let i = 29; i >= 0; i--) {
+        const date = new Date();
+        date.setDate(date.getDate() - i);
+        date.setHours(0, 0, 0, 0);
+
+        const endDate = new Date(date);
+        endDate.setHours(23, 59, 59, 999);
+
+        const dayOrders = recentOrders.filter((order) => {
+          // Use paidAt if available, otherwise fallback to updatedAt
+          const paidDate = resolveOrderPaidDate(order);
+          return paidDate && paidDate >= date && paidDate <= endDate;
+        });
+
+        const dayRevenue = calculateOrderRevenue(dayOrders);
+        dailyBreakdown.push({
+          date: date.toISOString().split("T")[0],
+          revenue: dayRevenue,
+          orderCount: dayOrders.length,
+        });
+      }
     }
 
     res.json({
@@ -712,7 +823,12 @@ exports.getFranchiseRevenue = async (req, res) => {
         recentRevenue, // Last 30 days
         cartRevenue,
         dailyBreakdown,
-        totalOrders: orders.length,
+        totalOrders: filteredOrders.length,
+        dateRange: {
+          startDate: rangeStart ? buildDateKey(rangeStart) : null,
+          endDate: rangeEnd ? buildDateKey(rangeEnd) : null,
+          isApplied: isDateRangeApplied,
+        },
         calculatedAt: new Date(),
       },
     });
