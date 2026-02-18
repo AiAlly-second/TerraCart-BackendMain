@@ -370,12 +370,24 @@ exports.createEmployee = async (req, res) => {
 exports.updateEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const query = { _id: id, ...buildHierarchyQuery(req.user) };
+    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    const query = { _id: id, ...hierarchyQuery };
+
+    // If hierarchy query has cartId: null, employee not accessible
+    if (hierarchyQuery.cartId === null && Object.keys(hierarchyQuery).length === 1) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied: No cart associated with this user",
+      });
+    }
     
     const employee = await Employee.findOne(query);
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
     }
+
+    // Normalize role: treat "cart_admin" as "admin" for backward compatibility
+    const actorRole = req.user.role === "cart_admin" ? "admin" : req.user.role;
 
     // Validate DOB if being updated
     if (req.body.dateOfBirth) {
@@ -397,7 +409,7 @@ exports.updateEmployee = async (req, res) => {
     }
     
     // Handle hierarchy changes based on role
-    if (req.user.role === "franchise_admin") {
+    if (actorRole === "franchise_admin") {
       // Franchise admin can assign employees to cafes within their franchise
       if (req.body.cartId !== undefined) { // Changed from cafeId to cartId
         if (req.body.cartId) {
@@ -414,83 +426,141 @@ exports.updateEmployee = async (req, res) => {
       }
       // Prevent changing franchiseId
       delete req.body.franchiseId;
-    } else if (req.user.role === "admin") {
+    } else if (actorRole === "admin") {
       // Cart admin cannot change cartId or franchiseId
       delete req.body.cartId; // Changed from cafeId to cartId
       delete req.body.franchiseId;
-    } else if (req.user.role !== "super_admin") {
+    } else if (actorRole !== "super_admin") {
       // Other roles cannot change hierarchy
       delete req.body.cafeId;
       delete req.body.franchiseId;
     }
     
+    const hasEmailField = Object.prototype.hasOwnProperty.call(req.body, "email");
+    const incomingPassword =
+      typeof req.body.password === "string" ? req.body.password.trim() : "";
+    const passwordProvided = incomingPassword.length > 0;
+
     // Handle email update (normalize if provided)
-    if (req.body.email !== undefined) {
+    if (hasEmailField) {
       req.body.email = req.body.email ? req.body.email.toLowerCase().trim() : null;
     }
     
     // Extract password for User account creation/update
     const { password, ...updateData } = req.body;
+    const previousEmail = employee.email;
     
     Object.assign(employee, updateData);
-    await employee.save();
     
-    // If email and password are provided, and employee role is a mobile role, create/update User account
+    // Keep User login in sync for mobile roles.
+    // Supports: email-only update, password-only update, and email+password update.
     const mobileRoles = ['waiter', 'cook', 'captain', 'manager'];
-    if (employee.email && password && mobileRoles.includes(employee.employeeRole)) {
-      try {
-        // Check if User account exists with this email
-        let user = await User.findOne({ email: employee.email });
-        
+    if (mobileRoles.includes(employee.employeeRole)) {
+      const wantsCredentialSync = hasEmailField || passwordProvided || Boolean(employee.userId);
+
+      if (wantsCredentialSync) {
+        let user = null;
+
+        // Prefer linked user first
+        if (employee.userId) {
+          user = await User.findById(employee.userId);
+        }
+
+        // Fallback: find by current email if link is missing/stale
+        if (!user && employee.email) {
+          user = await User.findOne({ email: employee.email });
+        }
+
+        // If email was changed and link is missing, try old email before creating a new account
+        if (!user && previousEmail && previousEmail !== employee.email) {
+          user = await User.findOne({ email: previousEmail });
+        }
+
         if (user) {
-          // Update existing user's password and role if needed
-          user.password = password; // Password will be hashed by User model pre-save hook
-          if (!mobileRoles.includes(user.role)) {
-            user.role = employee.employeeRole;
+          // If frontend sent blank email, keep current login email and avoid breaking the account
+          if (hasEmailField && !employee.email) {
+            employee.email = user.email;
           }
-          // Update cafeId from employee.cartId (User model uses cafeId, Employee model uses cartId)
-          if (employee.cartId && user.cafeId?.toString() !== employee.cartId.toString()) {
-            user.cafeId = employee.cartId;
-            console.log(`[UPDATE_EMPLOYEE] Updated User cafeId to ${employee.cartId}`);
+
+          if (employee.email && user.email !== employee.email) {
+            const emailConflict = await User.findOne({
+              email: employee.email,
+              _id: { $ne: user._id },
+            }).lean();
+            if (emailConflict) {
+              return res
+                .status(400)
+                .json({ message: "Email already exists for another account" });
+            }
+            user.email = employee.email;
           }
-          // Ensure userId is linked in employee
+
+          if (passwordProvided) {
+            // Password will be hashed by User model pre-save hook
+            user.password = incomingPassword;
+          }
+
+          user.name = employee.name;
+          user.role = employee.employeeRole;
+          user.cafeId = employee.cartId || user.cafeId;
+          user.employeeId = employee._id;
+          user.franchiseId = employee.franchiseId || user.franchiseId;
+          await user.save();
+
           if (!employee.userId || employee.userId.toString() !== user._id.toString()) {
             employee.userId = user._id;
-            await employee.save();
-            console.log(`[UPDATE_EMPLOYEE] Linked userId ${user._id} to employee ${employee._id}`);
           }
-          await user.save();
-          console.log(`[UPDATE_EMPLOYEE] Updated User account for employee: ${employee.name}, Email: ${user.email}`);
-        } else {
-          // Create new User account for mobile login
+
+          console.log(
+            `[UPDATE_EMPLOYEE] Synced linked user for employee ${employee._id}: ${user.email}`
+          );
+        } else if (employee.email || passwordProvided) {
+          // No existing user found. Create one only when both email and password are available.
+          if (!employee.email) {
+            return res.status(400).json({
+              message:
+                "Email is required to create login access for this employee",
+            });
+          }
+
+          if (!passwordProvided) {
+            return res.status(400).json({
+              message:
+                "Password is required to create login access for this employee",
+            });
+          }
+
+          const emailConflict = await User.findOne({ email: employee.email }).lean();
+          if (emailConflict) {
+            return res
+              .status(400)
+              .json({ message: "Email already exists for another account" });
+          }
+
           const userData = {
             name: employee.name,
             email: employee.email,
-            password: password,
+            password: incomingPassword,
             role: employee.employeeRole,
-            cafeId: employee.cartId, // Employee.cartId -> User.cafeId (User model field for mobile users)
+            cafeId: employee.cartId, // Employee.cartId -> User.cafeId
             employeeId: employee._id,
           };
-          
-          // Set franchiseId if employee has one
+
           if (employee.franchiseId) {
             userData.franchiseId = employee.franchiseId;
           }
-          
-          user = await User.create(userData);
-          
-          // Link userId in employee
-          employee.userId = user._id;
-          await employee.save();
-          
-          console.log(`[UPDATE_EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
-          console.log(`[UPDATE_EMPLOYEE] User ID: ${user._id}, Email: ${user.email}`);
+
+          const createdUser = await User.create(userData);
+          employee.userId = createdUser._id;
+
+          console.log(
+            `[UPDATE_EMPLOYEE] Created user ${createdUser._id} for employee ${employee._id}`
+          );
         }
-      } catch (userError) {
-        console.error('[EMPLOYEE] Error creating/updating User account:', userError.message);
-        // Don't fail employee update if User creation fails
       }
     }
+
+    await employee.save();
     
     await employee.populate("cartId", "name cafeName email"); // Changed from cafeId to cartId
     await employee.populate("franchiseId", "name email");

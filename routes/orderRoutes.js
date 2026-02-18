@@ -1,6 +1,7 @@
 const express = require("express");
 const {
   createOrder,
+  getNextTakeawayToken,
   addKot,
   finalizeOrder,
   getOrders,
@@ -27,6 +28,7 @@ const router = express.Router();
 
 /* ---------- main flow (public - customer-facing) ---------- */
 router.post("/", optionalProtect, createOrder); // first Confirm - public for customers, but authenticate if token provided
+router.get("/takeaway-token/next", optionalProtect, getNextTakeawayToken);
 router.post("/:id/kot", addKot); // Order More → Confirm - public for customers
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);
 router.patch("/:id/customer-status", cancelOrderByCustomer); // Customer cancel/return - public with sessionToken verification

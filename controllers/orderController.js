@@ -54,6 +54,18 @@ const toPaise = (n) => Math.round(Number(n) * 100);
 const toRupees = (p) => Number((p / 100).toFixed(2));
 
 const FINAL_ORDER_STATUSES = ["Paid", "Cancelled", "Finalized", "Returned", "Exit"];
+const ACTIVE_TAKEAWAY_TOKEN_STATUSES = [
+  "Pending",
+  "Confirmed",
+  "Preparing",
+  "Ready",
+  "Served",
+  "Finalized",
+  "Accept",
+  "Accepted",
+  "Being Prepared",
+  "BeingPrepared",
+];
 const sanitizeAddonName = (value) => {
   const normalized = String(value || "")
     .replace(/^\(\s*\+\s*\)\s*/u, "")
@@ -122,6 +134,78 @@ const mapAcceptedByToAssignedStaff = (acceptedBy, fallbackRole = null) => {
 
 const resolveAssignmentDisplayType = (role) =>
   String(role || "").toUpperCase() === "ADMIN" ? "TEAM" : "INDIVIDUAL";
+
+const normalizeObjectId = (value) => {
+  if (!value) return null;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  const asString =
+    typeof value === "string"
+      ? value.trim()
+      : typeof value?.toString === "function"
+        ? value.toString()
+        : "";
+  if (!asString || !mongoose.Types.ObjectId.isValid(asString)) return null;
+  return new mongoose.Types.ObjectId(asString);
+};
+
+const getActiveTakeawayTokenQuery = (cartId) => ({
+  cartId,
+  serviceType: "TAKEAWAY",
+  orderType: { $ne: "DELIVERY" },
+  status: { $in: ACTIVE_TAKEAWAY_TOKEN_STATUSES },
+  takeawayToken: { $ne: null },
+});
+
+const findExistingTakeawayTokenForSession = async ({ cartId, sessionToken }) => {
+  if (!cartId || !sessionToken) return null;
+  const existingOrder = await Order.findOne({
+    ...getActiveTakeawayTokenQuery(cartId),
+    sessionToken,
+  })
+    .select("_id takeawayToken")
+    .lean();
+  if (
+    !existingOrder ||
+    !Number.isInteger(existingOrder.takeawayToken) ||
+    existingOrder.takeawayToken <= 0
+  ) {
+    return null;
+  }
+  return {
+    token: existingOrder.takeawayToken,
+    orderId: existingOrder._id,
+  };
+};
+
+const resolveTakeawayTokenAllocation = async ({ cartId, preferredToken = null }) => {
+  if (!cartId) return { token: null, source: "unavailable" };
+
+  const existingTokens = await Order.find(getActiveTakeawayTokenQuery(cartId))
+    .select("takeawayToken")
+    .lean();
+
+  const usedTokens = new Set(
+    existingTokens
+      .map((order) => order.takeawayToken)
+      .filter((value) => Number.isInteger(value) && value > 0),
+  );
+
+  const preferredNumber = Number(preferredToken);
+  if (
+    Number.isInteger(preferredNumber) &&
+    preferredNumber > 0 &&
+    !usedTokens.has(preferredNumber)
+  ) {
+    return { token: preferredNumber, source: "preferred" };
+  }
+
+  let nextToken = 1;
+  while (usedTokens.has(nextToken)) {
+    nextToken += 1;
+  }
+
+  return { token: nextToken, source: "next" };
+};
 
 const buildNewOrderAvailablePayload = (order) => {
   const latestKot =
@@ -509,6 +593,48 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
   }
 }
 
+const getNextTakeawayToken = async (req, res) => {
+  try {
+    const cartId = normalizeObjectId(req.query?.cartId);
+    const sessionToken = String(req.query?.sessionToken || "").trim();
+
+    if (!cartId) {
+      return res.status(400).json({ message: "Valid cartId is required" });
+    }
+
+    const existingForSession = sessionToken
+      ? await findExistingTakeawayTokenForSession({
+        cartId,
+        sessionToken,
+      })
+      : null;
+
+    if (existingForSession) {
+      return res.json({
+        token: existingForSession.token,
+        cartId: cartId.toString(),
+        existingOrderId: existingForSession.orderId,
+        reused: true,
+      });
+    }
+
+    const allocation = await resolveTakeawayTokenAllocation({ cartId });
+    if (!allocation.token) {
+      return res.status(500).json({ message: "Failed to allocate takeaway token" });
+    }
+
+    return res.json({
+      token: allocation.token,
+      cartId: cartId.toString(),
+      existingOrderId: null,
+      reused: false,
+    });
+  } catch (err) {
+    console.error("[ORDER] Failed to get next takeaway token:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 const createOrder = async (req, res) => {
   console.log("[ORDER] createOrder called", {
     hasUser: !!req.user,
@@ -537,6 +663,7 @@ const createOrder = async (req, res) => {
       customerLocation, // { latitude, longitude, address }
       specialInstructions, // Special notes from customer
       selectedAddons, // Add-ons selected by customer
+      takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
     } = req.body;
     let { tableNumber } = req.body;
 
@@ -1197,47 +1324,23 @@ const createOrder = async (req, res) => {
       // Do not assign takeaway token for DELIVERY orders.
       // REUSABLE: when orders are Paid/Cancelled/Returned, their tokens become free again.
       if (cartId && !isDelivery) {
-        // Consider ONLY active takeaway orders for this cart
-        const activeStatuses = [
-          "Pending",
-          "Confirmed",
-          "Preparing",
-          "Ready",
-          "Served",
-          "Finalized",
-          "Accept",
-          "Accepted",
-          "Being Prepared",
-          "BeingPrepared",
-        ];
-
-        const existingTokens = await Order.find({
-          cartId,
-          serviceType: "TAKEAWAY",
-          orderType: { $ne: "DELIVERY" },
-          status: { $in: activeStatuses },
-          takeawayToken: { $ne: null },
-        })
-          .select("takeawayToken")
-          .lean();
-
-        const usedTokens = new Set(
-          existingTokens
-            .map((o) => o.takeawayToken)
-            .filter((v) => Number.isInteger(v) && v > 0),
-        );
-
-        // Find the smallest positive integer not currently in use
-        let nextToken = 1;
-        while (usedTokens.has(nextToken)) {
-          nextToken += 1;
+        const tokenScopeCartId = normalizeObjectId(cartId);
+        if (!tokenScopeCartId) {
+          console.warn(
+            `[ORDER] Skipping takeaway token allocation due to invalid cartId: ${cartId}`,
+          );
+        } else {
+          const allocation = await resolveTakeawayTokenAllocation({
+            cartId: tokenScopeCartId,
+            preferredToken: requestedTakeawayToken,
+          });
+          if (Number.isInteger(allocation.token) && allocation.token > 0) {
+            orderData.takeawayToken = allocation.token;
+            console.log(
+              `[ORDER] Assigned takeaway token ${orderData.takeawayToken} for cart ${tokenScopeCartId.toString()} (source: ${allocation.source})`,
+            );
+          }
         }
-
-        orderData.takeawayToken = nextToken;
-        console.log(
-          `[ORDER] Generated takeaway token ${orderData.takeawayToken
-          } for cart ${cartId.toString()}`,
-        );
       }
     }
 
@@ -4004,6 +4107,7 @@ const updatePrintStatus = async (req, res) => {
 
 module.exports = {
   createOrder,
+  getNextTakeawayToken,
   addKot,
   addItemsToOrder,
   updateOrderAddons,
