@@ -10,11 +10,58 @@ const toObjectId = (value) => {
   if (!id || !mongoose.Types.ObjectId.isValid(id)) return null;
   return new mongoose.Types.ObjectId(id);
 };
+
+const escapeRegex = (value = "") =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 const sanitizeAddonName = (value) => {
   const normalized = String(value || "")
     .replace(/^\(\s*\+\s*\)\s*/u, "")
     .trim();
   return normalized || "Add-on";
+};
+
+const nullOrMissingCondition = (fieldName) => ({
+  $or: [{ [fieldName]: null }, { [fieldName]: { $exists: false } }],
+});
+
+const buildScopeConditions = (addonData) => {
+  const conditions = [];
+  if (addonData?.cartId) {
+    conditions.push({ cartId: addonData.cartId });
+  } else {
+    conditions.push(nullOrMissingCondition("cartId"));
+  }
+
+  if (addonData?.franchiseId) {
+    conditions.push({ franchiseId: addonData.franchiseId });
+  } else {
+    conditions.push(nullOrMissingCondition("franchiseId"));
+  }
+
+  return conditions;
+};
+
+const findAddonByNameInSameScope = async ({
+  name,
+  cartId = null,
+  franchiseId = null,
+  excludeId = null,
+}) => {
+  const normalizedName = sanitizeAddonName(name);
+  const query = {
+    name: {
+      $regex: `^${escapeRegex(normalizedName)}$`,
+      $options: "i",
+    },
+    $and: buildScopeConditions({ cartId, franchiseId }),
+  };
+
+  if (excludeId) {
+    query._id = { $ne: excludeId };
+  }
+
+  return Addon.findOne(query).select("_id name cartId franchiseId");
 };
 
 const resolveCartAdminFromRef = async (cartRef) => {
@@ -90,6 +137,11 @@ exports.getAddons = async (req, res) => {
         filter.franchiseId = req.user._id;
       }
     } else if (role === "super_admin") {
+      const includeAllScopes =
+        String(req.query.includeAllScopes || "")
+          .trim()
+          .toLowerCase() === "true";
+
       if (cartId) {
         const cartIdObj = toObjectId(cartId);
         filter.cartId = cartIdObj || cartId;
@@ -97,6 +149,17 @@ exports.getAddons = async (req, res) => {
       if (franchiseId) {
         const franchiseIdObj = toObjectId(franchiseId);
         filter.franchiseId = franchiseIdObj || franchiseId;
+      }
+
+      // Default super-admin view should show only global template add-ons.
+      // Cart/franchise-scoped add-ons are returned only when explicitly filtered.
+      if (!includeAllScopes && !cartId && !franchiseId) {
+        filter = {
+          $and: [
+            nullOrMissingCondition("cartId"),
+            nullOrMissingCondition("franchiseId"),
+          ],
+        };
       }
     }
 
@@ -300,6 +363,18 @@ exports.createAddon = async (req, res) => {
       }
     }
 
+    const duplicateAddon = await findAddonByNameInSameScope({
+      name: addonData.name,
+      cartId: addonData.cartId || null,
+      franchiseId: addonData.franchiseId || null,
+    });
+    if (duplicateAddon) {
+      return res.status(409).json({
+        success: false,
+        message: "Add-on with this name already exists in this scope",
+      });
+    }
+
     const addon = await Addon.create(addonData);
 
     res.status(201).json({
@@ -367,11 +442,27 @@ exports.updateAddon = async (req, res) => {
       }
     }
 
+    if (req.user.role !== "admin" && name !== undefined) {
+      const normalizedName = sanitizeAddonName(name);
+      const duplicateAddon = await findAddonByNameInSameScope({
+        name: normalizedName,
+        cartId: addon.cartId || null,
+        franchiseId: addon.franchiseId || null,
+        excludeId: addon._id,
+      });
+      if (duplicateAddon) {
+        return res.status(409).json({
+          success: false,
+          message: "Add-on with this name already exists in this scope",
+        });
+      }
+      addon.name = normalizedName;
+    }
+
     // Apply updates
     if (req.user.role === "admin") {
       if (isAvailable !== undefined) addon.isAvailable = Boolean(isAvailable);
     } else {
-      if (name !== undefined) addon.name = sanitizeAddonName(name);
       if (description !== undefined) addon.description = description;
       if (price !== undefined) addon.price = Number(price);
       if (icon !== undefined) addon.icon = icon;

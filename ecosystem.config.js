@@ -13,10 +13,10 @@ module.exports = {
       name: 'terra-cart-backend',
       script: './server.js',
       cwd: './backend',
-      instances: 1, // Use 1 for single instance, or 'max' for cluster mode
-      exec_mode: 'fork', // Use 'fork' for single instance, 'cluster' for cluster mode
+      instances: process.env.PM2_INSTANCES || 'max', // Scale with CPU cores by default
+      exec_mode: process.env.PM2_EXEC_MODE || 'cluster',
       watch: false, // Set to true for development
-      max_memory_restart: '500M', // Restart if memory exceeds 500MB
+      max_memory_restart: process.env.PM2_MAX_MEMORY || '700M',
       env: {
         NODE_ENV: 'production',
         PORT: 5001,

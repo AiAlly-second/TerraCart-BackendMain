@@ -3,6 +3,51 @@ const User = require("../models/userModel");
 
 // Minimum age as per Indian Labor Laws (18 years for general employment)
 const MINIMUM_WORKING_AGE = 18;
+const MOBILE_EMPLOYEE_ROLES = ["waiter", "cook", "captain", "manager"];
+
+const escapeRegex = (value = "") =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
+
+const findEmployeeByEmailInsensitive = async (email, excludeEmployeeId = null) => {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return null;
+
+  const query = {
+    email: {
+      $regex: `^${escapeRegex(normalizedEmail)}$`,
+      $options: "i",
+    },
+  };
+
+  if (excludeEmployeeId) {
+    query._id = { $ne: excludeEmployeeId };
+  }
+
+  return Employee.findOne(query).select("_id email userId name");
+};
+
+const findUserByEmailInsensitive = async (email, excludeUserId = null) => {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return null;
+
+  const query = {
+    email: {
+      $regex: `^${escapeRegex(normalizedEmail)}$`,
+      $options: "i",
+    },
+  };
+
+  if (excludeUserId) {
+    query._id = { $ne: excludeUserId };
+  }
+
+  return User.findOne(query).select("_id email role employeeId");
+};
+
+const isDuplicateEmailError = (error) =>
+  Boolean(error?.code === 11000 && error?.keyPattern?.email);
 
 // Helper function to calculate age from DOB
 const calculateAge = (dateOfBirth) => {
@@ -281,9 +326,26 @@ exports.createEmployee = async (req, res) => {
       }
     }
     
-    // Store email if provided (for login access)
-    if (employeeData.email) {
-      employeeData.email = employeeData.email.toLowerCase().trim();
+    // Normalize and validate email uniqueness before create
+    const normalizedEmail = employeeData.email
+      ? normalizeEmail(employeeData.email)
+      : "";
+    if (normalizedEmail) {
+      employeeData.email = normalizedEmail;
+
+      const existingEmployee = await findEmployeeByEmailInsensitive(
+        normalizedEmail
+      );
+      if (existingEmployee) {
+        return res.status(409).json({
+          message: "Email already registered for another employee",
+        });
+      }
+
+      const existingUser = await findUserByEmailInsensitive(normalizedEmail);
+      if (existingUser) {
+        return res.status(409).json({ message: "Email already registered" });
+      }
     }
     
     // Extract password for User account creation
@@ -293,59 +355,57 @@ exports.createEmployee = async (req, res) => {
     const employee = await Employee.create(employeeDataToSave);
     
     // If email and password are provided, and employee role is a mobile role, create User account
-    const mobileRoles = ['waiter', 'cook', 'captain', 'manager'];
-    if (employeeData.email && password && mobileRoles.includes(employee.employeeRole)) {
+    if (
+      employeeData.email &&
+      password &&
+      MOBILE_EMPLOYEE_ROLES.includes(employee.employeeRole)
+    ) {
       try {
-        // Check if User account already exists with this email
-        const existingUser = await User.findOne({ email: employeeData.email });
-        
-        if (existingUser) {
-          console.log(`[EMPLOYEE] User account already exists for email: ${employeeData.email}`);
-          // Update existing user's role if needed
-          if (!mobileRoles.includes(existingUser.role)) {
-            existingUser.role = employee.employeeRole;
-          }
-          // Link userId to employee and cafeId to user (User.cafeId is for mobile users linking to cart admin)
-          existingUser.cafeId = employee.cartId; // Employee.cartId -> User.cafeId (User model field for mobile users)
-          existingUser.employeeId = employee._id;
-          existingUser.franchiseId = employee.franchiseId || existingUser.franchiseId;
-          await existingUser.save();
-          
-          // Link userId in employee
-          employee.userId = existingUser._id;
-          await employee.save();
-          
-          console.log(`[EMPLOYEE] Updated existing user role to: ${employee.employeeRole} and linked userId`);
-        } else {
-          // Create new User account for mobile login
-          const userData = {
-            name: employee.name,
-            email: employeeData.email,
-            password: password,
-            role: employee.employeeRole, // Set role to match employee role (waiter, cook, captain, manager)
-            cafeId: employee.cartId, // Employee.cartId -> User.cafeId (User model field for mobile users)
-            employeeId: employee._id, // Link to employee
-          };
-          
-          // Set franchiseId if employee has one
-          if (employee.franchiseId) {
-            userData.franchiseId = employee.franchiseId;
-          }
-          
-          const user = await User.create(userData);
-          
-          // Link userId in employee
-          employee.userId = user._id;
-          await employee.save();
-          
-          console.log(`[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`);
-          console.log(`[EMPLOYEE] User ID: ${user._id}, Email: ${user.email}, CafeId: ${user.cafeId}`);
-          console.log(`[EMPLOYEE] Employee userId linked: ${employee.userId}`);
+        // Create new User account for mobile login
+        const userData = {
+          name: employee.name,
+          email: employeeData.email,
+          password: password,
+          role: employee.employeeRole, // Set role to match employee role (waiter, cook, captain, manager)
+          cafeId: employee.cartId, // Employee.cartId -> User.cafeId (User model field for mobile users)
+          employeeId: employee._id, // Link to employee
+        };
+
+        // Set franchiseId if employee has one
+        if (employee.franchiseId) {
+          userData.franchiseId = employee.franchiseId;
         }
+
+        const user = await User.create(userData);
+
+        // Link userId in employee
+        employee.userId = user._id;
+        await employee.save();
+
+        console.log(
+          `[EMPLOYEE] Created User account for employee: ${employee.name} (${employee.employeeRole})`
+        );
+        console.log(
+          `[EMPLOYEE] User ID: ${user._id}, Email: ${user.email}, CafeId: ${user.cafeId}`
+        );
+        console.log(`[EMPLOYEE] Employee userId linked: ${employee.userId}`);
       } catch (userError) {
-        console.error('[EMPLOYEE] Error creating User account:', userError.message);
-        // Don't fail employee creation if User creation fails - log error but continue
-        // Employee can still be created, and User account can be created manually later
+        console.error("[EMPLOYEE] Error creating User account:", userError.message);
+        // Roll back employee creation if login account creation fails.
+        await Employee.findByIdAndDelete(employee._id).catch((rollbackErr) => {
+          console.error(
+            "[EMPLOYEE] Failed to rollback employee after user create failure:",
+            rollbackErr.message
+          );
+        });
+
+        if (isDuplicateEmailError(userError)) {
+          return res.status(409).json({ message: "Email already registered" });
+        }
+        return res.status(400).json({
+          message:
+            userError.message || "Failed to create employee login account",
+        });
       }
     }
     
@@ -362,6 +422,9 @@ exports.createEmployee = async (req, res) => {
     
     return res.status(201).json(employee);
   } catch (err) {
+    if (isDuplicateEmailError(err)) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
     return res.status(500).json({ message: err.message });
   }
 };
@@ -443,7 +506,33 @@ exports.updateEmployee = async (req, res) => {
 
     // Handle email update (normalize if provided)
     if (hasEmailField) {
-      req.body.email = req.body.email ? req.body.email.toLowerCase().trim() : null;
+      req.body.email = req.body.email ? normalizeEmail(req.body.email) : null;
+
+      if (req.body.email) {
+        const duplicateEmployee = await findEmployeeByEmailInsensitive(
+          req.body.email,
+          employee._id
+        );
+        if (duplicateEmployee) {
+          return res.status(409).json({
+            message: "Email already registered for another employee",
+          });
+        }
+
+        const duplicateUser = await findUserByEmailInsensitive(req.body.email);
+        const sameLinkedUser =
+          duplicateUser &&
+          employee.userId &&
+          duplicateUser._id.toString() === employee.userId.toString();
+        const sameEmployeeOnUser =
+          duplicateUser &&
+          duplicateUser.employeeId &&
+          duplicateUser.employeeId.toString() === employee._id.toString();
+
+        if (duplicateUser && !sameLinkedUser && !sameEmployeeOnUser) {
+          return res.status(409).json({ message: "Email already registered" });
+        }
+      }
     }
     
     // Extract password for User account creation/update
@@ -454,8 +543,7 @@ exports.updateEmployee = async (req, res) => {
     
     // Keep User login in sync for mobile roles.
     // Supports: email-only update, password-only update, and email+password update.
-    const mobileRoles = ['waiter', 'cook', 'captain', 'manager'];
-    if (mobileRoles.includes(employee.employeeRole)) {
+    if (MOBILE_EMPLOYEE_ROLES.includes(employee.employeeRole)) {
       const wantsCredentialSync = hasEmailField || passwordProvided || Boolean(employee.userId);
 
       if (wantsCredentialSync) {
@@ -468,12 +556,35 @@ exports.updateEmployee = async (req, res) => {
 
         // Fallback: find by current email if link is missing/stale
         if (!user && employee.email) {
-          user = await User.findOne({ email: employee.email });
+          user = await findUserByEmailInsensitive(employee.email);
         }
 
         // If email was changed and link is missing, try old email before creating a new account
         if (!user && previousEmail && previousEmail !== employee.email) {
-          user = await User.findOne({ email: previousEmail });
+          user = await findUserByEmailInsensitive(previousEmail);
+        }
+
+        if (
+          user &&
+          user.employeeId &&
+          user.employeeId.toString() !== employee._id.toString()
+        ) {
+          return res.status(409).json({
+            message: "Email already linked to another employee account",
+          });
+        }
+
+        if (
+          user &&
+          ["super_admin", "franchise_admin", "admin", "customer"].includes(
+            user.role
+          ) &&
+          (!user.employeeId ||
+            user.employeeId.toString() !== employee._id.toString())
+        ) {
+          return res.status(409).json({
+            message: "Email already registered for another account",
+          });
         }
 
         if (user) {
@@ -483,13 +594,13 @@ exports.updateEmployee = async (req, res) => {
           }
 
           if (employee.email && user.email !== employee.email) {
-            const emailConflict = await User.findOne({
-              email: employee.email,
-              _id: { $ne: user._id },
-            }).lean();
+            const emailConflict = await findUserByEmailInsensitive(
+              employee.email,
+              user._id
+            );
             if (emailConflict) {
               return res
-                .status(400)
+                .status(409)
                 .json({ message: "Email already exists for another account" });
             }
             user.email = employee.email;
@@ -530,10 +641,10 @@ exports.updateEmployee = async (req, res) => {
             });
           }
 
-          const emailConflict = await User.findOne({ email: employee.email }).lean();
+          const emailConflict = await findUserByEmailInsensitive(employee.email);
           if (emailConflict) {
             return res
-              .status(400)
+              .status(409)
               .json({ message: "Email already exists for another account" });
           }
 
@@ -574,6 +685,9 @@ exports.updateEmployee = async (req, res) => {
     
     return res.json(employee);
   } catch (err) {
+    if (isDuplicateEmailError(err)) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
     return res.status(500).json({ message: err.message });
   }
 };

@@ -12,6 +12,33 @@ const {
 const { addSignedUrlsToUser } = require("../utils/signedUrl");
 
 const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
+const franchiseDocsDir = path.join(__dirname, "..", "uploads", "franchise-docs");
+
+const escapeRegex = (value = "") =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
+
+const findUserByEmailInsensitive = async (email, excludeUserId = null) => {
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return null;
+
+  const query = {
+    email: {
+      $regex: `^${escapeRegex(normalizedEmail)}$`,
+      $options: "i",
+    },
+  };
+
+  if (excludeUserId) {
+    query._id = { $ne: excludeUserId };
+  }
+
+  return User.findOne(query).select("_id email role");
+};
+
+const isDuplicateEmailError = (error) =>
+  Boolean(error?.code === 11000 && error?.keyPattern?.email);
 
 // Configure multer for franchise document uploads
 const uploadFranchise = multer({
@@ -100,7 +127,7 @@ exports.loginUser = async (req, res) => {
     }
 
     // Find user by email (case-insensitive)
-    const normalizedEmail = email.toLowerCase().trim();
+    const normalizedEmail = normalizeEmail(email);
     let user = await User.findOne({ email: normalizedEmail });
 
     // Check if this is a mobile app login
@@ -436,11 +463,10 @@ exports.createUser = async (req, res) => {
     }
 
     // Check if email already exists
-    const existingUser = await User.findOne({
-      email: email.toLowerCase().trim(),
-    });
+    const normalizedEmail = normalizeEmail(email);
+    const existingUser = await findUserByEmailInsensitive(normalizedEmail);
     if (existingUser) {
-      return res.status(400).json({ message: "Email already registered" });
+      return res.status(409).json({ message: "Email already registered" });
     }
 
     // Validate role
@@ -474,7 +500,7 @@ exports.createUser = async (req, res) => {
 
     const userData = {
       name,
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
       password,
       role,
     };
@@ -586,6 +612,9 @@ exports.createUser = async (req, res) => {
         }
       });
     }
+    if (isDuplicateEmailError(error)) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
     res.status(400).json({ message: error.message });
   }
 };
@@ -606,11 +635,10 @@ exports.registerCafeAdmin = async (req, res) => {
     }
 
     // Check if email already exists
-    const existingUser = await User.findOne({
-      email: email.toLowerCase().trim(),
-    });
+    const normalizedEmail = normalizeEmail(email);
+    const existingUser = await findUserByEmailInsensitive(normalizedEmail);
     if (existingUser) {
-      return res.status(400).json({ message: "Email already registered" });
+      return res.status(409).json({ message: "Email already registered" });
     }
 
     // Get franchise admin ID from authenticated user (if franchise admin is creating)
@@ -677,7 +705,7 @@ exports.registerCafeAdmin = async (req, res) => {
     // Create cafe admin user - directly approved and active
     const userData = {
       name,
-      email: email.toLowerCase().trim(),
+      email: normalizedEmail,
       password,
       role: "admin",
       cartName,
@@ -912,6 +940,9 @@ exports.registerCafeAdmin = async (req, res) => {
           }
         }
       });
+    }
+    if (isDuplicateEmailError(error)) {
+      return res.status(409).json({ message: "Email already registered" });
     }
     res.status(400).json({ message: error.message });
   }
@@ -1436,7 +1467,22 @@ exports.updateUser = async (req, res) => {
     console.log(`[UPDATE_USER] Extracted name: ${name}`);
 
     if (name !== undefined) user.name = name;
-    if (email !== undefined) user.email = email.toLowerCase().trim();
+    if (email !== undefined) {
+      const normalizedEmail = normalizeEmail(email);
+      if (!normalizedEmail) {
+        return res.status(400).json({ message: "Email cannot be empty" });
+      }
+
+      const emailOwner = await findUserByEmailInsensitive(
+        normalizedEmail,
+        user._id
+      );
+      if (emailOwner) {
+        return res.status(409).json({ message: "Email already registered" });
+      }
+
+      user.email = normalizedEmail;
+    }
     if (password !== undefined && password.trim() !== "") {
       // Password will be hashed by pre-save hook
       user.password = password;
@@ -1721,6 +1767,9 @@ exports.updateUser = async (req, res) => {
 
     res.json(userResponse);
   } catch (error) {
+    if (isDuplicateEmailError(error)) {
+      return res.status(409).json({ message: "Email already registered" });
+    }
     res.status(400).json({ message: error.message });
   }
 };

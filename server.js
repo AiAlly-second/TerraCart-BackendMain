@@ -6,9 +6,13 @@
 const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
+const mongoose = require("mongoose");
 const path = require("path");
 const cors = require("cors");
+const compression = require("compression");
 const dotenv = require("dotenv");
+const { createClient } = require("redis");
+const { createAdapter } = require("@socket.io/redis-adapter");
 const connectDB = require("./config/db");
 const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
 const {
@@ -92,6 +96,12 @@ process.on("unhandledRejection", (reason, promise) => {
 // Initialize Express app
 const app = express();
 const server = http.createServer(app);
+let redisPubClient;
+let redisSubClient;
+
+// Respect client IP/HTTPS headers when running behind ALB / reverse proxy
+const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
+app.set("trust proxy", Number.isNaN(trustProxyHops) ? 1 : trustProxyHops);
 
 // Socket.IO setup
 const io = socketIo(server, {
@@ -100,7 +110,36 @@ const io = socketIo(server, {
   pingInterval: 25000,
 });
 
+const setupSocketRedisAdapter = async () => {
+  const redisUrl = process.env.REDIS_URL;
+  if (!redisUrl) return;
+
+  const pubClient = createClient({ url: redisUrl });
+  const subClient = pubClient.duplicate();
+
+  pubClient.on("error", (err) => {
+    console.error("[REDIS] Socket pub client error:", err.message);
+  });
+  subClient.on("error", (err) => {
+    console.error("[REDIS] Socket sub client error:", err.message);
+  });
+
+  await Promise.all([pubClient.connect(), subClient.connect()]);
+  io.adapter(createAdapter(pubClient, subClient));
+
+  redisPubClient = pubClient;
+  redisSubClient = subClient;
+};
+
 // Middleware
+app.use(
+  compression({
+    threshold: Number.parseInt(
+      process.env.COMPRESSION_THRESHOLD_BYTES || "1024",
+      10
+    ),
+  })
+);
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cors(getCorsConfig()));
@@ -150,11 +189,14 @@ app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queu
 const healthRoutes = require("./routes/healthRoutes");
 app.use("/api", healthRoutes);
 app.get("/health", (req, res) => {
-  res.json({ 
-    status: "healthy", 
+  const dbReady = mongoose.connection.readyState === 1;
+  const status = dbReady ? "healthy" : "degraded";
+  res.status(dbReady ? 200 : 503).json({
+    status,
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || "development",
+    dbState: mongoose.connection.readyState,
   });
 });
 
@@ -311,8 +353,26 @@ app.use((req, res) => {
 const startServer = async () => {
   try {
     await connectDB();
+    await setupSocketRedisAdapter();
 
     const PORT = process.env.PORT || 5001;
+    const keepAliveTimeoutMs = Number.parseInt(
+      process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || "65000",
+      10
+    );
+    const requestTimeoutMs = Number.parseInt(
+      process.env.HTTP_REQUEST_TIMEOUT_MS || "120000",
+      10
+    );
+
+    if (!Number.isNaN(keepAliveTimeoutMs) && keepAliveTimeoutMs > 0) {
+      server.keepAliveTimeout = keepAliveTimeoutMs;
+      server.headersTimeout = keepAliveTimeoutMs + 5000;
+    }
+    if (!Number.isNaN(requestTimeoutMs) && requestTimeoutMs > 0) {
+      server.requestTimeout = requestTimeoutMs;
+    }
+
     // CRITICAL: Omit host to listen on all interfaces (IPv4 and IPv6)
     // This resolves 'localhost' resolution issues in some environments
     server.listen(PORT, () => {
@@ -326,5 +386,26 @@ const startServer = async () => {
 };
 
 startServer();
+
+const closeRedisClients = async () => {
+  await new Promise((resolve) => {
+    if (!server.listening) return resolve();
+    server.close(() => resolve());
+  });
+  await Promise.allSettled([
+    redisPubClient?.quit?.(),
+    redisSubClient?.quit?.(),
+  ]);
+  await Promise.allSettled([mongoose.connection.close()]);
+};
+
+process.on("SIGTERM", async () => {
+  await closeRedisClients();
+  process.exit(0);
+});
+
+process.on("SIGINT", async () => {
+  await closeRedisClients();
+});
 
 module.exports = { app, server, io };
