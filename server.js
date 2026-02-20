@@ -29,8 +29,8 @@ const {
   getCorsConfig,
 } = require("./middleware/securityMiddleware");
 
-// Load env vars
-dotenv.config();
+// Always load backend/.env (do not use .env.production)
+dotenv.config({ path: path.join(__dirname, ".env") });
 
 // Silence backend runtime console output by default.
 // Set BACKEND_ENABLE_CONSOLE_LOGS=true to re-enable logs when needed.
