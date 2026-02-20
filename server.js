@@ -39,6 +39,9 @@ const fallbackEnvPath = path.join(__dirname, ".env");
 
 dotenv.config({
   path: fs.existsSync(preferredEnvPath) ? preferredEnvPath : fallbackEnvPath,
+  // PM2 can retain stale environment variables between restarts.
+  // Force the selected env file to be the source of truth.
+  override: true,
 });
 
 // Silence backend runtime console output by default.
