@@ -7,7 +7,6 @@ const express = require("express");
 const http = require("http");
 const socketIo = require("socket.io");
 const mongoose = require("mongoose");
-const fs = require("fs");
 const path = require("path");
 const cors = require("cors");
 const compression = require("compression");
@@ -30,19 +29,8 @@ const {
   getCorsConfig,
 } = require("./middleware/securityMiddleware");
 
-// Load env vars (.env.production in production, else .env)
-const preferredEnvPath =
-  process.env.NODE_ENV === "production"
-    ? path.join(__dirname, ".env.production")
-    : path.join(__dirname, ".env");
-const fallbackEnvPath = path.join(__dirname, ".env");
-
-dotenv.config({
-  path: fs.existsSync(preferredEnvPath) ? preferredEnvPath : fallbackEnvPath,
-  // PM2 can retain stale environment variables between restarts.
-  // Force the selected env file to be the source of truth.
-  override: true,
-});
+// Load env vars
+dotenv.config();
 
 // Silence backend runtime console output by default.
 // Set BACKEND_ENABLE_CONSOLE_LOGS=true to re-enable logs when needed.
