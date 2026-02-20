@@ -6100,18 +6100,61 @@ const pushToCartAdminsInternal = async (cartId = null) => {
   // Cart admins can see all shared data without need for cart-specific copies
   // This prevents duplicates and ensures data consistency
 
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ⚠️ FUNCTION DISABLED - Using shared ingredients/BOMs approach`);
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Cart admins automatically see all shared (cartId: null) ingredients and BOMs`);
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] No cart-specific copies will be created`);
+  const targetCartId = cartId || null;
+  const cartFilter = {
+    role: "admin",
+    isActive: { $ne: false },
+  };
+  if (targetCartId) {
+    cartFilter._id = mongoose.Types.ObjectId.isValid(targetCartId)
+      ? new mongoose.Types.ObjectId(targetCartId)
+      : targetCartId;
+  }
+
+  const [cartAdmins, sharedIngredientCount, sharedRecipeCount] =
+    await Promise.all([
+      User.find(cartFilter)
+        .select("_id name cartName cartCode email")
+        .lean(),
+      Ingredient.countDocuments({
+        cartId: null,
+        isActive: { $ne: false },
+      }),
+      Recipe.countDocuments({
+        cartId: null,
+        isActive: { $ne: false },
+      }),
+    ]);
+
+  if (targetCartId && cartAdmins.length === 0) {
+    throw new Error("Cart admin not found");
+  }
+
+  console.log(
+    `[PUSH_TO_CART_ADMINS_INTERNAL] Shared mode active - no copy push required. Targets: ${cartAdmins.length}, shared ingredients: ${sharedIngredientCount}, shared BOMs: ${sharedRecipeCount}`
+  );
 
   return {
     success: true,
-    message: "Push functionality disabled - all carts use shared ingredients and BOMs (no duplication needed)",
+    message:
+      "Shared mode active. Cart admins automatically read shared ingredients/BOMs (no duplication).",
     data: {
       ingredients: { created: 0, updated: 0, skipped: 0 },
       recipes: { created: 0, updated: 0, skipped: 0 },
-      cartAdmins: []
-    }
+      cartAdmins: cartAdmins.map((cartAdmin) => ({
+        cartAdminId: cartAdmin._id.toString(),
+        cartAdminName: cartAdmin.name || cartAdmin.cartName || "Unknown",
+        cartCode: cartAdmin.cartCode || null,
+        ingredients: { created: 0, updated: 0, skipped: 0 },
+        recipes: { created: 0, updated: 0, skipped: 0 },
+        mode: "shared",
+      })),
+      shared: {
+        mode: "shared",
+        ingredients: sharedIngredientCount,
+        recipes: sharedRecipeCount,
+      },
+    },
   };
 
   /* DISABLED CODE - Kept for reference
@@ -6510,9 +6553,10 @@ exports.pushToCartAdmins = async (req, res) => {
       });
     }
 
-    const { cartId } = req.body; // Optional: push to specific cart admin, or all if not provided
+    const { cartId, outletId } = req.body || {};
+    const targetCartId = cartId || outletId || null; // outletId kept for backward compatibility
 
-    const result = await pushToCartAdminsInternal(cartId);
+    const result = await pushToCartAdminsInternal(targetCartId);
     res.json(result);
   } catch (error) {
     console.error("[PUSH_TO_CART_ADMINS] Error:", error);
