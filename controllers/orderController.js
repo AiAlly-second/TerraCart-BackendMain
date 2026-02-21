@@ -2285,6 +2285,15 @@ const getOrders = async (req, res) => {
     }
     // For super_admin, no query-level restriction (see all orders)
 
+    // TAKEAWAY/PICKUP/DELIVERY: hide order from cart admin until payment is done (status Pending = unpaid; after pay, status becomes Paid)
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { serviceType: { $nin: ["TAKEAWAY", "PICKUP", "DELIVERY"] } },
+        { status: { $ne: "Pending" } },
+      ],
+    });
+
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
     // Use select to limit fields and improve performance
