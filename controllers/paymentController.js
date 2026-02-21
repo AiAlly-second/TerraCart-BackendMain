@@ -370,6 +370,12 @@ exports.markPaymentPaid = async (req, res) => {
         io.emit("paymentUpdated", formatPaymentResponse(payment));
         io.emit("orderUpdated", order);
       }
+      if (order.cartId && io && emitToCafe) {
+        emitToCafe(io, order.cartId.toString(), "order:created", order);
+        emitToCafe(io, order.cartId.toString(), "newOrder", order);
+        emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+        emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      }
       await releaseTableForOrder(order, io, emitToCafe);
 
       if (needsFallbackConsumption) {

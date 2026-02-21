@@ -1753,9 +1753,14 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
+    // TAKEAWAY/PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
+    const isTakeawayAwaitingPayment =
+      ["TAKEAWAY", "PICKUP", "DELIVERY"].includes(
+        order.serviceType || ""
+      ) && order.status === "Pending";
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe) {
+    if (order.cartId && io && emitToCafe && !isTakeawayAwaitingPayment) {
       // Only emit to admin panel - customer frontend uses polling
       emitToCafe(io, order.cartId.toString(), "order:created", order);
       emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
@@ -1774,10 +1779,12 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Print KOT to printer (non-blocking)
-    printKOT(order, kot, 0).catch((err) => {
-      console.error("[ORDER] Failed to print KOT:", err);
-    });
+    // Print KOT to printer (non-blocking). Skip for takeaway awaiting payment – print when payment is done.
+    if (!isTakeawayAwaitingPayment) {
+      printKOT(order, kot, 0).catch((err) => {
+        console.error("[ORDER] Failed to print KOT:", err);
+      });
+    }
 
     return res.status(201).json(order);
   } catch (err) {
@@ -3657,14 +3664,16 @@ const confirmPaymentByCustomer = async (req, res) => {
       }
     }
 
-    // Emit socket event to cafe room
+    // Emit socket event to cafe room (so cart admin sees the order when payment is confirmed)
     const emitToCafe = req.app.get("emitToCafe");
 
     // Release table
     await releaseTableForOrder(order, io, emitToCafe);
-    if (order.cartId) {
+    if (order.cartId && emitToCafe) {
+      emitToCafe(io, order.cartId.toString(), "order:created", order);
+      emitToCafe(io, order.cartId.toString(), "newOrder", order);
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
     }
 
     console.log("Payment confirmed by customer:", order._id);
