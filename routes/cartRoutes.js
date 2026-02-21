@@ -6,6 +6,7 @@ const {
   updateCartSettings,
   getMyCartSettings,
   getCartByAdminId,
+  getCartContactPublic,
 } = require("../controllers/cartController");
 const { optionalProtect, protect, authorize } = require("../middleware/authMiddleware");
 
@@ -14,6 +15,7 @@ const router = express.Router();
 // Public routes for customer frontend
 router.get("/nearby", optionalProtect, getNearbyCarts);
 router.get("/available", optionalProtect, getAvailableCarts);
+router.get("/public-contact", getCartContactPublic);
 
 // Protected routes for cart admins - MUST come before /:id route
 router.get("/my-settings", protect, authorize(["admin", "cart_admin"]), getMyCartSettings);

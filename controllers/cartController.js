@@ -1,6 +1,7 @@
 const Cart = require("../models/cartModel");
 const User = require("../models/userModel");
 const Franchise = require("../models/franchiseModel");
+const mongoose = require("mongoose");
 const { isWithinDeliveryRange, calculateDistance } = require("../utils/distanceCalculator");
 
 function pickFirstNonEmptyString(...values) {
@@ -340,6 +341,8 @@ exports.updateCartSettings = async (req, res) => {
       pinCode,
       address,
       coordinates,
+      contactPhone,
+      contactEmail,
     } = req.body;
 
     // Find cart by cartAdminId (cart admin can only update their own cart)
@@ -385,6 +388,8 @@ exports.updateCartSettings = async (req, res) => {
     if (pinCode !== undefined) updateData.pinCode = pinCode;
     if (address !== undefined) updateData.address = address;
     if (coordinates !== undefined) updateData.coordinates = coordinates;
+    if (contactPhone !== undefined) updateData.contactPhone = contactPhone ? String(contactPhone).trim() : null;
+    if (contactEmail !== undefined) updateData.contactEmail = contactEmail ? String(contactEmail).trim() : null;
 
     await Cart.findByIdAndUpdate(cart._id, { $set: updateData }, { new: true });
 
@@ -567,7 +572,7 @@ exports.getCartByAdminId = async (req, res) => {
     }
 
     const cart = await Cart.findOne({ cartAdminId: userId })
-      .select("name location address coordinates pickupEnabled deliveryEnabled deliveryRadius deliveryCharge")
+      .select("name location address coordinates pickupEnabled deliveryEnabled deliveryRadius deliveryCharge contactPhone contactEmail")
       .populate("cartAdminId", "name cartName cafeName email")
       .populate("franchiseId", "name")
       .lean();
@@ -627,6 +632,68 @@ exports.getCartByAdminId = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to get cart",
+    });
+  }
+};
+
+/**
+ * Get cart contact info for customer (Contact us on menu page)
+ * @route GET /api/carts/public-contact?cartId=...
+ * @access Public - cartId can be cart document _id OR cart admin user _id
+ */
+exports.getCartContactPublic = async (req, res) => {
+  try {
+    const cartRef = typeof req.query.cartId === "string" ? req.query.cartId.trim() : "";
+    if (!cartRef) {
+      return res.json({ success: true, data: null });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(cartRef)) {
+      return res.json({ success: true, data: null });
+    }
+
+    // Support both:
+    // 1) cart document id
+    // 2) cart admin user id (used by table/cart context in many customer flows)
+    let cart = await Cart.findById(cartRef)
+      .select("name contactPhone contactEmail cartAdminId")
+      .lean();
+
+    if (!cart) {
+      cart = await Cart.findOne({ cartAdminId: cartRef })
+        .select("name contactPhone contactEmail cartAdminId")
+        .lean();
+    }
+
+    if (!cart) {
+      return res.json({ success: true, data: null });
+    }
+
+    let fallbackUser = null;
+    if (cart.cartAdminId) {
+      fallbackUser = await User.findById(cart.cartAdminId)
+        .select("name cartName phone email")
+        .lean();
+    }
+
+    const name = resolveCartDisplayName({
+      ...cart,
+      cartAdminId: fallbackUser || cart.cartAdminId,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        name,
+        contactPhone: cart.contactPhone || fallbackUser?.phone || null,
+        contactEmail: cart.contactEmail || fallbackUser?.email || null,
+      },
+    });
+  } catch (error) {
+    console.error("[CART] Error getting public cart contact:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get contact",
     });
   }
 };
