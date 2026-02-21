@@ -3085,6 +3085,42 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
+    // TAKEAWAY/PICKUP/DELIVERY: block order from proceeding until payment is complete (admin must mark payment paid first)
+    const isTakeawayLike =
+      order.serviceType === "TAKEAWAY" ||
+      order.orderType === "PICKUP" ||
+      order.orderType === "DELIVERY";
+    const isProceedingStatus = [
+      "Confirmed",
+      "Preparing",
+      "Being Prepared",
+      "BeingPrepared",
+      "Ready",
+      "Completed",
+      "Served",
+    ].includes(status);
+    if (isTakeawayLike && isProceedingStatus) {
+      const alreadyPaid =
+        order.status === "Paid" || order.paymentStatus === "PAID";
+      let paymentComplete = alreadyPaid;
+      if (!paymentComplete) {
+        const paidPayment = await Payment.findOne({
+          orderId: order._id,
+          status: "PAID",
+        })
+          .limit(1)
+          .lean();
+        paymentComplete = !!paidPayment;
+      }
+      if (!paymentComplete) {
+        return res.status(400).json({
+          message:
+            "Payment must be marked complete before this order can proceed. Please confirm payment (online or cash) in the Payments panel first.",
+          code: "PAYMENT_REQUIRED",
+        });
+      }
+    }
+
     // Log the status change (admin has full control)
     console.log("Status update (admin flexible):", {
       orderId: order._id,
