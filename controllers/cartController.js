@@ -550,3 +550,83 @@ exports.getMyCartSettings = async (req, res) => {
     });
   }
 };
+
+/**
+ * Get cart by cart admin user ID (for invoice address etc.)
+ * @route GET /api/carts/by-admin/:userId
+ * @access Protected - cart admin (own cart), franchise admin (carts in franchise), super_admin (any)
+ */
+exports.getCartByAdminId = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const cart = await Cart.findOne({ cartAdminId: userId })
+      .select("name location address coordinates pickupEnabled deliveryEnabled deliveryRadius deliveryCharge")
+      .populate("cartAdminId", "name cartName cafeName email")
+      .populate("franchiseId", "name")
+      .lean();
+
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: "Cart not found for this user",
+      });
+    }
+
+    // Authorization: same user (cart admin), franchise admin of this cart, or super_admin
+    const requestUserId = req.user?._id?.toString();
+    const targetUserId = userId.toString?.() ? userId.toString() : String(userId);
+
+    if (req.user?.role === "super_admin") {
+      // allow
+    } else if (req.user?.role === "franchise_admin") {
+      const cartFranchiseId = cart.franchiseId?._id?.toString() || cart.franchiseId?.toString();
+      if (!cartFranchiseId || cartFranchiseId !== requestUserId) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Cart does not belong to your franchise.",
+        });
+      }
+    } else if (req.user?.role === "admin" || req.user?.role === "cart_admin") {
+      if (requestUserId !== targetUserId) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only view your own cart.",
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+      });
+    }
+
+    // Resolve display address from Cart (same as order invoice)
+    const addressStr =
+      (cart.address && (cart.address.fullAddress || [cart.address.street, cart.address.city, cart.address.state, cart.address.zipCode].filter(Boolean).join(", "))) ||
+      cart.location ||
+      null;
+
+    res.json({
+      success: true,
+      data: {
+        ...cart,
+        name: resolveCartDisplayName(cart),
+        address: addressStr || undefined,
+        location: cart.location || undefined,
+      },
+    });
+  } catch (error) {
+    console.error("[CART] Error getting cart by admin id:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get cart",
+    });
+  }
+};

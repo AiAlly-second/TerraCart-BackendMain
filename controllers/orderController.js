@@ -5,6 +5,7 @@ const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const Employee = require("../models/employeeModel");
+const Cart = require("../models/cartModel");
 const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
@@ -2475,7 +2476,7 @@ const getOrderById = async (req, res) => {
       console.warn(`[INVOICE] Order ${order._id} has no franchiseId`);
     }
 
-    // Populate cafe address if cartId exists and not already populated
+    // Populate cafe/cart address for invoice (cartId is cart admin User _id)
     if (order.cartId && !order.cafe) {
       const User = require("../models/userModel");
       const cartId = order.cartId.toString
@@ -2492,10 +2493,27 @@ const getOrderById = async (req, res) => {
         const cafe = await User.findById(cartId)
           .select("address cartName location name")
           .lean();
-        if (cafe) {
+        let address = (cafe && (cafe.address || cafe.location)) || null;
+        let cafeName = (cafe && (cafe.cartName || cafe.name)) || null;
+
+        // Prefer Cart document address (from cart registration/settings)
+        const cartDoc = await Cart.findOne({ cartAdminId: order.cartId })
+          .select("address location")
+          .lean();
+        if (cartDoc) {
+          const cartAddress =
+            (cartDoc.address && (cartDoc.address.fullAddress || [cartDoc.address.street, cartDoc.address.city, cartDoc.address.state, cartDoc.address.zipCode].filter(Boolean).join(", "))) ||
+            cartDoc.location ||
+            null;
+          if (cartAddress) address = cartAddress;
+        }
+
+        if (cafe || address || cafeName) {
           order.cafe = {
-            address: cafe.address || cafe.location,
-            cartName: cafe.cartName || cafe.name,
+            address: address || undefined,
+            cartName: cafeName,
+            cafeName: cafeName,
+            name: cafeName,
           };
           setCachedCafe(cartId, order.cafe);
           console.log(`[INVOICE] Cart data loaded:`, {
@@ -2507,8 +2525,7 @@ const getOrderById = async (req, res) => {
         }
       }
     } else if (order.cartId && order.cafe) {
-      // Data already populated, skip fetching
-      // No need to log - this is expected
+      // Data already populated (e.g. from cache), skip fetching
     } else {
       console.warn(`[INVOICE] Order ${order._id} has no cartId`);
     }
@@ -3390,13 +3407,17 @@ const cancelOrderByCustomer = async (req, res) => {
           .json({ message: "Not authorized, invalid token" });
       }
     } else if (order.serviceType === "TAKEAWAY") {
-      // Verify sessionToken for takeaway orders
-      // CRITICAL: Be more lenient for takeaway orders - allow if:
-      // 1. Order has no sessionToken (old orders created before sessionToken was required)
-      // 2. SessionToken matches order's sessionToken
-      // 3. SessionToken is provided and order has no sessionToken (backward compatibility)
-      if (order.sessionToken) {
-        // Order has a sessionToken - must match
+      // Verify sessionToken for takeaway orders when possible.
+      // For Pending takeaway orders (customer backed out from payment): always allow cancel
+      // so the order is removed from cart admin view without requiring sessionToken match.
+      const isPendingTakeaway =
+        order.status === "Pending" && order.serviceType === "TAKEAWAY";
+      if (isPendingTakeaway) {
+        // Allow cancel without sessionToken so "back without payment" always succeeds
+        console.log(
+          `[ORDER] Takeaway Pending order ${orderId} - allowing cancellation (customer left payment)`,
+        );
+      } else if (order.sessionToken) {
         if (!sessionToken) {
           return res.status(401).json({ message: "Not authorized, no token" });
         }
@@ -3406,10 +3427,8 @@ const cancelOrderByCustomer = async (req, res) => {
             .json({ message: "Not authorized, invalid token" });
         }
       } else {
-        // Order has no sessionToken - allow cancellation for backward compatibility
-        // This handles old orders created before sessionToken was required
         console.log(
-          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation for backward compatibility`,
+          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation`,
         );
       }
     }
