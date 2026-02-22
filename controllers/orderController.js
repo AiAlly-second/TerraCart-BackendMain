@@ -80,39 +80,54 @@ const sanitizeAddonName = (value) => {
 const normalizeSelectedAddons = (addons) => {
   if (!Array.isArray(addons)) return [];
 
-  return addons
-    .map((addon) => {
-      if (!addon || typeof addon !== "object") return null;
+  const addonMap = new Map();
 
-      const name = sanitizeAddonName(addon.name);
-      const priceValue = Number(addon.price);
-      const price = Number.isFinite(priceValue) && priceValue >= 0 ? priceValue : 0;
-      const qtyValue = Number(addon.quantity);
-      const quantity =
-        Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 1;
+  addons.forEach((addon) => {
+    if (!addon || typeof addon !== "object") return;
 
-      const normalized = {
-        name,
-        price,
-        quantity,
-      };
+    const name = sanitizeAddonName(addon.name);
+    const priceValue = Number(addon.price);
+    const price =
+      Number.isFinite(priceValue) && priceValue >= 0 ? priceValue : 0;
+    const qtyValue = Number(addon.quantity);
+    const quantity =
+      Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 1;
 
-      const rawAddonId = addon.addonId || addon._id || addon.id;
-      const addonIdString =
-        rawAddonId && typeof rawAddonId.toString === "function"
-          ? rawAddonId.toString()
+    const normalized = {
+      name,
+      price,
+      quantity,
+    };
+
+    const rawAddonId = addon.addonId || addon._id || addon.id;
+    const addonIdString =
+      rawAddonId && typeof rawAddonId.toString === "function"
+        ? rawAddonId.toString()
+        : rawAddonId;
+
+    if (addonIdString && mongoose.Types.ObjectId.isValid(addonIdString)) {
+      normalized.addonId =
+        typeof rawAddonId === "string"
+          ? new mongoose.Types.ObjectId(addonIdString)
           : rawAddonId;
+    }
 
-      if (addonIdString && mongoose.Types.ObjectId.isValid(addonIdString)) {
-        normalized.addonId =
-          typeof rawAddonId === "string"
-            ? new mongoose.Types.ObjectId(addonIdString)
-            : rawAddonId;
-      }
+    const dedupeKey = normalized.addonId
+      ? `id:${normalized.addonId.toString()}`
+      : `name:${name.toLowerCase()}:${price}`;
 
-      return normalized;
-    })
-    .filter(Boolean);
+    if (!addonMap.has(dedupeKey)) {
+      addonMap.set(dedupeKey, normalized);
+      return;
+    }
+
+    const existing = addonMap.get(dedupeKey);
+    existing.quantity += quantity;
+  });
+
+  return Array.from(addonMap.values()).filter(
+    (addon) => addon && addon.quantity > 0,
+  );
 };
 
 const mapAcceptedByToAssignedStaff = (acceptedBy, fallbackRole = null) => {
@@ -1064,11 +1079,25 @@ async function buildKotPrintTemplate({
 }
 
 function getOrderBillAmount(order) {
-  if (!order?.kotLines?.length) return 0;
-  const latestKot = order.kotLines[order.kotLines.length - 1];
-  const amount =
+  const latestKot = Array.isArray(order?.kotLines) && order.kotLines.length > 0
+    ? order.kotLines[order.kotLines.length - 1]
+    : null;
+  const kotAmount =
     Number(latestKot?.totalAmount ?? latestKot?.subtotal ?? 0) || 0;
-  return amount > 0 ? amount : 0;
+  const addonsAmount = Array.isArray(order?.selectedAddons)
+    ? order.selectedAddons.reduce((sum, addon) => {
+      if (!addon) return sum;
+      const price = Number(addon.price);
+      if (!Number.isFinite(price) || price < 0) return sum;
+      const qtyValue = Number(addon.quantity);
+      const quantity =
+        Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 1;
+      return sum + price * quantity;
+    }, 0)
+    : 0;
+
+  const amount = kotAmount + addonsAmount;
+  return amount > 0 ? Number(amount.toFixed(2)) : 0;
 }
 
 async function ensurePaymentRecord(order, options = {}) {
@@ -2535,7 +2564,7 @@ const addKot = async (req, res) => {
     JSON.stringify(req.body, null, 2),
   );
   try {
-    const { items } = req.body;
+    const { items, selectedAddons = [] } = req.body;
     const requestKotIdempotencyKey = String(
       req.body?.idempotencyKey || req.headers["x-idempotency-key"] || "",
     ).trim();
@@ -2738,6 +2767,15 @@ const addKot = async (req, res) => {
     }
 
     order.kotLines.push(newKot);
+    const normalizedIncomingAddons = normalizeSelectedAddons(selectedAddons);
+    if (normalizedIncomingAddons.length > 0) {
+      const mergedAddons = normalizeSelectedAddons([
+        ...(Array.isArray(order.selectedAddons) ? order.selectedAddons : []),
+        ...normalizedIncomingAddons,
+      ]);
+      order.selectedAddons = mergedAddons;
+      order.markModified("selectedAddons");
+    }
     if (requestKotIdempotencyKey) {
       const requestKeys = Array.isArray(order.kotRequestKeys)
         ? [...order.kotRequestKeys]
