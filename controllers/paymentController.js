@@ -273,11 +273,30 @@ const getSelectedAddonsAmount = (order) => {
   }, 0);
 };
 
+const getKotItemsAmount = (order) => {
+  if (!Array.isArray(order?.kotLines) || order.kotLines.length === 0) return 0;
+
+  const totalInPaise = order.kotLines.reduce((kotSum, kot) => {
+    const items = Array.isArray(kot?.items) ? kot.items : [];
+    return (
+      kotSum +
+      items.reduce((itemSum, item) => {
+        if (!item || item.returned) return itemSum;
+        const priceInPaise = Number(item.price);
+        if (!Number.isFinite(priceInPaise) || priceInPaise < 0) return itemSum;
+        const qtyValue = Number(item.quantity);
+        const quantity =
+          Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 0;
+        return itemSum + priceInPaise * quantity;
+      }, 0)
+    );
+  }, 0);
+
+  return Number((totalInPaise / 100).toFixed(2));
+};
+
 const getOrderAmount = (order) => {
-  if (!order?.kotLines?.length) return null;
-  const latestKot = order.kotLines[order.kotLines.length - 1];
-  const kotAmountRaw = Number(latestKot.totalAmount || latestKot.subtotal || 0);
-  const kotAmount = Number.isFinite(kotAmountRaw) ? kotAmountRaw : 0;
+  const kotAmount = getKotItemsAmount(order);
   const addonsAmount = getSelectedAddonsAmount(order);
   const totalAmount = kotAmount + addonsAmount;
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) return null;
@@ -614,12 +633,41 @@ exports.getLatestPaymentForOrder = async (req, res) => {
     // Order._id is a String (order number like "ORD-xxxxx"), and Payment.orderId stores the same string
     // So we can directly use orderId to find the payment
     const payment = await Payment.findOne({ orderId })
-      .sort({ createdAt: -1 })
-      .lean();
+      .sort({ createdAt: -1 });
     if (!payment) {
       // Return 200 with null instead of 404 - no payment yet is a valid state
       return res.json(null);
     }
+
+    // Keep pending payment amount aligned with current order bill (all KOT lines + add-ons).
+    if (["PENDING", "PROCESSING", "CASH_PENDING"].includes(payment.status)) {
+      const order = await Order.findById(orderId).select(
+        "kotLines selectedAddons cartId cafeId",
+      );
+      if (order) {
+        const recalculatedAmount = getOrderAmount(order);
+        const currentAmount = Number(payment.amount) || 0;
+        if (
+          recalculatedAmount &&
+          Math.abs(recalculatedAmount - currentAmount) > 0.009
+        ) {
+          payment.amount = recalculatedAmount;
+
+          // Rebuild UPI payload so deep link amount matches latest bill.
+          if (payment.method === "ONLINE") {
+            const cartScopeId = order.cartId || order.cafeId || null;
+            payment.upiPayload = await buildUpiPayload(
+              orderId,
+              recalculatedAmount,
+              cartScopeId,
+            );
+          }
+
+          await payment.save();
+        }
+      }
+    }
+
     return res.json(formatPaymentResponse(payment));
   } catch (err) {
     return res.status(500).json({ message: err.message });

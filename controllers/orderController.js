@@ -1079,11 +1079,29 @@ async function buildKotPrintTemplate({
 }
 
 function getOrderBillAmount(order) {
-  const latestKot = Array.isArray(order?.kotLines) && order.kotLines.length > 0
-    ? order.kotLines[order.kotLines.length - 1]
-    : null;
-  const kotAmount =
-    Number(latestKot?.totalAmount ?? latestKot?.subtotal ?? 0) || 0;
+  const kotAmount = Array.isArray(order?.kotLines)
+    ? toRupees(
+      order.kotLines.reduce((kotSum, kot) => {
+        const items = Array.isArray(kot?.items) ? kot.items : [];
+        return (
+          kotSum +
+          items.reduce((itemSum, item) => {
+            if (!item || item.returned) return itemSum;
+            const priceInPaise = Number(item.price);
+            if (!Number.isFinite(priceInPaise) || priceInPaise < 0) {
+              return itemSum;
+            }
+            const qtyValue = Number(item.quantity);
+            const quantity =
+              Number.isFinite(qtyValue) && qtyValue > 0
+                ? Math.floor(qtyValue)
+                : 0;
+            return itemSum + priceInPaise * quantity;
+          }, 0)
+        );
+      }, 0),
+    )
+    : 0;
   const addonsAmount = Array.isArray(order?.selectedAddons)
     ? order.selectedAddons.reduce((sum, addon) => {
       if (!addon) return sum;
