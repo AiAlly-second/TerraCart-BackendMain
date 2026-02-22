@@ -13,6 +13,28 @@ const toObjectIdIfValid = (value) => {
     : value;
 };
 
+const buildQrScopeOrFilter = (scopeId) => {
+  if (!scopeId) return [];
+
+  const variants = [];
+  const normalizedScopeId = toObjectIdIfValid(scopeId);
+  variants.push(normalizedScopeId);
+
+  const scopeAsString = String(scopeId);
+  if (!variants.some((v) => String(v) === scopeAsString)) {
+    variants.push(scopeAsString);
+  }
+
+  const fields = ["cartId", "userId", "cafeId"];
+  const filters = [];
+  for (const field of fields) {
+    for (const variant of variants) {
+      filters.push({ [field]: variant });
+    }
+  }
+  return filters;
+};
+
 const resetInventoryDeductionFlag = async (orderId) => {
   if (!orderId) return;
   try {
@@ -44,24 +66,26 @@ const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
   let payeeName = process.env.UPI_PAYEE_NAME || "Terra Cart";
   
   try {
-    // Try to find cart-specific/admin QR first, then any active QR
+    // Try to find cart-scoped QR first.
     let qrCode = null;
     if (cartScopeId) {
-      const normalizedScopeId = toObjectIdIfValid(cartScopeId);
+      const scopeOrFilter = buildQrScopeOrFilter(cartScopeId);
       qrCode = await PaymentQR.findOne({
-        $or: [
-          { cartId: normalizedScopeId },
-          { userId: normalizedScopeId },
-          // Legacy fallback if older docs were saved with cafeId
-          { cafeId: normalizedScopeId },
-        ],
+        $or: scopeOrFilter,
         isActive: true,
       }).sort({ createdAt: -1 });
     }
     
-    // If no cafe-specific QR found, get any active global QR
-    if (!qrCode) {
-      qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    // Optional legacy fallback: allow truly global QR only when cart scope is unavailable.
+    if (!qrCode && !cartScopeId) {
+      qrCode = await PaymentQR.findOne({
+        isActive: true,
+        $and: [
+          { $or: [{ cartId: { $exists: false } }, { cartId: null }] },
+          { $or: [{ userId: { $exists: false } }, { userId: null }] },
+          { $or: [{ cafeId: { $exists: false } }, { cafeId: null }] },
+        ],
+      }).sort({ createdAt: -1 });
     }
     
     // Use UPI ID from uploaded QR if available
@@ -82,10 +106,30 @@ const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
   )}&cu=INR`;
 };
 
+const getSelectedAddonsAmount = (order) => {
+  if (!Array.isArray(order?.selectedAddons)) return 0;
+  return order.selectedAddons.reduce((sum, addon) => {
+    if (!addon) return sum;
+    const price = Number(addon.price);
+    if (!Number.isFinite(price) || price < 0) return sum;
+    const quantityValue = Number(addon.quantity);
+    const quantity =
+      Number.isFinite(quantityValue) && quantityValue > 0
+        ? Math.floor(quantityValue)
+        : 1;
+    return sum + price * quantity;
+  }, 0);
+};
+
 const getOrderAmount = (order) => {
   if (!order?.kotLines?.length) return null;
   const latestKot = order.kotLines[order.kotLines.length - 1];
-  return Number(latestKot.totalAmount || latestKot.subtotal || 0);
+  const kotAmountRaw = Number(latestKot.totalAmount || latestKot.subtotal || 0);
+  const kotAmount = Number.isFinite(kotAmountRaw) ? kotAmountRaw : 0;
+  const addonsAmount = getSelectedAddonsAmount(order);
+  const totalAmount = kotAmount + addonsAmount;
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) return null;
+  return Number(totalAmount.toFixed(2));
 };
 
 const formatPaymentResponse = (payment) => ({

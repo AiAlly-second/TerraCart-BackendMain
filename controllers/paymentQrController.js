@@ -14,14 +14,25 @@ const toObjectIdIfValid = (value) => {
 };
 
 const buildScopeOrFilter = (scopeId) => {
-  if (!scopeId) return null;
+  if (!scopeId) return [];
+
+  const variants = [];
   const normalizedScopeId = toObjectIdIfValid(scopeId);
-  return [
-    { userId: normalizedScopeId },
-    { cartId: normalizedScopeId },
-    // Legacy fallback if some old docs still use cafeId
-    { cafeId: normalizedScopeId },
-  ];
+  variants.push(normalizedScopeId);
+
+  const scopeAsString = String(scopeId);
+  if (!variants.some((v) => String(v) === scopeAsString)) {
+    variants.push(scopeAsString);
+  }
+
+  const fields = ["userId", "cartId", "cafeId"];
+  const filters = [];
+  for (const field of fields) {
+    for (const variant of variants) {
+      filters.push({ [field]: variant });
+    }
+  }
+  return filters;
 };
 
 const fileFilter = (req, file, cb) => {
@@ -55,19 +66,25 @@ exports.uploadPaymentQR = async (req, res) => {
 
     const { upiId, gatewayName } = req.body;
     const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
-    // Cart admin uploads are scoped to their own cart by default.
-    const scopeCartId = toObjectIdIfValid(req.body?.cartId || req.query?.cartId || req.user?._id);
+    const requestedCartId = req.body?.cartId || req.query?.cartId || null;
+    const role = req.user?.role;
+    // Cart admin uploads are always scoped to their own cart.
+    // Non-admin roles can still pass cartId explicitly when needed.
+    const rawScopeCartId =
+      role === "admin" ? req.user?._id : requestedCartId || req.user?._id;
+    const scopeCartId = toObjectIdIfValid(rawScopeCartId);
 
     // Construct image URL
     // Use helper to get URL (handles S3 vs Local)
     const qrImageUrl = getFileUrl(req, req.file, "payment-qr");
 
     // Deactivate existing active QR codes for this scope/user
-    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
-    const deactivateFilter = {
-      isActive: true,
-      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
-    };
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId);
+    const deactivateFilter = scopeOrFilter.length
+      ? { isActive: true, $or: scopeOrFilter }
+      : userId
+        ? { isActive: true, userId }
+        : { _id: null };
     await PaymentQR.updateMany(deactivateFilter, { isActive: false });
 
     // Create new QR code entry
@@ -106,22 +123,15 @@ exports.uploadPaymentQR = async (req, res) => {
  */
 exports.getActivePaymentQR = async (req, res) => {
   try {
-    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
     const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
 
-    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
-    const query = {
-      isActive: true,
-      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
-    };
-
-    // Try to find scope-specific QR first
-    let qrCode = await PaymentQR.findOne(query).sort({ createdAt: -1 });
-
-    // If no specific QR found, get any active global QR
-    if (!qrCode) {
-      qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId);
+    if (!scopeOrFilter.length) {
+      return res.status(404).json({ message: "No scoped QR code found" });
     }
+    const query = { isActive: true, $or: scopeOrFilter };
+
+    let qrCode = await PaymentQR.findOne(query).sort({ createdAt: -1 });
 
     if (!qrCode) {
       return res.status(404).json({ message: "No active QR code found" });
@@ -149,25 +159,21 @@ exports.getActivePaymentQRPublic = async (req, res) => {
     let scopeCartId = req.query?.cartId || null;
     const orderId = req.query?.orderId || null;
 
-    if (!scopeCartId && orderId) {
+    // If orderId is present, trust order.cartId as source of truth.
+    if (orderId) {
       const order = await Order.findById(orderId).select("cartId cafeId").lean();
-      if (order) {
+      if (order?.cartId || order?.cafeId) {
         scopeCartId = order.cartId || order.cafeId || null;
       }
     }
 
     const scopeOrFilter = buildScopeOrFilter(scopeCartId);
-    const scopedQuery = scopeOrFilter
-      ? { isActive: true, $or: scopeOrFilter }
-      : { isActive: true };
-
-    // Get active QR code, preferring scoped/cart QR when scope is available.
-    let qrCode = await PaymentQR.findOne(scopedQuery).sort({ createdAt: -1 });
-
-    // Fallback to any active QR so older/global setups continue to work.
-    if (!qrCode && scopeOrFilter) {
-      qrCode = await PaymentQR.findOne({ isActive: true }).sort({ createdAt: -1 });
+    if (!scopeOrFilter.length) {
+      return res.json(null);
     }
+    const scopedQuery = { isActive: true, $or: scopeOrFilter };
+
+    let qrCode = await PaymentQR.findOne(scopedQuery).sort({ createdAt: -1 });
 
     if (!qrCode) {
       // Return 200 with null instead of 404 - no active QR code is a valid state
@@ -191,12 +197,14 @@ exports.getActivePaymentQRPublic = async (req, res) => {
  */
 exports.listPaymentQRs = async (req, res) => {
   try {
-    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
     const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
-    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId);
+    if (!scopeOrFilter.length) {
+      return res.json([]);
+    }
 
     const qrCodes = await PaymentQR.find({
-      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
+      $or: scopeOrFilter,
     })
       .sort({ createdAt: -1 })
       .lean();
@@ -223,13 +231,15 @@ exports.listPaymentQRs = async (req, res) => {
 exports.deletePaymentQR = async (req, res) => {
   try {
     const { id } = req.params;
-    const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
     const scopeCartId = toObjectIdIfValid(req.query?.cartId || req.user?._id);
-    const scopeOrFilter = buildScopeOrFilter(scopeCartId) || [];
+    const scopeOrFilter = buildScopeOrFilter(scopeCartId);
+    if (!scopeOrFilter.length) {
+      return res.status(404).json({ message: "QR code not found" });
+    }
 
     const qrCode = await PaymentQR.findOne({
       _id: id,
-      $or: [...scopeOrFilter, ...(userId ? [{ userId }] : [])],
+      $or: scopeOrFilter,
     });
 
     if (!qrCode) {
