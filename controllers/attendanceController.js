@@ -1,6 +1,7 @@
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
+const LeaveRequest = require("../models/leaveRequestModel");
 
 // IST offset constant (UTC+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
@@ -175,6 +176,48 @@ const dedupeAttendanceByEmployee = (records = []) => {
   return Array.from(map.values());
 };
 
+const getApprovedLeaveMapForDate = async ({ employeeIds = [], date }) => {
+  const normalizedEmployeeIds = employeeIds
+    .map((id) => id?.toString?.() || id)
+    .filter(Boolean);
+  if (!normalizedEmployeeIds.length || !date) {
+    return new Map();
+  }
+
+  const approvedLeaves = await LeaveRequest.find({
+    employeeId: { $in: normalizedEmployeeIds },
+    status: "approved",
+    startDate: { $lte: date },
+    endDate: { $gte: date },
+  })
+    .select("employeeId")
+    .lean();
+
+  const leaveMap = new Map();
+  approvedLeaves.forEach((row) => {
+    const employeeId =
+      row?.employeeId?.toString?.() || row?.employeeId || null;
+    if (employeeId) {
+      leaveMap.set(employeeId.toString(), true);
+    }
+  });
+
+  return leaveMap;
+};
+
+const hasApprovedLeaveForToday = async (employeeId, today) => {
+  if (!employeeId || !today) return false;
+  const existing = await LeaveRequest.findOne({
+    employeeId,
+    status: "approved",
+    startDate: { $lte: today },
+    endDate: { $gte: today },
+  })
+    .select("_id")
+    .lean();
+  return Boolean(existing);
+};
+
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
   const query = {};
@@ -289,6 +332,11 @@ exports.getAllAttendance = async (req, res) => {
       const employees = await Employee.find(employeeQuery)
         .select("_id name employeeRole cafeId franchiseId")
         .lean();
+      const employeeIds = employees.map((emp) => emp._id);
+      const approvedLeaveMap = await getApprovedLeaveMapForDate({
+        employeeIds,
+        date: today,
+      });
 
       // Get existing attendance for today
       const todayQuery = {
@@ -314,8 +362,52 @@ exports.getAllAttendance = async (req, res) => {
         }
 
         const schedule = await EmployeeSchedule.findOne({ employeeId: employee._id }).lean();
-        
+        const hasApprovedLeaveToday = approvedLeaveMap.get(empId) === true;
+
+        if (hasApprovedLeaveToday) {
+          try {
+            await EmployeeAttendance.create({
+              employeeId: employee._id,
+              date: today,
+              status: "on_leave",
+              attendanceStatus: "absent",
+              checkInStatus: "absent",
+              canTakeBreak: false,
+              isCheckedOut: false,
+              cartId: employee.cartId,
+              franchiseId: employee.franchiseId,
+            });
+          } catch (err) {
+            if (err.code !== 11000) {
+              console.error(`[ATTENDANCE] Error creating leave record:`, err.message);
+            }
+          }
+          continue;
+        }
+
         if (schedule && schedule.weeklySchedule) {
+          const todayState = String(schedule.todayState || "").toLowerCase();
+          if (todayState === "on_leave" || todayState === "sick") {
+            try {
+              await EmployeeAttendance.create({
+                employeeId: employee._id,
+                date: today,
+                status: todayState,
+                attendanceStatus: "absent",
+                checkInStatus: "absent",
+                canTakeBreak: false,
+                isCheckedOut: false,
+                cartId: employee.cartId, // EmployeeAttendance model uses cartId
+                franchiseId: employee.franchiseId,
+              });
+            } catch (err) {
+              if (err.code !== 11000) {
+                console.error(`[ATTENDANCE] Error creating leave/sick record:`, err.message);
+              }
+            }
+            continue;
+          }
+
           const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
           
           if (todaySchedule && todaySchedule.isWorking) {
@@ -444,6 +536,11 @@ exports.getTodayAttendance = async (req, res) => {
     const employees = await Employee.find(employeeQuery)
       .select("_id name employeeRole cafeId franchiseId")
       .lean();
+    const employeeIds = employees.map((emp) => emp._id);
+    const approvedLeaveMap = await getApprovedLeaveMapForDate({
+      employeeIds,
+      date: today,
+    });
 
     // Get day name for today in IST
     const todayDay = getISTDayName();
@@ -463,8 +560,66 @@ exports.getTodayAttendance = async (req, res) => {
 
       // Get employee's work schedule
       const schedule = await EmployeeSchedule.findOne({ employeeId: employee._id }).lean();
+      const hasApprovedLeaveToday = approvedLeaveMap.get(employeeId) === true;
+
+      if (hasApprovedLeaveToday) {
+        try {
+          const leaveAttendance = await EmployeeAttendance.create({
+            employeeId: employee._id,
+            date: today,
+            status: "on_leave",
+            attendanceStatus: "absent",
+            checkInStatus: "absent",
+            canTakeBreak: false,
+            isCheckedOut: false,
+            cartId: employee.cartId || employee.cafeId,
+            franchiseId: employee.franchiseId,
+          });
+
+          await leaveAttendance.populate("employeeId", "name mobile employeeRole");
+          attendance.push(leaveAttendance.toObject());
+          attendanceEmployeeIds.add(employeeId);
+        } catch (err) {
+          if (err.code !== 11000) {
+            console.error(
+              `[ATTENDANCE] Error creating approved leave record for employee ${employeeId}:`,
+              err.message
+            );
+          }
+        }
+        continue;
+      }
       
       if (schedule && schedule.weeklySchedule) {
+        const todayState = String(schedule.todayState || "").toLowerCase();
+        if (todayState === "on_leave" || todayState === "sick") {
+          try {
+            const leaveAttendance = await EmployeeAttendance.create({
+              employeeId: employee._id,
+              date: today,
+              status: todayState,
+              attendanceStatus: "absent",
+              checkInStatus: "absent",
+              canTakeBreak: false,
+              isCheckedOut: false,
+              cartId: employee.cartId || employee.cafeId,
+              franchiseId: employee.franchiseId,
+            });
+
+            await leaveAttendance.populate("employeeId", "name mobile employeeRole");
+            attendance.push(leaveAttendance.toObject());
+            attendanceEmployeeIds.add(employeeId);
+          } catch (err) {
+            if (err.code !== 11000) {
+              console.error(
+                `[ATTENDANCE] Error creating leave/sick record for employee ${employeeId}:`,
+                err.message
+              );
+            }
+          }
+          continue;
+        }
+
         const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
         
         // If today is a working day and employee hasn't checked in, mark as absent
@@ -692,10 +847,31 @@ exports.checkIn = async (req, res) => {
     const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
     const todayDay = getISTDayName();
     const todaySchedule = getTodaySchedule(schedule, todayDay);
-    if (todaySchedule && todaySchedule.isWorking === false) {
+    const canOverrideNonWorkingDay = ["admin", "franchise_admin", "super_admin"].includes(
+      user.role
+    );
+
+    if (todaySchedule && todaySchedule.isWorking === false && !canOverrideNonWorkingDay) {
       return res.status(400).json({
         message: "Today is your off day. Check-in is disabled.",
         code: "OFF_DAY",
+      });
+    }
+
+    const todayState = String(schedule?.todayState || "").toLowerCase();
+    const isMarkedOnLeaveState = todayState === "on_leave" || todayState === "sick";
+    const hasApprovedLeaveToday = await hasApprovedLeaveForToday(
+      targetEmployeeId,
+      today
+    );
+    if ((isMarkedOnLeaveState || hasApprovedLeaveToday) && !canOverrideNonWorkingDay) {
+      return res.status(400).json({
+        message: isMarkedOnLeaveState
+          ? todayState === "on_leave"
+            ? "You are marked on leave for today."
+            : "You are marked sick for today."
+          : "You are on approved leave for today.",
+        code: "LEAVE_DAY",
       });
     }
 
@@ -846,11 +1022,22 @@ exports.checkOut = async (req, res) => {
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
-    // Mobile users can only check themselves out
-    if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+    // waiter/cook/captain can only check themselves out
+    if (["waiter", "cook", "captain"].includes(user.role)) {
       const userEmployee = await Employee.findOne({ userId: user._id });
       if (!userEmployee || userEmployee._id.toString() !== targetEmployeeId.toString()) {
         return res.status(403).json({ message: "Access denied. You can only check yourself out." });
+      }
+    }
+    if (user.role === "manager" && employeeId) {
+      // Manager can manual check-out for employees in their cart
+      const managerEmployee = await Employee.findOne({ userId: user._id }).lean()
+        || await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+      const managerCartId =
+        managerEmployee?.cartId || managerEmployee?.cafeId || user.cartId || user.cafeId;
+      const empCartId = employee.cartId || employee.cafeId;
+      if (!managerCartId || !empCartId || empCartId.toString() !== managerCartId.toString()) {
+        return res.status(403).json({ message: "Access denied. Employee must be in your cart." });
       }
     }
 
@@ -979,10 +1166,26 @@ exports.checkOutById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Attendance record not found" });
     }
 
-    // Check access - mobile users can only manage their own attendance
+    // Mobile role access checks
     if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-      const userEmployee = await Employee.findOne({ userId: user._id });
-      if (!userEmployee || attendance.employeeId.toString() !== userEmployee._id.toString()) {
+      const userEmployee = await Employee.findOne({ userId: user._id }).lean()
+        || await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+      if (!userEmployee) {
+        return res.status(403).json({ success: false, message: "Access denied" });
+      }
+
+      if (user.role === "manager") {
+        const managerCartId =
+          userEmployee.cartId || userEmployee.cafeId || user.cartId || user.cafeId;
+        const attendanceCartId = attendance.cartId || attendance.cafeId;
+        if (
+          !managerCartId ||
+          !attendanceCartId ||
+          attendanceCartId.toString() !== managerCartId.toString()
+        ) {
+          return res.status(403).json({ success: false, message: "Access denied" });
+        }
+      } else if (attendance.employeeId.toString() !== userEmployee._id.toString()) {
         return res.status(403).json({ success: false, message: "Access denied" });
       }
     } else {
@@ -1291,6 +1494,23 @@ exports.getAttendanceStats = async (req, res) => {
 
     const attendance = await EmployeeAttendance.find(query).lean();
 
+    const isWorkingStatus = (row) => {
+      const status = String(row?.status || "").toLowerCase();
+      if (["present", "late", "half_day", "completed"].includes(status)) {
+        return true;
+      }
+      if (row?.checkIn?.time) return true;
+      if (Number(row?.totalWorkingMinutes || 0) > 0) return true;
+      if (Number(row?.workingHours || 0) > 0) return true;
+      return false;
+    };
+
+    const leaveStatusSet = new Set(["on_leave", "sick"]);
+    const workingDays = attendance.filter((row) => isWorkingStatus(row)).length;
+    const leaveDays = attendance.filter((row) =>
+      leaveStatusSet.has(String(row?.status || "").toLowerCase())
+    ).length;
+
     const stats = {
       totalDays: attendance.length,
       present: attendance.filter((a) => a.status === "present").length,
@@ -1299,6 +1519,8 @@ exports.getAttendanceStats = async (req, res) => {
       halfDay: attendance.filter((a) => a.status === "half_day").length,
       onLeave: attendance.filter((a) => a.status === "on_leave").length,
       sick: attendance.filter((a) => a.status === "sick").length,
+      workingDays,
+      leaveDays,
       totalWorkingHours: attendance.reduce((sum, a) => sum + (a.workingHours || 0), 0),
       totalOvertime: attendance.reduce((sum, a) => sum + (a.overtime || 0), 0),
     };

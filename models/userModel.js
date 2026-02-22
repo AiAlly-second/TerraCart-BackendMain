@@ -39,6 +39,16 @@ const userSchema = new mongoose.Schema(
     // Cart admin specific fields
     location: { type: String },
     phone: { type: String },
+    managerHelplineNumber: { type: String },
+    emergencyContacts: [
+      {
+        name: { type: String },
+        phone: { type: String },
+        relation: { type: String },
+        notes: { type: String },
+        isPrimary: { type: Boolean, default: false },
+      },
+    ],
     address: { type: String },
     cartName: { type: String },
     isApproved: { type: Boolean, default: false },

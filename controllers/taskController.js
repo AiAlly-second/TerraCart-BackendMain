@@ -2,6 +2,7 @@ const Task = require("../models/taskModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
+const EmployeeAttendance = require("../models/employeeAttendanceModel");
 
 // IST offset constant (UTC+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
@@ -48,45 +49,83 @@ const getISTDayName = () => {
   return dayNames[istNow.getDay()]; // Use getDay() for IST day
 };
 
+const applyTaskCartScope = (query, cartId) => {
+  if (!cartId) return;
+  // Support both cartId (new) and cafeId (legacy docs).
+  query.$or = [{ cartId }, { cafeId: cartId }];
+};
+
+const getEmployeeFromTaskContext = async (taskData, user) => {
+  if (taskData?.assignedTo) {
+    const assignedEmployee = await Employee.findById(taskData.assignedTo).lean();
+    if (assignedEmployee) return assignedEmployee;
+  }
+
+  if (user?.employeeId) {
+    const ownEmployee = await Employee.findById(user.employeeId).lean();
+    if (ownEmployee) return ownEmployee;
+  }
+
+  if (!user) return null;
+  const identityFilters = [{ userId: user._id }];
+  if (user.email) {
+    identityFilters.push({ email: user.email.toLowerCase() });
+  }
+  return Employee.findOne({ $or: identityFilters }).lean();
+};
+
+const backfillTaskScopeFromEmployee = (taskData, employee) => {
+  if (!taskData || !employee) return;
+  if (!taskData.assignedTo) {
+    taskData.assignedTo = employee._id;
+  }
+  if (!taskData.assignedToUser && employee.userId) {
+    taskData.assignedToUser = employee.userId;
+  }
+  if (!taskData.cartId) {
+    taskData.cartId = employee.cartId || employee.cafeId;
+  }
+  if (!taskData.franchiseId && employee.franchiseId) {
+    taskData.franchiseId = employee.franchiseId;
+  }
+};
+
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
   const query = {};
   if (user.role === "admin") {
-    query.cartId = user._id; // Task model uses cartId, not cafeId
+    const adminCartId = user.cartId || user.cafeId || user._id;
+    applyTaskCartScope(query, adminCartId);
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
     // Mobile users - get their cartId from user or employee record
-    if (user.cartId) {
-      query.cartId = user.cartId;
-    } else if (user.cafeId) {
-      // Fallback to cafeId for backward compatibility
-      query.cartId = user.cafeId;
-    } else if (user.employeeId) {
+    let cartScope = user.cartId || user.cafeId;
+    if (!cartScope && user.employeeId) {
       const employee = await Employee.findById(user.employeeId).lean();
-      if (employee && employee.cartId) {
-        query.cartId = employee.cartId;
-      } else if (employee && employee.cafeId) {
-        // Fallback to cafeId
-        query.cartId = employee.cafeId;
-      }
+      cartScope = employee?.cartId || employee?.cafeId;
+    }
+    if (!cartScope && user.email) {
+      const employee = await Employee.findOne({
+        email: user.email.toLowerCase(),
+      }).lean();
+      cartScope = employee?.cartId || employee?.cafeId;
+    }
+    if (cartScope) {
+      applyTaskCartScope(query, cartScope);
     } else {
-      // Fallback: find by email
-      const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cartId) {
-        query.cartId = employee.cartId;
-      } else if (employee && employee.cafeId) {
-        // Fallback to cafeId
-        query.cartId = employee.cafeId;
-      }
+      query.cartId = { $in: [] };
     }
   } else if (user.role === "employee") {
     // Legacy employee role
-    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-    if (employee && employee.cartId) {
-      query.cartId = employee.cartId;
-    } else if (employee && employee.cafeId) {
-      query.cartId = employee.cafeId;
+    const employee = await Employee.findOne({
+      email: user.email?.toLowerCase(),
+    }).lean();
+    const cartScope = employee?.cartId || employee?.cafeId;
+    if (cartScope) {
+      applyTaskCartScope(query, cartScope);
+    } else {
+      query.cartId = { $in: [] };
     }
   }
   return query;
@@ -98,20 +137,148 @@ const getDayName = (date) => {
   return dayNames[date.getDay()];
 };
 
-// Helper function to check if task should be shown today based on frequency (IST)
-// Frequency is primary: e.g. sat-sun task appears only on Sat-Sun in IST
-// Work schedule is NOT used - task visibility is driven by frequency alone
-const shouldShowTaskToday = (task, employeeSchedule, today) => {
+const normalizeDayName = (value) => {
+  const day = String(value || "").trim().toLowerCase();
+  const map = {
+    mon: "monday",
+    monday: "monday",
+    tue: "tuesday",
+    tues: "tuesday",
+    tuesday: "tuesday",
+    wed: "wednesday",
+    wednesday: "wednesday",
+    thu: "thursday",
+    thur: "thursday",
+    thurs: "thursday",
+    thursday: "thursday",
+    fri: "friday",
+    friday: "friday",
+    sat: "saturday",
+    saturday: "saturday",
+    sun: "sunday",
+    sunday: "sunday",
+  };
+  return map[day] || "";
+};
+
+const getISTDayNameFromDate = (dateValue) => {
+  const date = dateValue ? new Date(dateValue) : new Date();
+  const istDate = utcToIST(date);
+  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return dayNames[istDate.getDay()];
+};
+
+const getISTDateRangeForDate = (dateValue) => {
+  const source = dateValue ? new Date(dateValue) : new Date();
+  const istDate = utcToIST(source);
+  istDate.setHours(0, 0, 0, 0);
+  const startUTC = istToUTC(istDate);
+  const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000);
+  return { startUTC, endUTC };
+};
+
+const isEmployeeOffOnDay = (employeeSchedule, dayName) => {
+  if (!employeeSchedule || !Array.isArray(employeeSchedule.weeklySchedule)) {
+    return false;
+  }
+  const normalizedDay = normalizeDayName(dayName);
+  const daySchedule = employeeSchedule.weeklySchedule.find(
+    (s) => normalizeDayName(s.day) === normalizedDay
+  );
+  return Boolean(daySchedule && daySchedule.isWorking === false);
+};
+
+const getEmployeeAttendanceStatusForDate = async (employeeId, dateValue) => {
+  if (!employeeId) return null;
+  const { startUTC, endUTC } = getISTDateRangeForDate(dateValue);
+  const attendance = await EmployeeAttendance.findOne({
+    employeeId,
+    date: { $gte: startUTC, $lt: endUTC },
+  })
+    .select("status")
+    .lean();
+
+  const status = String(attendance?.status || "").toLowerCase();
+  return status || null;
+};
+
+const validateTaskScheduleConstraints = async ({
+  assignedTo,
+  frequency,
+  dueDate,
+}) => {
+  if (!assignedTo) return null;
+
+  const schedule = await EmployeeSchedule.findOne({ employeeId: assignedTo })
+    .select("weeklySchedule")
+    .lean();
+
+  const normalizedFrequency = Array.isArray(frequency)
+    ? frequency.map(normalizeDayName).filter(Boolean)
+    : [];
+
+  if (normalizedFrequency.length > 0 && schedule?.weeklySchedule?.length) {
+    const blockedDays = normalizedFrequency.filter((day) =>
+      isEmployeeOffOnDay(schedule, day)
+    );
+    if (blockedDays.length > 0) {
+      const blockedLabel = [...new Set(blockedDays)]
+        .map((d) => d.charAt(0).toUpperCase() + d.slice(1))
+        .join(", ");
+      return `Cannot assign recurring task on employee off day(s): ${blockedLabel}`;
+    }
+  }
+
+  if (dueDate) {
+    const dueDay = getISTDayNameFromDate(dueDate);
+    if (isEmployeeOffOnDay(schedule, dueDay)) {
+      return `Cannot assign task on ${dueDay} because it is the employee's off day`;
+    }
+
+    const attendanceStatus = await getEmployeeAttendanceStatusForDate(
+      assignedTo,
+      dueDate
+    );
+    if (attendanceStatus === "on_leave" || attendanceStatus === "sick") {
+      const displayStatus =
+        attendanceStatus === "on_leave" ? "on leave" : attendanceStatus;
+      return `Cannot assign task on this date because employee is marked ${displayStatus}`;
+    }
+  }
+
+  return null;
+};
+
+// Helper function to check if task should be shown today based on frequency + schedule + attendance (IST)
+const shouldShowTaskToday = (
+  task,
+  employeeSchedule,
+  today,
+  attendanceStatus = null
+) => {
+  const todayDayName = getISTDayName();
+
+  if (attendanceStatus === "absent" || attendanceStatus === "on_leave") {
+    return false;
+  }
+
+  if (employeeSchedule?.todayState === "on_leave") {
+    return false;
+  }
+
+  if (isEmployeeOffOnDay(employeeSchedule, todayDayName)) {
+    return false;
+  }
+
   // If task has no frequency, show it normally (handled by caller - dueDate check)
   if (!task.frequency || task.frequency.length === 0) {
     return true;
   }
 
-  // Use IST day name for consistency
-  const todayDayName = getISTDayName();
-  
-  // Check if today is in the frequency list - that's the only filter for recurring tasks
-  return task.frequency.includes(todayDayName);
+  const normalizedFrequency = task.frequency
+    .map(normalizeDayName)
+    .filter(Boolean);
+  return normalizedFrequency.includes(todayDayName);
 };
 
 // Helper function to calculate task status based on work schedule
@@ -190,9 +357,10 @@ exports.getAllTasks = async (req, res) => {
     const query = {};
     let employeeId = null;
     let employeeSchedule = null;
+    const isMobileRole = ["waiter", "cook", "captain", "manager", "employee"].includes(user.role);
 
     // For mobile users (waiter, cook, captain, manager), only show tasks assigned to them
-    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+    if (isMobileRole) {
       if (user.employeeId) {
         employeeId = user.employeeId;
       } else {
@@ -233,7 +401,7 @@ exports.getAllTasks = async (req, res) => {
       query.category = category;
     }
     // Allow filtering by assignedTo in query params (for admin users)
-    if (assignedTo && !["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+    if (assignedTo && !isMobileRole) {
       query.assignedTo = assignedTo;
       // Fetch schedule for the assigned employee
       employeeSchedule = await EmployeeSchedule.findOne({ employeeId: assignedTo }).lean();
@@ -249,22 +417,57 @@ exports.getAllTasks = async (req, res) => {
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    // For admin view with multiple employees, we need to fetch schedules per employee
-    // For now, we'll handle the current employee's schedule and improve later if needed
+    const taskEmployeeIds = [...new Set(tasks
+      .map((task) => (task.assignedTo?._id || task.assignedTo || "").toString())
+      .filter(Boolean))];
+
     const employeeSchedulesMap = new Map();
-    if (employeeSchedule && employeeId) {
+    if (taskEmployeeIds.length > 0) {
+      const schedules = await EmployeeSchedule.find({
+        employeeId: { $in: taskEmployeeIds },
+      }).lean();
+      schedules.forEach((schedule) => {
+        if (schedule?.employeeId) {
+          employeeSchedulesMap.set(schedule.employeeId.toString(), schedule);
+        }
+      });
+    }
+
+    if (employeeSchedule && employeeId && !employeeSchedulesMap.has(employeeId.toString())) {
       employeeSchedulesMap.set(employeeId.toString(), employeeSchedule);
+    }
+
+    const attendanceStatusMap = new Map();
+    if (taskEmployeeIds.length > 0) {
+      const { today: todayStart, tomorrow: tomorrowStart } = getISTDateRange();
+      const attendanceRows = await EmployeeAttendance.find({
+        employeeId: { $in: taskEmployeeIds },
+        date: { $gte: todayStart, $lt: tomorrowStart },
+      })
+        .select("employeeId status")
+        .lean();
+      attendanceRows.forEach((row) => {
+        if (row?.employeeId) {
+          attendanceStatusMap.set(
+            row.employeeId.toString(),
+            String(row.status || "").toLowerCase()
+          );
+        }
+      });
     }
 
     // Filter and enhance tasks based on frequency and work schedule
     const filteredTasks = tasks
       .filter((task) => {
         // For recurring tasks, check if they should be shown today
-        if (task.frequency && task.frequency.length > 0) {
+        if (isMobileRole && task.frequency && task.frequency.length > 0) {
           // Get the schedule for the assigned employee
           const taskEmployeeId = task.assignedTo?._id ? task.assignedTo._id.toString() : task.assignedTo?.toString();
           const taskSchedule = taskEmployeeId ? employeeSchedulesMap.get(taskEmployeeId) : employeeSchedule;
-          return shouldShowTaskToday(task, taskSchedule, today);
+          const attendanceStatus = taskEmployeeId
+            ? attendanceStatusMap.get(taskEmployeeId) || null
+            : null;
+          return shouldShowTaskToday(task, taskSchedule, today, attendanceStatus);
         }
         return true;
       })
@@ -377,14 +580,75 @@ exports.getTodayTasks = async (req, res) => {
       .sort({ priority: 1, createdAt: -1 })
       .lean();
 
+    const taskEmployeeIds = [...new Set(allTasks
+      .map((task) => (task.assignedTo?._id || task.assignedTo || "").toString())
+      .filter(Boolean))];
+
+    const scheduleMap = new Map();
+    if (taskEmployeeIds.length > 0) {
+      const schedules = await EmployeeSchedule.find({
+        employeeId: { $in: taskEmployeeIds },
+      }).lean();
+      schedules.forEach((schedule) => {
+        if (schedule?.employeeId) {
+          scheduleMap.set(schedule.employeeId.toString(), schedule);
+        }
+      });
+    }
+    if (employeeSchedule && employeeId && !scheduleMap.has(employeeId.toString())) {
+      scheduleMap.set(employeeId.toString(), employeeSchedule);
+    }
+
+    const attendanceStatusMap = new Map();
+    if (taskEmployeeIds.length > 0) {
+      const attendanceRows = await EmployeeAttendance.find({
+        employeeId: { $in: taskEmployeeIds },
+        date: { $gte: today, $lt: tomorrow },
+      })
+        .select("employeeId status")
+        .lean();
+
+      attendanceRows.forEach((row) => {
+        if (row?.employeeId) {
+          attendanceStatusMap.set(
+            row.employeeId.toString(),
+            String(row.status || "").toLowerCase()
+          );
+        }
+      });
+    }
+
     // Filter tasks that should be shown today
     console.log('[TASK] getTodayTasks - Total tasks found:', allTasks.length);
     console.log('[TASK] getTodayTasks - Today IST date:', today.toISOString());
     
     const todayTasks = allTasks.filter((task) => {
+      const taskEmployeeId = task.assignedTo?._id
+        ? task.assignedTo._id.toString()
+        : task.assignedTo?.toString();
+      const taskSchedule = taskEmployeeId
+        ? scheduleMap.get(taskEmployeeId)
+        : employeeSchedule;
+      const attendanceStatus = taskEmployeeId
+        ? attendanceStatusMap.get(taskEmployeeId) || null
+        : null;
+
+      if (attendanceStatus === "absent" || attendanceStatus === "on_leave") {
+        return false;
+      }
+
+      if (isEmployeeOffOnDay(taskSchedule, getISTDayName())) {
+        return false;
+      }
+
       // If it's a recurring task, check frequency and work schedule
       if (task.frequency && Array.isArray(task.frequency) && task.frequency.length > 0) {
-        const shouldShow = shouldShowTaskToday(task, employeeSchedule, today);
+        const shouldShow = shouldShowTaskToday(
+          task,
+          taskSchedule,
+          today,
+          attendanceStatus
+        );
         console.log('[TASK] Recurring task:', {
           id: task._id,
           title: task.title,
@@ -440,7 +704,13 @@ exports.getTodayTasks = async (req, res) => {
     
     // Calculate status for each task based on work schedule (using IST)
     const tasksWithStatus = todayTasks.map((task) => {
-      const calculatedStatus = calculateTaskStatus(task, employeeSchedule, nowIST);
+      const taskEmployeeId = task.assignedTo?._id
+        ? task.assignedTo._id.toString()
+        : task.assignedTo?.toString();
+      const taskSchedule = taskEmployeeId
+        ? scheduleMap.get(taskEmployeeId)
+        : employeeSchedule;
+      const calculatedStatus = calculateTaskStatus(task, taskSchedule, nowIST);
       return { ...task, status: calculatedStatus };
     });
 
@@ -487,12 +757,15 @@ exports.createTask = async (req, res) => {
 
     // Set hierarchy relationships
     if (user.role === "admin") {
-      taskData.cartId = user._id; // Task model uses cartId, not cafeId
-      if (user.franchiseId) {
+      // Prefer employee/cart scoped assignment when available.
+      if (!taskData.cartId && !taskData.assignedTo) {
+        taskData.cartId = user.cartId || user.cafeId || user._id;
+      }
+      if (user.franchiseId && !taskData.franchiseId) {
         taskData.franchiseId = user.franchiseId;
       }
     } else if (user.role === "franchise_admin") {
-      taskData.franchiseId = user._id;
+      taskData.franchiseId = taskData.franchiseId || user._id;
       if (taskData.cartId) {
         // Validate cartId belongs to this franchise
         const cart = await User.findById(taskData.cartId);
@@ -555,6 +828,41 @@ exports.createTask = async (req, res) => {
           taskData.assignedTo = employee._id;
         }
       }
+    }
+
+    const scopedEmployee = await getEmployeeFromTaskContext(taskData, user);
+    if (scopedEmployee) {
+      backfillTaskScopeFromEmployee(taskData, scopedEmployee);
+    }
+
+    if (!taskData.cartId) {
+      const fallbackCartId = user.cartId || user.cafeId;
+      if (fallbackCartId) {
+        taskData.cartId = fallbackCartId;
+      } else if (user.role === "admin") {
+        taskData.cartId = user._id;
+      }
+    }
+
+    if (!taskData.franchiseId && user.franchiseId) {
+      taskData.franchiseId = user.franchiseId;
+    }
+
+    // Re-validate franchise scope when cartId was derived from assigned employee.
+    if (user.role === "franchise_admin" && taskData.cartId) {
+      const cart = await User.findById(taskData.cartId).lean();
+      if (!cart || cart.franchiseId?.toString() !== user._id.toString()) {
+        return res.status(403).json({ message: "Invalid cart selection" });
+      }
+    }
+
+    const createValidationMessage = await validateTaskScheduleConstraints({
+      assignedTo: taskData.assignedTo,
+      frequency: taskData.frequency,
+      dueDate: taskData.dueDate,
+    });
+    if (createValidationMessage) {
+      return res.status(400).json({ message: createValidationMessage });
     }
     
     // Handle frequency: store original due date if frequency is set
@@ -636,6 +944,32 @@ exports.updateTask = async (req, res) => {
     const task = await Task.findById(id);
     if (!task) {
       return res.status(404).json({ message: "Task not found" });
+    }
+
+    const hasAssignedToUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "assignedTo"
+    );
+    const hasFrequencyUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "frequency"
+    );
+    const hasDueDateUpdate = Object.prototype.hasOwnProperty.call(
+      updates,
+      "dueDate"
+    );
+
+    const targetAssignedTo = hasAssignedToUpdate ? updates.assignedTo : task.assignedTo;
+    const targetFrequency = hasFrequencyUpdate ? updates.frequency : task.frequency;
+    const targetDueDate = hasDueDateUpdate ? updates.dueDate : task.dueDate;
+
+    const updateValidationMessage = await validateTaskScheduleConstraints({
+      assignedTo: targetAssignedTo,
+      frequency: targetFrequency,
+      dueDate: targetDueDate,
+    });
+    if (updateValidationMessage) {
+      return res.status(400).json({ message: updateValidationMessage });
     }
     
     // Handle frequency: store original due date if frequency is set

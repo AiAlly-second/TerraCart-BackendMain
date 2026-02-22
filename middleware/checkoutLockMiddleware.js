@@ -44,6 +44,11 @@ exports.blockActionsIfCheckedOut = async (req, res, next) => {
       return next();
     }
 
+    // Managers can continue supervisory actions even after their own checkout.
+    if (req.user.role === "manager") {
+      return next();
+    }
+
     const employee = await getCurrentEmployee(req.user);
     if (!employee?._id) {
       return next();

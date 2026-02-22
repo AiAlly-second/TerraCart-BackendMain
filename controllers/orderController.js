@@ -1,11 +1,12 @@
 const mongoose = require("mongoose");
 const Order = require("../models/orderModel");
+const PrintJob = require("../models/printJobModel");
+const PrinterConfig = require("../models/printerConfigModel");
 const Counter = require("../models/countermodel");
 const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const Employee = require("../models/employeeModel");
-const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
 } = require("../services/costing-v2/orderConsumptionService");
@@ -146,6 +147,97 @@ const normalizeObjectId = (value) => {
         : "";
   if (!asString || !mongoose.Types.ObjectId.isValid(asString)) return null;
   return new mongoose.Types.ObjectId(asString);
+};
+
+const normalizeDocType = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (normalized === "KOT" || normalized === "BILL") return normalized;
+  return null;
+};
+
+const normalizePrinterId = (value) => {
+  const normalized = String(value || "").trim();
+  return normalized || "default";
+};
+
+const toNonNegativeInt = (value) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const intValue = Math.floor(value);
+    return intValue >= 0 ? intValue : null;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      const intValue = Math.floor(parsed);
+      return intValue >= 0 ? intValue : null;
+    }
+  }
+  return null;
+};
+
+const resolvePrintAccessError = (user, order) => {
+  if (!user || !order) return "Not authorized";
+
+  if (user.role === "admin" && user._id) {
+    if (!order.cartId || order.cartId.toString() !== user._id.toString()) {
+      return "Order does not belong to your cafe";
+    }
+    return null;
+  }
+
+  if (["manager", "waiter", "captain"].includes(user.role)) {
+    if (!user.cafeId && !user.cartId) {
+      return "No cart/kiosk assigned to your account";
+    }
+    const userCartId = (user.cartId || user.cafeId).toString();
+    if (!order.cartId || order.cartId.toString() !== userCartId) {
+      return "Order does not belong to your cart/kiosk";
+    }
+    return null;
+  }
+
+  return "Not authorized for this action";
+};
+
+const buildAutoPrintKey = ({
+  order,
+  docType,
+  printerId,
+  kotIndex,
+  kotNumber,
+  orderVersion,
+}) => {
+  const safeDocType = normalizeDocType(docType) || "KOT";
+  const safePrinterId = normalizePrinterId(printerId);
+  const orderId = String(order?._id || "").trim();
+  const fallbackOrderVersion =
+    order?.updatedAt instanceof Date
+      ? order.updatedAt.toISOString()
+      : order?.updatedAt
+        ? String(order.updatedAt)
+        : "";
+
+  let versionToken = String(orderVersion || "").trim();
+  if (safeDocType === "KOT") {
+    const normalizedKotNumber = toNonNegativeInt(kotNumber);
+    const normalizedKotIndex = toNonNegativeInt(kotIndex);
+    if (normalizedKotNumber != null && normalizedKotNumber > 0) {
+      versionToken = `K${normalizedKotNumber}`;
+    } else if (normalizedKotIndex != null) {
+      versionToken = `I${normalizedKotIndex}`;
+    } else {
+      const latestIndex = Array.isArray(order?.kotLines)
+        ? Math.max(0, order.kotLines.length - 1)
+        : 0;
+      versionToken = `I${latestIndex}`;
+    }
+  } else if (!versionToken) {
+    versionToken = fallbackOrderVersion || "current";
+  }
+
+  return `${orderId}:${safeDocType}:${safePrinterId}:${versionToken}`;
 };
 
 const getActiveTakeawayTokenQuery = (cartId) => ({
@@ -377,6 +469,18 @@ function buildKot(items) {
       itemData.extras = itemExtras;
     }
 
+    const rawSpecialInstructions =
+      typeof it.specialInstructions === "string"
+        ? it.specialInstructions
+        : typeof it.note === "string"
+          ? it.note
+          : "";
+    const normalizedSpecialInstructions = rawSpecialInstructions.trim();
+    if (normalizedSpecialInstructions) {
+      itemData.specialInstructions = normalizedSpecialInstructions;
+      itemData.note = normalizedSpecialInstructions;
+    }
+
     return itemData;
   });
 
@@ -389,6 +493,533 @@ function buildKot(items) {
     subtotal: toRupees(subtotalP),
     gst: 0,
     totalAmount: toRupees(subtotalP),
+  };
+}
+
+function getNextKotNumber(orderLike) {
+  const kotLines = Array.isArray(orderLike?.kotLines) ? orderLike.kotLines : [];
+  let maxKotNumber = 0;
+  for (let i = 0; i < kotLines.length; i++) {
+    const line = kotLines[i];
+    const fromField = Number(line?.kotNumber);
+    const candidate = Number.isFinite(fromField) && fromField > 0 ? fromField : i + 1;
+    if (candidate > maxKotNumber) maxKotNumber = candidate;
+  }
+  return maxKotNumber + 1;
+}
+
+function normalizeOrderSpecialInstructions(payload = {}) {
+  const candidates = [
+    payload?.specialInstructions,
+    payload?.specialInstruction,
+    payload?.orderNote,
+    payload?.note,
+    payload?.notes,
+  ];
+  for (const value of candidates) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      return trimmed;
+    }
+  }
+  return "";
+}
+
+const KOT_TEMPLATE_VERSION = "kotTemplateV2Compact";
+
+function escapePrintHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function sanitizeKotText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function isTakeawayLikeForKot(order = {}) {
+  const serviceType = String(order.serviceType || "")
+    .trim()
+    .toUpperCase();
+  const orderType = String(order.orderType || "")
+    .trim()
+    .toUpperCase();
+
+  // Service type is the primary source of truth. Ignore stale orderType for dine-in.
+  if (serviceType === "DINE_IN") return false;
+
+  if (
+    serviceType === "TAKEAWAY" ||
+    serviceType === "PICKUP" ||
+    serviceType === "DELIVERY"
+  ) {
+    return true;
+  }
+
+  // Backward compatibility when serviceType is missing.
+  if (!serviceType) {
+    return (
+      orderType === "PICKUP" ||
+      orderType === "DELIVERY" ||
+      orderType === "TAKEAWAY"
+    );
+  }
+
+  return false;
+}
+
+function resolveKotTypeLabel(order = {}) {
+  const serviceType = String(order.serviceType || "")
+    .trim()
+    .toUpperCase();
+  const orderType = String(order.orderType || "")
+    .trim()
+    .toUpperCase();
+
+  if (
+    serviceType === "DELIVERY" ||
+    (serviceType === "TAKEAWAY" && orderType === "DELIVERY")
+  ) {
+    return "DELIVERY";
+  }
+
+  if (
+    serviceType === "PICKUP" ||
+    (serviceType === "TAKEAWAY" && orderType === "PICKUP")
+  ) {
+    return "TAKEAWAY";
+  }
+
+  if (serviceType === "TAKEAWAY") return "TAKEAWAY";
+  return isTakeawayLikeForKot(order) ? "TAKEAWAY" : "DINE-IN";
+}
+
+function resolveKotOrderNote(order = {}, kot = {}) {
+  const candidates = [
+    order.specialInstructions,
+    order.specialInstruction,
+    order.orderNote,
+    order.note,
+    order.notes,
+    kot.specialInstructions,
+    kot.note,
+  ];
+  for (const value of candidates) {
+    const text = sanitizeKotText(value);
+    if (text) return text;
+  }
+  return "";
+}
+
+function resolveKotNumber(kot = {}, kotIndex = 0) {
+  const explicitNumber = Number(kot?.kotNumber);
+  if (Number.isFinite(explicitNumber) && explicitNumber > 0) {
+    return Math.floor(explicitNumber);
+  }
+  return kotIndex + 1;
+}
+
+function wrapKotText(text, maxChars = 32) {
+  const normalized = sanitizeKotText(text);
+  if (!normalized) return [];
+  if (normalized.length <= maxChars) return [normalized];
+
+  const words = normalized.split(" ");
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if ((`${current} ${word}`).length <= maxChars) {
+      current = `${current} ${word}`;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function formatRow(left, right, width = 32) {
+  const safeWidth = Number.isFinite(width) && width > 0 ? Math.floor(width) : 32;
+  const leftText = sanitizeKotText(left);
+  const rightText = sanitizeKotText(right);
+  if (!rightText) {
+    return leftText.length <= safeWidth ? leftText : leftText.slice(0, safeWidth);
+  }
+
+  const availableLeft = safeWidth - rightText.length - 1;
+  if (availableLeft <= 0) {
+    return rightText.length <= safeWidth
+      ? rightText
+      : rightText.slice(rightText.length - safeWidth);
+  }
+
+  let safeLeft = leftText;
+  if (safeLeft.length > availableLeft) {
+    safeLeft =
+      availableLeft > 2
+        ? `${safeLeft.slice(0, availableLeft - 2)}..`
+        : safeLeft.slice(0, availableLeft);
+  }
+
+  const gap = safeWidth - safeLeft.length - rightText.length;
+  const spacing = " ".repeat(gap > 0 ? gap : 1);
+  return `${safeLeft}${spacing}${rightText}`;
+}
+
+function collectItemModifiers(item = {}) {
+  const buckets = [
+    item.extras,
+    item.addOns,
+    item.addons,
+    item.modifiers,
+    item.variants,
+  ];
+  const names = [];
+
+  for (const bucket of buckets) {
+    if (!Array.isArray(bucket)) continue;
+    for (const entry of bucket) {
+      if (!entry) continue;
+      if (typeof entry === "string") {
+        const text = sanitizeKotText(entry);
+        if (text) names.push(text);
+        continue;
+      }
+      const name = sanitizeKotText(entry.name || entry.label || entry.value);
+      if (name) names.push(name);
+    }
+  }
+
+  return [...new Set(names)];
+}
+
+function getOrderRefForKot(order = {}) {
+  const orderId = String(order._id || "").trim();
+  if (!orderId) return "";
+  return orderId.length > 8
+    ? orderId.slice(orderId.length - 8).toUpperCase()
+    : orderId.toUpperCase();
+}
+
+function buildLine(text, options = {}) {
+  const sanitized = sanitizeKotText(text);
+  return {
+    text: sanitized,
+    align: options.align || "left",
+    bold: options.bold === true,
+    separator: options.separator === true,
+    indent: Number.isFinite(options.indent) ? options.indent : 0,
+  };
+}
+
+function renderKotHtmlFromLines({ lines, paperWidth }) {
+  const bodyWidth = paperWidth === "80mm" ? "80mm" : "58mm";
+  const maxWidth = paperWidth === "80mm" ? "300px" : "220px";
+  const separatorFallback = "-".repeat(paperWidth === "80mm" ? 42 : 32);
+
+  const htmlLines = lines
+    .map((line) => {
+      if (!line || typeof line !== "object") return "";
+      const alignClass =
+        line.align === "center"
+          ? "center"
+          : line.align === "right"
+            ? "right"
+            : "left";
+      if (line.separator) {
+        const sepText = escapePrintHtml(line.text || separatorFallback);
+        return `<div class="line ${alignClass}">${sepText}</div>`;
+      }
+      const text = escapePrintHtml(line.text || "");
+      if (!text) return '<div class="line">&nbsp;</div>';
+      const boldClass = line.bold ? " bold" : "";
+      const indent = Number.isFinite(line.indent) ? Math.max(0, line.indent) : 0;
+      const style = indent > 0 ? ` style="padding-left:${indent * 8}px"` : "";
+      return `<div class="line ${alignClass}${boldClass}"${style}>${text}</div>`;
+    })
+    .join("");
+
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>KOT Print</title>
+    <style>
+      @media print {
+        @page { size: ${bodyWidth} auto; margin: 0; }
+        body { margin: 0; padding: 0; }
+      }
+      body {
+        width: ${bodyWidth};
+        max-width: ${maxWidth};
+        margin: 0 auto;
+        padding: 1.5mm;
+        font-family: "Courier New", monospace;
+        font-size: 10px;
+        line-height: 1.2;
+        color: #000;
+      }
+      .line { white-space: pre-wrap; word-break: break-word; }
+      .left { text-align: left; }
+      .center { text-align: center; }
+      .right { text-align: right; }
+      .bold { font-weight: 700; }
+    </style>
+  </head>
+  <body>${htmlLines}</body>
+</html>`;
+}
+
+async function resolveOutletNameForKot(order = {}) {
+  const fallback = "TERRA CART";
+  if (!order?.cartId) return fallback;
+
+  const cartId =
+    typeof order.cartId?.toString === "function"
+      ? order.cartId.toString()
+      : String(order.cartId || "").trim();
+
+  if (!cartId) return fallback;
+
+  const cachedCafe = getCachedCafe(cartId);
+  if (cachedCafe?.cartName) {
+    return sanitizeKotText(cachedCafe.cartName) || fallback;
+  }
+
+  try {
+    const User = require("../models/userModel");
+    const cart = await User.findById(cartId).select("cartName name").lean();
+    if (!cart) return fallback;
+
+    const cartName = sanitizeKotText(cart.cartName || cart.name || fallback);
+    const mergedCache = {
+      ...(cachedCafe || {}),
+      cartName,
+    };
+    setCachedCafe(cartId, mergedCache);
+    return cartName || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function resolveKotPrinterConfig(order = {}) {
+  const fallback = {
+    businessName: "",
+    kotHeaderText: "",
+    centerAlign: true,
+  };
+  if (!order?.cartId) return fallback;
+
+  const cartId =
+    typeof order.cartId?.toString === "function"
+      ? order.cartId.toString()
+      : String(order.cartId || "").trim();
+  if (!cartId) return fallback;
+
+  try {
+    const config = await PrinterConfig.findOne({ cartId })
+      .select("businessName kotHeaderText centerAlign")
+      .lean();
+    if (!config) return fallback;
+    return {
+      businessName: sanitizeKotText(config.businessName || ""),
+      kotHeaderText:
+        typeof config.kotHeaderText === "string" ? config.kotHeaderText.trim() : "",
+      centerAlign: config.centerAlign !== false,
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+async function buildKotPrintTemplate({
+  order,
+  kot,
+  kotIndex,
+  paperWidth,
+}) {
+  const safePaperWidth = paperWidth === "80mm" ? "80mm" : "58mm";
+  const maxChars = safePaperWidth === "80mm" ? 42 : 32;
+  const separator = "-".repeat(maxChars);
+  const printerConfig = await resolveKotPrinterConfig(order);
+  const resolvedOutletName = await resolveOutletNameForKot(order);
+  const outletName = printerConfig.businessName || resolvedOutletName;
+  const customHeaderLines = String(printerConfig.kotHeaderText || "")
+    .split(/\r?\n/g)
+    .map((line) => sanitizeKotText(line))
+    .filter(Boolean);
+  const centerAlign = printerConfig.centerAlign !== false;
+  const lineAlign = centerAlign ? "center" : "left";
+  const serviceLabel = resolveKotTypeLabel(order);
+  const orderRef = getOrderRefForKot(order);
+  const kotNumber = resolveKotNumber(kot, kotIndex);
+  const timestampCandidate = kot?.createdAt || order?.createdAt || order?.updatedAt;
+  const parsedTimestamp = timestampCandidate
+    ? new Date(timestampCandidate)
+    : null;
+  const printDate =
+    parsedTimestamp instanceof Date && !Number.isNaN(parsedTimestamp.getTime())
+      ? parsedTimestamp
+      : new Date();
+  const datePart = printDate.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    timeZone: "Asia/Kolkata",
+  });
+  const timePart = printDate
+    .toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
+  })
+    .toUpperCase();
+  const dateLabel = `${datePart}, ${timePart}`;
+  const isTakeawayLike = isTakeawayLikeForKot(order);
+  const tableLabel = sanitizeKotText(order.tableNumber || order?.table?.number || "");
+  const hasTable = !isTakeawayLike && tableLabel;
+  const orderNote = resolveKotOrderNote(order, kot);
+  const tokenLabel =
+    isTakeawayLike && order?.takeawayToken
+      ? sanitizeKotText(order.takeawayToken)
+      : "";
+  const noteLines = orderNote
+    ? [
+        buildLine(separator, { separator: true }),
+        buildLine("Note:", { align: lineAlign, bold: true }),
+        ...wrapKotText(orderNote, maxChars).map((lineText) =>
+          buildLine(lineText, { align: lineAlign }),
+        ),
+        buildLine(separator, { separator: true }),
+      ]
+    : [buildLine(separator, { separator: true })];
+
+  const kotTitle = `KOT #${String(kotNumber).padStart(2, "0")} ${serviceLabel}`;
+
+  const lines = [
+    buildLine(outletName, { align: lineAlign, bold: true }),
+    ...customHeaderLines.map((lineText) =>
+      buildLine(lineText, { align: lineAlign, bold: true }),
+    ),
+    buildLine(kotTitle, { align: lineAlign, bold: true }),
+    buildLine(dateLabel, { align: lineAlign }),
+    buildLine(separator, { separator: true }),
+    ...(hasTable ? [buildLine(`Table: ${tableLabel}`, { align: lineAlign })] : []),
+    ...(tokenLabel &&
+    isTakeawayLike &&
+    serviceLabel !== "DELIVERY"
+      ? [buildLine(`Token: ${tokenLabel}`, { align: lineAlign })]
+      : []),
+    ...(orderRef ? [buildLine(`Ref: ${orderRef}`, { align: lineAlign })] : []),
+    ...noteLines,
+  ];
+
+  const items = Array.isArray(kot?.items) ? kot.items : [];
+  const printableItems = items.filter((item) => item && item.returned !== true);
+  const selectedAddons = Array.isArray(order?.selectedAddons)
+    ? order.selectedAddons.filter((addon) => addon && Number(addon.quantity || 1) > 0)
+    : [];
+
+  if (!printableItems.length && !selectedAddons.length) {
+    lines.push(buildLine("No items"));
+  } else {
+    const itemAlign = "left";
+    const indentedRowWidth = Math.max(8, maxChars - 2);
+    for (const item of printableItems) {
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      const itemName = sanitizeKotText(item.name || "Item");
+      lines.push(
+        buildLine(formatRow(itemName, `${qty}x`, maxChars), {
+          bold: true,
+          align: itemAlign,
+        }),
+      );
+
+      const modifiers = collectItemModifiers(item);
+      for (const modifier of modifiers) {
+        const wrapped = wrapKotText(`+ ${modifier}`, indentedRowWidth);
+        wrapped.forEach((lineText) => {
+          lines.push(
+            buildLine(lineText, {
+              align: itemAlign,
+              indent: 1,
+            }),
+          );
+        });
+      }
+
+      const itemNote = sanitizeKotText(item.specialInstructions || item.note || "");
+      if (itemNote) {
+        const wrapped = wrapKotText(`Note: ${itemNote}`, indentedRowWidth);
+        wrapped.forEach((lineText) => {
+          lines.push(
+            buildLine(lineText, {
+              align: itemAlign,
+              indent: 1,
+            }),
+          );
+        });
+      }
+    }
+
+    for (const addon of selectedAddons) {
+      const addonQty = Math.max(1, Number(addon.quantity) || 1);
+      const addonName = sanitizeKotText(addon.name || "Add-on");
+      lines.push(
+        buildLine(formatRow(`+ ${addonName}`, `${addonQty}x`, indentedRowWidth), {
+          align: itemAlign,
+          indent: 1,
+        }),
+      );
+    }
+  }
+
+  const totalQty = printableItems.reduce(
+    (sum, item) => sum + (Number(item?.quantity) || 0),
+    0,
+  );
+  lines.push(buildLine(separator, { separator: true }));
+  lines.push(
+    buildLine(`Items: ${printableItems.length}  Qty: ${totalQty}`, {
+      bold: true,
+      align: lineAlign,
+    }),
+  );
+
+  const html = renderKotHtmlFromLines({
+    lines,
+    paperWidth: safePaperWidth,
+  });
+
+  return {
+    templateVersion: KOT_TEMPLATE_VERSION,
+    paperWidth: safePaperWidth,
+    kotIndex,
+    kotNumber,
+    lines,
+    html,
+    orderMeta: {
+      orderId: String(order?._id || ""),
+      orderRef,
+      serviceType: serviceLabel,
+      tableNumber: hasTable ? tableLabel : null,
+      takeawayToken:
+        isTakeawayLike && order?.takeawayToken
+          ? sanitizeKotText(order.takeawayToken)
+          : null,
+      itemCount: printableItems.length,
+      totalQty,
+    },
   };
 }
 
@@ -661,32 +1292,59 @@ const createOrder = async (req, res) => {
       customerEmail,
       cartId: requestCartId, // Accept cartId from request body (for takeaway/pickup/delivery orders)
       customerLocation, // { latitude, longitude, address }
-      specialInstructions, // Special notes from customer
       selectedAddons, // Add-ons selected by customer
       takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
+      idempotencyKey,
     } = req.body;
+    const specialInstructions = normalizeOrderSpecialInstructions(req.body);
     let { tableNumber } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ message: "No items supplied" });
     }
 
+    const requestIdempotencyKey = String(
+      idempotencyKey || req.headers["x-idempotency-key"] || "",
+    ).trim();
+    if (requestIdempotencyKey) {
+      const existingByKey = await Order.findOne({
+        idempotencyKey: requestIdempotencyKey,
+      });
+      if (existingByKey) {
+        console.log(
+          `[ORDER] createOrder idempotent replay detected for key ${requestIdempotencyKey}. Returning existing order ${existingByKey._id}.`,
+        );
+        return res.json(existingByKey);
+      }
+    }
+
+    const normalizedServiceType = String(serviceType || "DINE_IN")
+      .trim()
+      .toUpperCase();
+    const normalizedOrderType =
+      typeof orderType === "string" ? orderType.trim().toUpperCase() : undefined;
+
     // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
     const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
-    if (!validServiceTypes.includes(serviceType)) {
+    if (!validServiceTypes.includes(normalizedServiceType)) {
       return res.status(400).json({ message: "Invalid service type" });
     }
 
     // Preserve subtype even when clients omit orderType but send serviceType=PICKUP/DELIVERY.
+    // Ignore stale orderType for explicit dine-in requests.
     const effectiveOrderType =
-      orderType ||
-      (serviceType === "PICKUP" || serviceType === "DELIVERY"
-        ? serviceType
-        : undefined);
+      normalizedServiceType === "DINE_IN"
+        ? undefined
+        : normalizedOrderType ||
+          (normalizedServiceType === "PICKUP" ||
+          normalizedServiceType === "DELIVERY"
+            ? normalizedServiceType
+            : undefined);
 
     // For PICKUP/DELIVERY, validate orderType
     if (
-      (serviceType === "PICKUP" || serviceType === "DELIVERY") &&
+      (normalizedServiceType === "PICKUP" ||
+        normalizedServiceType === "DELIVERY") &&
       !effectiveOrderType
     ) {
       return res.status(400).json({
@@ -697,13 +1355,13 @@ const createOrder = async (req, res) => {
 
     let tableDoc = null;
     const isTakeaway =
-      serviceType === "TAKEAWAY" ||
-      serviceType === "PICKUP" ||
-      serviceType === "DELIVERY";
+      normalizedServiceType === "TAKEAWAY" ||
+      normalizedServiceType === "PICKUP" ||
+      normalizedServiceType === "DELIVERY";
     const isPickup =
-      serviceType === "PICKUP" || effectiveOrderType === "PICKUP";
+      normalizedServiceType === "PICKUP" || effectiveOrderType === "PICKUP";
     const isDelivery =
-      serviceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
+      normalizedServiceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -712,7 +1370,7 @@ const createOrder = async (req, res) => {
         console.log(
           "[ORDER] createOrder - Missing sessionToken for DINE_IN order",
           {
-            serviceType,
+            serviceType: normalizedServiceType,
             tableId,
             tableNumber,
             hasItems: items && items.length > 0,
@@ -892,6 +1550,7 @@ const createOrder = async (req, res) => {
     let kot;
     try {
       kot = buildKot(items);
+      kot.kotNumber = 1;
       console.log("[ORDER] KOT built successfully:", {
         itemsCount: kot.items.length,
         subtotal: kot.subtotal,
@@ -1217,7 +1876,7 @@ const createOrder = async (req, res) => {
       _id: orderId,
       tableNumber: String(tableNumber),
       table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/pickup/delivery
-      serviceType: isPickup || isDelivery ? "TAKEAWAY" : serviceType, // Store as TAKEAWAY for backward compatibility
+      serviceType: isPickup || isDelivery ? "TAKEAWAY" : normalizedServiceType, // Store as TAKEAWAY for backward compatibility
       orderType: isPickup ? "PICKUP" : isDelivery ? "DELIVERY" : undefined,
       // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
@@ -1234,6 +1893,10 @@ const createOrder = async (req, res) => {
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
     };
+
+    if (requestIdempotencyKey) {
+      orderData.idempotencyKey = requestIdempotencyKey;
+    }
 
     // Only set cartId and franchiseId if they exist (they're optional in the schema)
     // Convert to ObjectId if needed (Mongoose will handle this automatically, but we ensure it's valid)
@@ -1263,8 +1926,8 @@ const createOrder = async (req, res) => {
     }
 
     // Store special instructions for all order types
-    if (specialInstructions && specialInstructions.trim()) {
-      orderData.specialInstructions = specialInstructions.trim();
+    if (specialInstructions) {
+      orderData.specialInstructions = specialInstructions;
     }
 
     // Add customer information for takeaway/pickup/delivery orders
@@ -1379,6 +2042,22 @@ const createOrder = async (req, res) => {
       order = await Order.create(orderData);
       console.log("[ORDER] Order created successfully:", order._id);
     } catch (createError) {
+      if (
+        createError?.code === 11000 &&
+        requestIdempotencyKey &&
+        (createError?.keyPattern?.idempotencyKey ||
+          createError?.keyValue?.idempotencyKey)
+      ) {
+        const existingByKey = await Order.findOne({
+          idempotencyKey: requestIdempotencyKey,
+        });
+        if (existingByKey) {
+          console.log(
+            `[ORDER] createOrder duplicate key handled for ${requestIdempotencyKey}. Returning existing order ${existingByKey._id}.`,
+          );
+          return res.json(existingByKey);
+        }
+      }
       console.error("[ORDER] Failed to create order:", createError);
       console.error("[ORDER] Error name:", createError.name);
       console.error("[ORDER] Error message:", createError.message);
@@ -1773,11 +2452,6 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Print KOT to printer (non-blocking)
-    printKOT(order, kot, 0).catch((err) => {
-      console.error("[ORDER] Failed to print KOT:", err);
-    });
-
     return res.status(201).json(order);
   } catch (err) {
     console.error("[ORDER] createOrder - Unhandled error:", err);
@@ -1803,7 +2477,11 @@ const addKot = async (req, res) => {
     JSON.stringify(req.body, null, 2),
   );
   try {
-    const { items, specialInstructions } = req.body;
+    const { items } = req.body;
+    const requestKotIdempotencyKey = String(
+      req.body?.idempotencyKey || req.headers["x-idempotency-key"] || "",
+    ).trim();
+    const specialInstructions = normalizeOrderSpecialInstructions(req.body);
 
     // Enhanced validation with detailed error messages
     if (!items) {
@@ -1834,6 +2512,17 @@ const addKot = async (req, res) => {
     if (!order) {
       console.error("[ORDER] addKot - Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (
+      requestKotIdempotencyKey &&
+      Array.isArray(order.kotRequestKeys) &&
+      order.kotRequestKeys.includes(requestKotIdempotencyKey)
+    ) {
+      console.log(
+        `[ORDER] addKot idempotent replay detected for key ${requestKotIdempotencyKey}. Returning existing order ${order._id}.`,
+      );
+      return res.json(order);
     }
 
     // Define statuses that allow adding KOTs
@@ -1975,6 +2664,7 @@ const addKot = async (req, res) => {
     let newKot;
     try {
       newKot = buildKot(items);
+      newKot.kotNumber = getNextKotNumber(order);
       console.log("[ORDER] addKot - KOT built successfully:", {
         itemsCount: newKot.items.length,
         subtotal: newKot.subtotal,
@@ -1990,13 +2680,19 @@ const addKot = async (req, res) => {
     }
 
     order.kotLines.push(newKot);
+    if (requestKotIdempotencyKey) {
+      const requestKeys = Array.isArray(order.kotRequestKeys)
+        ? [...order.kotRequestKeys]
+        : [];
+      if (!requestKeys.includes(requestKotIdempotencyKey)) {
+        requestKeys.push(requestKotIdempotencyKey);
+      }
+      order.kotRequestKeys = requestKeys;
+    }
 
     // Allow customer to attach/update special instructions when adding KOT
-    if (
-      typeof specialInstructions === "string" &&
-      specialInstructions.trim().length > 0
-    ) {
-      order.specialInstructions = specialInstructions.trim();
+    if (specialInstructions) {
+      order.specialInstructions = specialInstructions;
     }
 
     try {
@@ -2126,12 +2822,6 @@ const addKot = async (req, res) => {
         );
       }
     }
-
-    // Print new KOT to printer (non-blocking)
-    const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex).catch((err) => {
-      console.error("[ORDER] Failed to print KOT:", err);
-    });
 
     return res.json(order);
   } catch (err) {
@@ -2268,16 +2958,17 @@ const getOrders = async (req, res) => {
       ["waiter", "cook", "captain", "manager"].includes(req.user.role)
     ) {
       // Mobile users - ONLY see orders from their assigned cart/kiosk
-      // Use cafeId from req.user (populated by middleware)
-      if (req.user.cafeId) {
-        query.cartId = req.user.cafeId;
+      // Prefer cartId, fallback to cafeId for backward compatibility.
+      const mobileCartId = req.user.cartId || req.user.cafeId;
+      if (mobileCartId) {
+        query.cartId = mobileCartId;
         console.log(
-          `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${req.user.cafeId}`,
+          `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${mobileCartId}`,
         );
       } else {
-        // If cafeId not set, return empty array (should not happen if middleware works correctly)
+        // If no cart binding found, return empty set instead of leaking cross-cart data.
         console.warn(
-          `[GET_ORDERS] Mobile user ${req.user._id} has no cafeId - returning empty array`,
+          `[GET_ORDERS] Mobile user ${req.user._id} has no cartId/cafeId - returning empty array`,
         );
         return res.json([]);
       }
@@ -2419,14 +3110,15 @@ const getOrderById = async (req, res) => {
       ["waiter", "cook", "captain", "manager"].includes(req.user.role)
     ) {
       // Mobile users - check if order belongs to their assigned cart/kiosk
-      if (!req.user.cafeId) {
+      const mobileCartId = req.user.cartId || req.user.cafeId;
+      if (!mobileCartId) {
         return res
           .status(403)
           .json({ message: "No cart/kiosk assigned to your account" });
       }
       if (
         !order.cartId ||
-        order.cartId.toString() !== req.user.cafeId.toString()
+        order.cartId.toString() !== mobileCartId.toString()
       ) {
         return res
           .status(403)
@@ -2490,12 +3182,26 @@ const getOrderById = async (req, res) => {
       } else {
         console.log(`[INVOICE] Fetching cart data for ID: ${cartId}`);
         const cafe = await User.findById(cartId)
-          .select("address cartName location name")
+          .select(
+            "address cartName location name phone managerHelplineNumber emergencyContacts"
+          )
           .lean();
         if (cafe) {
+          const primaryEmergencyContact =
+            (Array.isArray(cafe.emergencyContacts) &&
+              (cafe.emergencyContacts.find((entry) => entry?.isPrimary) ||
+                cafe.emergencyContacts[0])) ||
+            null;
           order.cafe = {
             address: cafe.address || cafe.location,
             cartName: cafe.cartName || cafe.name,
+            phone: cafe.phone || null,
+            managerHelplineNumber:
+              cafe.managerHelplineNumber ||
+              cafe.phone ||
+              primaryEmergencyContact?.phone ||
+              null,
+            primaryEmergencyContact,
           };
           setCachedCafe(cartId, order.cafe);
           console.log(`[INVOICE] Cart data loaded:`, {
@@ -2527,6 +3233,7 @@ const getOrderById = async (req, res) => {
 const addItemsToOrder = async (req, res) => {
   try {
     const { items } = req.body;
+    const specialInstructions = normalizeOrderSpecialInstructions(req.body);
     const orderId = req.params.id;
 
     // Validate items
@@ -2613,6 +3320,7 @@ const addItemsToOrder = async (req, res) => {
     let newKot;
     try {
       newKot = buildKot(items);
+      newKot.kotNumber = getNextKotNumber(order);
       console.log("[ORDER] addItemsToOrder - KOT built successfully:", {
         itemsCount: newKot.items.length,
         subtotal: newKot.subtotal,
@@ -2629,6 +3337,10 @@ const addItemsToOrder = async (req, res) => {
 
     // Add the new KOT to the order
     order.kotLines.push(newKot);
+
+    if (specialInstructions) {
+      order.specialInstructions = specialInstructions;
+    }
 
     try {
       await order.save();
@@ -2656,12 +3368,6 @@ const addItemsToOrder = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
     }
-
-    // Print new KOT to printer (non-blocking)
-    const kotIndex = order.kotLines.length - 1;
-    printKOT(order, newKot, kotIndex).catch((err) => {
-      console.error("[ORDER] Failed to print KOT:", err);
-    });
 
     return res.json(order);
   } catch (err) {
@@ -4086,10 +4792,23 @@ const updatePrintStatus = async (req, res) => {
       return res.json(order);
     }
 
-    // Atomic: only update if kotPrinted/billPrinted are not already true (prevent duplicate prints)
+    // Atomic guards:
+    // - billPrinted should only flip once
+    // - kotPrinted should only flip once when no index progression is provided
+    // - lastPrintedKotIndex can only move forward (prevents duplicate same-KOT updates)
     const filter = { _id: req.params.id };
-    if (kotPrinted === true) filter["printStatus.kotPrinted"] = { $ne: true };
     if (billPrinted === true) filter["printStatus.billPrinted"] = { $ne: true };
+    const hasLastPrintedKotIndex =
+      typeof lastPrintedKotIndex === "number" && lastPrintedKotIndex >= 0;
+    if (kotPrinted === true && !hasLastPrintedKotIndex) {
+      filter["printStatus.kotPrinted"] = { $ne: true };
+    }
+    if (hasLastPrintedKotIndex) {
+      filter.$or = [
+        { "printStatus.lastPrintedKotIndex": { $lt: lastPrintedKotIndex } },
+        { "printStatus.lastPrintedKotIndex": { $exists: false } },
+      ];
+    }
 
     const updated = await Order.findOneAndUpdate(
       filter,
@@ -4105,6 +4824,195 @@ const updatePrintStatus = async (req, res) => {
   }
 };
 
+// ---------------- GET KOT PRINT TEMPLATE (BACKEND SINGLE SOURCE) ----------------
+const getKotPrintTemplate = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id)
+      .populate("table", "number name")
+      .lean();
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const accessError = resolvePrintAccessError(req.user, order);
+    if (accessError) {
+      return res.status(403).json({ message: accessError });
+    }
+
+    const kotLines = Array.isArray(order.kotLines) ? order.kotLines : [];
+    if (!kotLines.length) {
+      return res.status(400).json({ message: "Order has no KOT lines" });
+    }
+
+    const requestedKotIndex = toNonNegativeInt(req.query?.kotIndex);
+    const kotIndex =
+      requestedKotIndex != null ? requestedKotIndex : kotLines.length - 1;
+    if (kotIndex < 0 || kotIndex >= kotLines.length) {
+      return res.status(400).json({ message: "Invalid kotIndex" });
+    }
+
+    const paperWidthRaw = String(
+      req.query?.paperWidth || req.query?.paper || "58mm",
+    )
+      .trim()
+      .toLowerCase();
+    const paperWidth = paperWidthRaw.includes("80") ? "80mm" : "58mm";
+
+    const kot = kotLines[kotIndex] || {};
+    const template = await buildKotPrintTemplate({
+      order,
+      kot,
+      kotIndex,
+      paperWidth,
+    });
+
+    const printerId = normalizePrinterId(req.query?.printerId || "kitchen-primary");
+    const printKey = buildAutoPrintKey({
+      order,
+      docType: "KOT",
+      printerId,
+      kotIndex,
+      kotNumber: template.kotNumber,
+      orderVersion:
+        order?.updatedAt instanceof Date
+          ? order.updatedAt.toISOString()
+          : String(order?.updatedAt || ""),
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        ...template,
+        orderId: String(order._id),
+        printKey,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ---------------- CLAIM AUTO-PRINT JOB (IDEMPOTENT) ----------------
+const claimPrintJob = async (req, res) => {
+  try {
+    const {
+      docType,
+      printerId,
+      kotIndex,
+      kotNumber,
+      orderVersion,
+      printKey,
+      metadata,
+    } = req.body || {};
+
+    const normalizedDocType = normalizeDocType(docType);
+    if (!normalizedDocType) {
+      return res.status(400).json({ message: "docType must be KOT or BILL" });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const accessError = resolvePrintAccessError(req.user, order);
+    if (accessError) {
+      return res.status(403).json({ message: accessError });
+    }
+
+    const normalizedPrinterId = normalizePrinterId(printerId);
+    const resolvedPrintKey =
+      String(printKey || "").trim() ||
+      buildAutoPrintKey({
+        order,
+        docType: normalizedDocType,
+        printerId: normalizedPrinterId,
+        kotIndex,
+        kotNumber,
+        orderVersion,
+      });
+
+    const safeMetadata = metadata && typeof metadata === "object" ? metadata : null;
+
+    try {
+      const job = await PrintJob.create({
+        printKey: resolvedPrintKey,
+        orderId: order._id,
+        cartId: order.cartId || null,
+        docType: normalizedDocType,
+        printerId: normalizedPrinterId,
+        orderVersion: String(orderVersion || "").trim(),
+        status: "PENDING",
+        metadata: safeMetadata,
+      });
+
+      return res.json({
+        claimed: true,
+        printKey: resolvedPrintKey,
+        jobId: job._id,
+      });
+    } catch (createError) {
+      if (
+        createError?.code === 11000 &&
+        (createError?.keyPattern?.printKey || createError?.keyValue?.printKey)
+      ) {
+        return res.json({
+          claimed: false,
+          printKey: resolvedPrintKey,
+          reason: "already-claimed",
+        });
+      }
+      throw createError;
+    }
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+// ---------------- COMPLETE AUTO-PRINT JOB ----------------
+const completePrintJob = async (req, res) => {
+  try {
+    const { printKey, docType, success = true, errorMessage } = req.body || {};
+    const resolvedPrintKey = String(printKey || "").trim();
+    if (!resolvedPrintKey) {
+      return res.status(400).json({ message: "printKey is required" });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const accessError = resolvePrintAccessError(req.user, order);
+    if (accessError) {
+      return res.status(403).json({ message: accessError });
+    }
+
+    const normalizedDocType = normalizeDocType(docType);
+    const filter = {
+      orderId: order._id,
+      printKey: resolvedPrintKey,
+      ...(normalizedDocType ? { docType: normalizedDocType } : {}),
+    };
+
+    const status = success ? "SUCCESS" : "FAILED";
+    const update = {
+      status,
+      completedAt: new Date(),
+      errorMessage: success ? "" : String(errorMessage || "").trim(),
+    };
+
+    const job = await PrintJob.findOneAndUpdate(filter, { $set: update }, { new: true });
+    if (!job) {
+      return res.status(404).json({ message: "Print job not found" });
+    }
+
+    return res.json({
+      success: true,
+      printKey: job.printKey,
+      status: job.status,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 module.exports = {
   createOrder,
   getNextTakeawayToken,
@@ -4114,6 +5022,7 @@ module.exports = {
   finalizeOrder,
   getOrders,
   getOrderById,
+  getKotPrintTemplate,
   updateOrderStatus,
   acceptOrder,
   cancelOrderByCustomer,
@@ -4123,4 +5032,6 @@ module.exports = {
   returnItems,
   convertToTakeaway,
   updatePrintStatus,
+  claimPrintJob,
+  completePrintJob,
 };
