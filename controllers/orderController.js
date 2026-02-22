@@ -204,6 +204,43 @@ const resolvePrintAccessError = (user, order) => {
   return "Not authorized for this action";
 };
 
+const MOBILE_ORDER_ROLES = new Set([
+  "waiter",
+  "cook",
+  "captain",
+  "manager",
+  "employee",
+]);
+
+const resolveMobileCartId = async (user) => {
+  if (!user) return null;
+
+  if (user.cartId || user.cafeId) {
+    return user.cartId || user.cafeId;
+  }
+
+  let employee = null;
+  if (user.employeeId) {
+    employee = await Employee.findById(user.employeeId).select("cartId cafeId").lean();
+  }
+
+  if (!employee && user._id) {
+    employee = await Employee.findOne({ userId: user._id })
+      .select("cartId cafeId")
+      .lean();
+  }
+
+  if (!employee && user.email) {
+    employee = await Employee.findOne({
+      email: String(user.email).toLowerCase(),
+    })
+      .select("cartId cafeId")
+      .lean();
+  }
+
+  return employee?.cartId || employee?.cafeId || null;
+};
+
 const buildAutoPrintKey = ({
   order,
   docType,
@@ -2969,13 +3006,10 @@ const getOrders = async (req, res) => {
       console.log(
         `[GET_ORDERS] Franchise admin ${req.user._id} - filtering by franchiseId: ${req.user._id}`,
       );
-    } else if (
-      req.user &&
-      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
-    ) {
+    } else if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
       // Mobile users - ONLY see orders from their assigned cart/kiosk
       // Prefer cartId, fallback to cafeId for backward compatibility.
-      const mobileCartId = req.user.cartId || req.user.cafeId;
+      const mobileCartId = await resolveMobileCartId(req.user);
       if (mobileCartId) {
         query.cartId = mobileCartId;
         console.log(
@@ -3130,12 +3164,9 @@ const getOrderById = async (req, res) => {
           .status(403)
           .json({ message: "Order does not belong to your franchise" });
       }
-    } else if (
-      req.user &&
-      ["waiter", "cook", "captain", "manager"].includes(req.user.role)
-    ) {
+    } else if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
       // Mobile users - check if order belongs to their assigned cart/kiosk
-      const mobileCartId = req.user.cartId || req.user.cafeId;
+      const mobileCartId = await resolveMobileCartId(req.user);
       if (!mobileCartId) {
         return res
           .status(403)
