@@ -122,14 +122,19 @@ exports.getDashboardStats = async (req, res) => {
         },
       ]),
 
-      // Pending KOTs (orders with status pending/preparing)
+      // Pending KOTs (orders with status pending/preparing/ready)
+      // Keep cart scope and status scope in separate clauses to avoid key collisions.
       Order.countDocuments({
-        ...orderScope,
-        $or: [
-          { status: /^pending$/i },
-          { status: /^confirmed$/i },
-          { status: /^preparing$/i },
-          { status: /^ready$/i },
+        $and: [
+          orderScope,
+          {
+            $or: [
+              { status: /^pending$/i },
+              { status: /^confirmed$/i },
+              { status: /^preparing$/i },
+              { status: /^ready$/i },
+            ],
+          },
         ],
       }),
 
