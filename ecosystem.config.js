@@ -11,8 +11,9 @@ module.exports = {
   apps: [
     {
       name: 'terra-cart-backend',
-      script: './server.js',
-      cwd: './backend',
+      // Use config file directory so PM2 works no matter where it is started from
+      script: 'server.js',
+      cwd: __dirname,
       instances: process.env.PM2_INSTANCES || 'max', // Scale with CPU cores by default
       exec_mode: process.env.PM2_EXEC_MODE || 'cluster',
       watch: false, // Set to true for development

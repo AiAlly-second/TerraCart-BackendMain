@@ -7,6 +7,9 @@ const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const Employee = require("../models/employeeModel");
+
+const Cart = require("../models/cartModel");
+const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
 } = require("../services/costing-v2/orderConsumptionService");
@@ -2431,9 +2434,14 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
+    // TAKEAWAY/PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
+    const isTakeawayAwaitingPayment =
+      ["TAKEAWAY", "PICKUP", "DELIVERY"].includes(
+        order.serviceType || ""
+      ) && order.status === "Pending";
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe) {
+    if (order.cartId && io && emitToCafe && !isTakeawayAwaitingPayment) {
       // Only emit to admin panel - customer frontend uses polling
       emitToCafe(io, order.cartId.toString(), "order:created", order);
       emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
@@ -2451,6 +2459,14 @@ const createOrder = async (req, res) => {
         );
       }
     }
+
+    // Print KOT to printer (non-blocking). Skip for takeaway awaiting payment – print when payment is done.
+    if (!isTakeawayAwaitingPayment) {
+      printKOT(order, kot, 0).catch((err) => {
+        console.error("[ORDER] Failed to print KOT:", err);
+      });
+    }
+
 
     return res.status(201).json(order);
   } catch (err) {
@@ -2975,6 +2991,15 @@ const getOrders = async (req, res) => {
     }
     // For super_admin, no query-level restriction (see all orders)
 
+    // TAKEAWAY/PICKUP/DELIVERY: hide order from cart admin until payment is done (status Pending = unpaid; after pay, status becomes Paid)
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { serviceType: { $nin: ["TAKEAWAY", "PICKUP", "DELIVERY"] } },
+        { status: { $ne: "Pending" } },
+      ],
+    });
+
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
     // Use select to limit fields and improve performance
@@ -3167,7 +3192,7 @@ const getOrderById = async (req, res) => {
       console.warn(`[INVOICE] Order ${order._id} has no franchiseId`);
     }
 
-    // Populate cafe address if cartId exists and not already populated
+    // Populate cafe/cart address for invoice (cartId is cart admin User _id)
     if (order.cartId && !order.cafe) {
       const User = require("../models/userModel");
       const cartId = order.cartId.toString
@@ -3186,22 +3211,28 @@ const getOrderById = async (req, res) => {
             "address cartName location name phone managerHelplineNumber emergencyContacts"
           )
           .lean();
-        if (cafe) {
-          const primaryEmergencyContact =
-            (Array.isArray(cafe.emergencyContacts) &&
-              (cafe.emergencyContacts.find((entry) => entry?.isPrimary) ||
-                cafe.emergencyContacts[0])) ||
+
+        let address = (cafe && (cafe.address || cafe.location)) || null;
+        let cafeName = (cafe && (cafe.cartName || cafe.name)) || null;
+
+        // Prefer Cart document address (from cart registration/settings)
+        const cartDoc = await Cart.findOne({ cartAdminId: order.cartId })
+          .select("address location")
+          .lean();
+        if (cartDoc) {
+          const cartAddress =
+            (cartDoc.address && (cartDoc.address.fullAddress || [cartDoc.address.street, cartDoc.address.city, cartDoc.address.state, cartDoc.address.zipCode].filter(Boolean).join(", "))) ||
+            cartDoc.location ||
             null;
+          if (cartAddress) address = cartAddress;
+        }
+
+        if (cafe || address || cafeName) {
           order.cafe = {
-            address: cafe.address || cafe.location,
-            cartName: cafe.cartName || cafe.name,
-            phone: cafe.phone || null,
-            managerHelplineNumber:
-              cafe.managerHelplineNumber ||
-              cafe.phone ||
-              primaryEmergencyContact?.phone ||
-              null,
-            primaryEmergencyContact,
+            address: address || undefined,
+            cartName: cafeName,
+            cafeName: cafeName,
+            name: cafeName,
           };
           setCachedCafe(cartId, order.cafe);
           console.log(`[INVOICE] Cart data loaded:`, {
@@ -3213,8 +3244,7 @@ const getOrderById = async (req, res) => {
         }
       }
     } else if (order.cartId && order.cafe) {
-      // Data already populated, skip fetching
-      // No need to log - this is expected
+      // Data already populated (e.g. from cache), skip fetching
     } else {
       console.warn(`[INVOICE] Order ${order._id} has no cartId`);
     }
@@ -3758,6 +3788,42 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
+    // TAKEAWAY/PICKUP/DELIVERY: block order from proceeding until payment is complete (admin must mark payment paid first)
+    const isTakeawayLike =
+      order.serviceType === "TAKEAWAY" ||
+      order.orderType === "PICKUP" ||
+      order.orderType === "DELIVERY";
+    const isProceedingStatus = [
+      "Confirmed",
+      "Preparing",
+      "Being Prepared",
+      "BeingPrepared",
+      "Ready",
+      "Completed",
+      "Served",
+    ].includes(status);
+    if (isTakeawayLike && isProceedingStatus) {
+      const alreadyPaid =
+        order.status === "Paid" || order.paymentStatus === "PAID";
+      let paymentComplete = alreadyPaid;
+      if (!paymentComplete) {
+        const paidPayment = await Payment.findOne({
+          orderId: order._id,
+          status: "PAID",
+        })
+          .limit(1)
+          .lean();
+        paymentComplete = !!paidPayment;
+      }
+      if (!paymentComplete) {
+        return res.status(400).json({
+          message:
+            "Payment must be marked complete before this order can proceed. Please confirm payment (online or cash) in the Payments panel first.",
+          code: "PAYMENT_REQUIRED",
+        });
+      }
+    }
+
     // Log the status change (admin has full control)
     console.log("Status update (admin flexible):", {
       orderId: order._id,
@@ -4096,13 +4162,17 @@ const cancelOrderByCustomer = async (req, res) => {
           .json({ message: "Not authorized, invalid token" });
       }
     } else if (order.serviceType === "TAKEAWAY") {
-      // Verify sessionToken for takeaway orders
-      // CRITICAL: Be more lenient for takeaway orders - allow if:
-      // 1. Order has no sessionToken (old orders created before sessionToken was required)
-      // 2. SessionToken matches order's sessionToken
-      // 3. SessionToken is provided and order has no sessionToken (backward compatibility)
-      if (order.sessionToken) {
-        // Order has a sessionToken - must match
+      // Verify sessionToken for takeaway orders when possible.
+      // For Pending takeaway orders (customer backed out from payment): always allow cancel
+      // so the order is removed from cart admin view without requiring sessionToken match.
+      const isPendingTakeaway =
+        order.status === "Pending" && order.serviceType === "TAKEAWAY";
+      if (isPendingTakeaway) {
+        // Allow cancel without sessionToken so "back without payment" always succeeds
+        console.log(
+          `[ORDER] Takeaway Pending order ${orderId} - allowing cancellation (customer left payment)`,
+        );
+      } else if (order.sessionToken) {
         if (!sessionToken) {
           return res.status(401).json({ message: "Not authorized, no token" });
         }
@@ -4112,10 +4182,8 @@ const cancelOrderByCustomer = async (req, res) => {
             .json({ message: "Not authorized, invalid token" });
         }
       } else {
-        // Order has no sessionToken - allow cancellation for backward compatibility
-        // This handles old orders created before sessionToken was required
         console.log(
-          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation for backward compatibility`,
+          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation`,
         );
       }
     }
@@ -4335,14 +4403,16 @@ const confirmPaymentByCustomer = async (req, res) => {
       }
     }
 
-    // Emit socket event to cafe room
+    // Emit socket event to cafe room (so cart admin sees the order when payment is confirmed)
     const emitToCafe = req.app.get("emitToCafe");
 
     // Release table
     await releaseTableForOrder(order, io, emitToCafe);
-    if (order.cartId) {
+    if (order.cartId && emitToCafe) {
+      emitToCafe(io, order.cartId.toString(), "order:created", order);
+      emitToCafe(io, order.cartId.toString(), "newOrder", order);
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
     }
 
     console.log("Payment confirmed by customer:", order._id);

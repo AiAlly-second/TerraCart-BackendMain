@@ -1,6 +1,7 @@
 const Cart = require("../models/cartModel");
 const User = require("../models/userModel");
 const Franchise = require("../models/franchiseModel");
+const mongoose = require("mongoose");
 const { isWithinDeliveryRange, calculateDistance } = require("../utils/distanceCalculator");
 
 function pickFirstNonEmptyString(...values) {
@@ -388,6 +389,8 @@ exports.updateCartSettings = async (req, res) => {
       pinCode,
       address,
       coordinates,
+      contactPhone,
+      contactEmail,
     } = req.body;
 
     // Find cart by cartAdminId (cart admin can only update their own cart)
@@ -433,6 +436,8 @@ exports.updateCartSettings = async (req, res) => {
     if (pinCode !== undefined) updateData.pinCode = pinCode;
     if (address !== undefined) updateData.address = address;
     if (coordinates !== undefined) updateData.coordinates = coordinates;
+    if (contactPhone !== undefined) updateData.contactPhone = contactPhone ? String(contactPhone).trim() : null;
+    if (contactEmail !== undefined) updateData.contactEmail = contactEmail ? String(contactEmail).trim() : null;
 
     await Cart.findByIdAndUpdate(cart._id, { $set: updateData }, { new: true });
 
@@ -603,6 +608,148 @@ exports.getMyCartSettings = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to get cart settings",
+    });
+  }
+};
+
+/**
+ * Get cart by cart admin user ID (for invoice address etc.)
+ * @route GET /api/carts/by-admin/:userId
+ * @access Protected - cart admin (own cart), franchise admin (carts in franchise), super_admin (any)
+ */
+exports.getCartByAdminId = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    const cart = await Cart.findOne({ cartAdminId: userId })
+      .select("name location address coordinates pickupEnabled deliveryEnabled deliveryRadius deliveryCharge contactPhone contactEmail")
+      .populate("cartAdminId", "name cartName cafeName email")
+      .populate("franchiseId", "name")
+      .lean();
+
+    if (!cart) {
+      return res.status(404).json({
+        success: false,
+        message: "Cart not found for this user",
+      });
+    }
+
+    // Authorization: same user (cart admin), franchise admin of this cart, or super_admin
+    const requestUserId = req.user?._id?.toString();
+    const targetUserId = userId.toString?.() ? userId.toString() : String(userId);
+
+    if (req.user?.role === "super_admin") {
+      // allow
+    } else if (req.user?.role === "franchise_admin") {
+      const cartFranchiseId = cart.franchiseId?._id?.toString() || cart.franchiseId?.toString();
+      if (!cartFranchiseId || cartFranchiseId !== requestUserId) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. Cart does not belong to your franchise.",
+        });
+      }
+    } else if (req.user?.role === "admin" || req.user?.role === "cart_admin") {
+      if (requestUserId !== targetUserId) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied. You can only view your own cart.",
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied.",
+      });
+    }
+
+    // Resolve display address from Cart (same as order invoice)
+    const addressStr =
+      (cart.address && (cart.address.fullAddress || [cart.address.street, cart.address.city, cart.address.state, cart.address.zipCode].filter(Boolean).join(", "))) ||
+      cart.location ||
+      null;
+
+    res.json({
+      success: true,
+      data: {
+        ...cart,
+        name: resolveCartDisplayName(cart),
+        address: addressStr || undefined,
+        location: cart.location || undefined,
+      },
+    });
+  } catch (error) {
+    console.error("[CART] Error getting cart by admin id:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get cart",
+    });
+  }
+};
+
+/**
+ * Get cart contact info for customer (Contact us on menu page)
+ * @route GET /api/carts/public-contact?cartId=...
+ * @access Public - cartId can be cart document _id OR cart admin user _id
+ */
+exports.getCartContactPublic = async (req, res) => {
+  try {
+    const cartRef = typeof req.query.cartId === "string" ? req.query.cartId.trim() : "";
+    if (!cartRef) {
+      return res.json({ success: true, data: null });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(cartRef)) {
+      return res.json({ success: true, data: null });
+    }
+
+    // Support both:
+    // 1) cart document id
+    // 2) cart admin user id (used by table/cart context in many customer flows)
+    let cart = await Cart.findById(cartRef)
+      .select("name contactPhone contactEmail cartAdminId")
+      .lean();
+
+    if (!cart) {
+      cart = await Cart.findOne({ cartAdminId: cartRef })
+        .select("name contactPhone contactEmail cartAdminId")
+        .lean();
+    }
+
+    if (!cart) {
+      return res.json({ success: true, data: null });
+    }
+
+    let fallbackUser = null;
+    if (cart.cartAdminId) {
+      fallbackUser = await User.findById(cart.cartAdminId)
+        .select("name cartName phone email")
+        .lean();
+    }
+
+    const name = resolveCartDisplayName({
+      ...cart,
+      cartAdminId: fallbackUser || cart.cartAdminId,
+    });
+
+    res.json({
+      success: true,
+      data: {
+        name,
+        contactPhone: cart.contactPhone || fallbackUser?.phone || null,
+        contactEmail: cart.contactEmail || fallbackUser?.email || null,
+      },
+    });
+  } catch (error) {
+    console.error("[CART] Error getting public cart contact:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get contact",
     });
   }
 };

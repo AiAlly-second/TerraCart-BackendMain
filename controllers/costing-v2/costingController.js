@@ -97,6 +97,119 @@ const toObjectIdSafe = (id) => {
   return mongoose.Types.ObjectId.isValid(str) ? new mongoose.Types.ObjectId(str) : null;
 };
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+const parseDateAtStartOfDay = (value) => {
+  if (value == null || value === "") return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+
+const parseDateAtEndOfDay = (value) => {
+  if (value == null || value === "") return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setHours(23, 59, 59, 999);
+  return date;
+};
+
+/**
+ * Supports both query styles:
+ * - from/to (current costing-v2 UI)
+ * - startDate/endDate (backward compatibility)
+ */
+const resolveDateRangeFromQuery = (query = {}) => {
+  const rawFrom =
+    typeof query.from === "string" && query.from.trim() !== ""
+      ? query.from.trim()
+      : typeof query.startDate === "string" && query.startDate.trim() !== ""
+      ? query.startDate.trim()
+      : null;
+  const rawTo =
+    typeof query.to === "string" && query.to.trim() !== ""
+      ? query.to.trim()
+      : typeof query.endDate === "string" && query.endDate.trim() !== ""
+      ? query.endDate.trim()
+      : null;
+
+  const fromDate = rawFrom ? parseDateAtStartOfDay(rawFrom) : null;
+  const toDate = rawTo ? parseDateAtEndOfDay(rawTo) : null;
+
+  if ((rawFrom && !fromDate) || (rawTo && !toDate)) {
+    return {
+      error: "Invalid date format. Use YYYY-MM-DD for from/to filters",
+    };
+  }
+
+  if (fromDate && toDate && fromDate > toDate) {
+    return { error: "From date cannot be after to date" };
+  }
+
+  return {
+    from: rawFrom,
+    to: rawTo,
+    fromDate,
+    toDate,
+  };
+};
+
+/** Build cartId match that supports both ObjectId and string stored IDs. */
+const buildFlexibleCartIdFilter = (id) => {
+  const objId = toObjectIdSafe(id);
+  const strId = id
+    ? typeof id === "string"
+      ? id
+      : id.toString?.() || String(id)
+    : null;
+
+  const values = [];
+  if (objId) values.push(objId);
+  if (strId && (!objId || strId !== objId.toString())) values.push(strId);
+
+  if (values.length === 0) return null;
+  if (values.length === 1) return values[0];
+  return { $in: values };
+};
+
+const flattenCartIdFilterValues = (ids = []) =>
+  ids.flatMap((id) => {
+    const filter = buildFlexibleCartIdFilter(id);
+    if (!filter) return [];
+    return filter.$in ? filter.$in : [filter];
+  });
+
+const sumProratedPeriodAmount = (rows = [], fromDate = null, toDate = null) =>
+  Number(
+    rows
+      .reduce((sum, row) => {
+        const amount = Number(row?.amount) || 0;
+        if (amount === 0) return sum;
+
+        const periodFrom = parseDateAtStartOfDay(row?.periodFrom);
+        const periodTo = parseDateAtEndOfDay(row?.periodTo);
+        if (!periodFrom || !periodTo || periodTo < periodFrom) return sum;
+
+        if (!fromDate && !toDate) return sum + amount;
+
+        const effectiveFrom = fromDate || periodFrom;
+        const effectiveTo = toDate || periodTo;
+        const overlapFrom = periodFrom > effectiveFrom ? periodFrom : effectiveFrom;
+        const overlapTo = periodTo < effectiveTo ? periodTo : effectiveTo;
+        if (overlapTo < overlapFrom) return sum;
+
+        const totalDays =
+          Math.max(0, Math.floor((periodTo.getTime() - periodFrom.getTime()) / MS_PER_DAY)) + 1;
+        const overlapDays =
+          Math.max(0, Math.floor((overlapTo.getTime() - overlapFrom.getTime()) / MS_PER_DAY)) + 1;
+        if (totalDays <= 0 || overlapDays <= 0) return sum;
+
+        return sum + (amount * overlapDays) / totalDays;
+      }, 0)
+      .toFixed(2)
+  );
+
 /**
  * Decode HTML entities in a string
  * Handles common HTML entities like &amp;, &lt;, &gt;, &quot;, &#39;
@@ -4529,9 +4642,11 @@ exports.getHierarchicalCosting = async (req, res) => {
       return res.status(403).json({ success: false, message: "Access denied" });
     }
 
-    const { from, to } = req.query;
-    // Note: dateFilter is not used directly - we apply date filters per data type
-    // (transactions use 'date' field, orders use 'createdAt', labour/overhead use period ranges)
+    const { from, to, fromDate, toDate, error: dateRangeError } =
+      resolveDateRangeFromQuery(req.query);
+    if (dateRangeError) {
+      return res.status(400).json({ success: false, message: dateRangeError });
+    }
 
     let franchises = [];
     let kiosks = [];
@@ -4602,25 +4717,18 @@ exports.getHierarchicalCosting = async (req, res) => {
         // Get food cost from inventory transactions
         // Use date field for transactions, ensure proper date filtering
         const transactionDateFilter = {};
-        if (from || to) {
+        if (fromDate || toDate) {
           transactionDateFilter.date = {};
-          if (from) {
-            const fromDate = new Date(from);
-            fromDate.setHours(0, 0, 0, 0);
-            transactionDateFilter.date.$gte = fromDate;
-          }
-          if (to) {
-            const toDate = new Date(to);
-            toDate.setHours(23, 59, 59, 999);
-            transactionDateFilter.date.$lte = toDate;
-          }
+          if (fromDate) transactionDateFilter.date.$gte = fromDate;
+          if (toDate) transactionDateFilter.date.$lte = toDate;
         }
-        const kioskCartIdObj = toObjectIdSafe(kiosk._id);
+        const kioskCartIdObj = toObjectIdSafe(kiosk._id) || kiosk._id;
+        const kioskCartIdFilter = buildFlexibleCartIdFilter(kiosk._id);
         const consumptionTransactions = await InventoryTransaction.aggregate([
           {
             $match: {
               type: { $in: ["OUT", "WASTE"] },
-              ...(kioskCartIdObj ? { cartId: kioskCartIdObj } : {}),
+              ...(kioskCartIdFilter ? { cartId: kioskCartIdFilter } : {}),
               ...transactionDateFilter,
             },
           },
@@ -4636,50 +4744,29 @@ exports.getHierarchicalCosting = async (req, res) => {
         );
 
         // Get labour costs - filter by date range properly
-        const labourFilter = { cartId: kioskCartIdObj || kiosk._id };
-        if (from || to) {
-          // Include labour costs that overlap with the date range
-          const fromDate = from ? new Date(from) : new Date("1970-01-01");
-          fromDate.setHours(0, 0, 0, 0);
-          const toDate = to ? new Date(to) : new Date("2099-12-31");
-          toDate.setHours(23, 59, 59, 999);
+        const labourFilter = { cartId: kioskCartIdObj };
+        if (fromDate || toDate) {
           labourFilter.$or = [
             {
-              periodFrom: { $lte: toDate },
-              periodTo: { $gte: fromDate },
+              periodFrom: { $lte: toDate || new Date("2099-12-31T23:59:59.999Z") },
+              periodTo: { $gte: fromDate || new Date("1970-01-01T00:00:00.000Z") },
             },
           ];
         }
         const labourCosts = await LabourCost.find(labourFilter).lean();
-        const labourCost = Number(
-          labourCosts
-            .reduce((sum, l) => sum + (Number(l.amount) || 0), 0)
-            .toFixed(2)
-        );
+        const labourCost = sumProratedPeriodAmount(labourCosts, fromDate, toDate);
 
         // Get overheads - same filter as labour
         const overheadFilter = { ...labourFilter };
         const overheads = await Overhead.find(overheadFilter).lean();
-        const overheadCost = Number(
-          overheads
-            .reduce((sum, o) => sum + (Number(o.amount) || 0), 0)
-            .toFixed(2)
-        );
+        const overheadCost = sumProratedPeriodAmount(overheads, fromDate, toDate);
 
         // Get expenses for this kiosk in the date range
-        const expenseFilter = { cartId: kioskCartIdObj || kiosk._id };
-        if (from || to) {
+        const expenseFilter = { cartId: kioskCartIdObj };
+        if (fromDate || toDate) {
           expenseFilter.expenseDate = {};
-          if (from) {
-            const fromDate = new Date(from);
-            fromDate.setHours(0, 0, 0, 0);
-            expenseFilter.expenseDate.$gte = fromDate;
-          }
-          if (to) {
-            const toDate = new Date(to);
-            toDate.setHours(23, 59, 59, 999);
-            expenseFilter.expenseDate.$lte = toDate;
-          }
+          if (fromDate) expenseFilter.expenseDate.$gte = fromDate;
+          if (toDate) expenseFilter.expenseDate.$lte = toDate;
         }
         const expenses = await CostingExpense.find(expenseFilter).lean();
         const expenseCost = Number(
@@ -4691,21 +4778,15 @@ exports.getHierarchicalCosting = async (req, res) => {
         // Get sales from orders (use cartId, not cafeId)
         // Include "Exit" status for takeaway orders that are completed
         const orderFilter = {
-          cartId: kioskCartIdObj || kiosk._id,
-          status: { $in: ["Paid", "Finalized", "Exit"] },
+          status: { $in: ["Paid", "Finalized", "Exit", "Completed"] },
         };
-        if (from || to) {
+        if (kioskCartIdFilter) {
+          orderFilter.cartId = kioskCartIdFilter;
+        }
+        if (fromDate || toDate) {
           orderFilter.createdAt = {};
-          if (from) {
-            const fromDate = new Date(from);
-            fromDate.setHours(0, 0, 0, 0);
-            orderFilter.createdAt.$gte = fromDate;
-          }
-          if (to) {
-            const toDate = new Date(to);
-            toDate.setHours(23, 59, 59, 999);
-            orderFilter.createdAt.$lte = toDate;
-          }
+          if (fromDate) orderFilter.createdAt.$gte = fromDate;
+          if (toDate) orderFilter.createdAt.$lte = toDate;
         }
         // Use aggregation for accurate sales calculation
         const salesData = await Order.aggregate([
@@ -4969,7 +5050,12 @@ exports.createOverhead = async (req, res) => {
  */
 exports.getFoodCostReport = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { cartId } = req.query;
+    const { from, to, fromDate, toDate, error: dateRangeError } =
+      resolveDateRangeFromQuery(req.query);
+    if (dateRangeError) {
+      return res.status(400).json({ success: false, message: dateRangeError });
+    }
 
     // Log user info for debugging
     console.log("[FOOD_COST_REPORT] User:", {
@@ -4981,26 +5067,17 @@ exports.getFoodCostReport = async (req, res) => {
 
     // Build date filter for transactions (use date field, not createdAt)
     const transactionDateFilter = {};
-    if (from || to) {
+    if (fromDate || toDate) {
       transactionDateFilter.date = {};
-      if (from)
-        transactionDateFilter.date.$gte = new Date(from + "T00:00:00.000Z");
-      if (to) transactionDateFilter.date.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
+      if (fromDate) transactionDateFilter.date.$gte = fromDate;
+      if (toDate) transactionDateFilter.date.$lte = toDate;
     }
 
     // Build outlet filter based on role (match both ObjectId and string cartId for type consistency)
     let transactionOutletFilter = {};
-    const buildCartIdFilter = (id) => {
-      const objId = toObjectIdSafe(id);
-      const strId = id ? (typeof id === "string" ? id : id.toString?.() || String(id)) : null;
-      const vals = [];
-      if (objId) vals.push(objId);
-      if (strId && strId !== objId?.toString?.()) vals.push(strId);
-      return vals.length > 1 ? { $in: vals } : vals[0] || null;
-    };
 
     if (req.user.role === "admin") {
-      transactionOutletFilter.cartId = buildCartIdFilter(req.user._id);
+      transactionOutletFilter.cartId = buildFlexibleCartIdFilter(req.user._id);
       console.log(
         "[FOOD_COST_REPORT] Cart admin filter - cartId:",
         transactionOutletFilter.cartId?.toString?.() || JSON.stringify(transactionOutletFilter.cartId)
@@ -5017,22 +5094,20 @@ exports.getFoodCostReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = buildCartIdFilter(cartId);
+        transactionOutletFilter.cartId = buildFlexibleCartIdFilter(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        transactionOutletFilter.cartId = { $in: outlets.flatMap((o) => {
-          const objId = toObjectIdSafe(o._id);
-          const strId = o._id?.toString?.() || String(o._id);
-          return objId ? [objId, strId] : (strId ? [strId] : []);
-        }) };
+        transactionOutletFilter.cartId = {
+          $in: flattenCartIdFilterValues(outlets.map((o) => o._id)),
+        };
       }
     } else if (req.user.role === "super_admin") {
       if (cartId) {
-        transactionOutletFilter.cartId = buildCartIdFilter(cartId);
+        transactionOutletFilter.cartId = buildFlexibleCartIdFilter(cartId);
       }
     }
 
@@ -5055,28 +5130,30 @@ exports.getFoodCostReport = async (req, res) => {
 
     // Get total sales (from orders - calculate from kotLines)
     const orderFilter = {};
-    if (from || to) {
+    if (fromDate || toDate) {
       orderFilter.createdAt = {};
-      if (from) orderFilter.createdAt.$gte = new Date(from + "T00:00:00.000Z");
-      if (to) orderFilter.createdAt.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
+      if (fromDate) orderFilter.createdAt.$gte = fromDate;
+      if (toDate) orderFilter.createdAt.$lte = toDate;
     }
-    // Build order filter based on role (normalize cartId to ObjectId for match with Order)
+    // Build order filter based on role (support both ObjectId and string cartId values)
     if (req.user.role === "admin") {
-      orderFilter.cartId = toObjectIdSafe(req.user._id);
+      orderFilter.cartId = buildFlexibleCartIdFilter(req.user._id);
     } else if (req.user.role === "franchise_admin") {
       if (cartId) {
-        orderFilter.cartId = toObjectIdSafe(cartId);
+        orderFilter.cartId = buildFlexibleCartIdFilter(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        orderFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
+        orderFilter.cartId = {
+          $in: flattenCartIdFilterValues(outlets.map((o) => o._id)),
+        };
       }
     } else if (req.user.role === "super_admin") {
       if (cartId) {
-        orderFilter.cartId = toObjectIdSafe(cartId);
+        orderFilter.cartId = buildFlexibleCartIdFilter(cartId);
       }
     }
 
@@ -5412,7 +5489,12 @@ exports.getSupplierPriceHistory = async (req, res) => {
  */
 exports.getPnLReport = async (req, res) => {
   try {
-    const { from, to, cartId } = req.query;
+    const { cartId } = req.query;
+    const { from, to, fromDate, toDate, error: dateRangeError } =
+      resolveDateRangeFromQuery(req.query);
+    if (dateRangeError) {
+      return res.status(400).json({ success: false, message: dateRangeError });
+    }
 
     // Log user info for debugging
     console.log("[PNL_REPORT] User:", {
@@ -5424,17 +5506,16 @@ exports.getPnLReport = async (req, res) => {
 
     // Build date filter for transactions (use date field, not createdAt)
     const transactionDateFilter = {};
-    if (from || to) {
+    if (fromDate || toDate) {
       transactionDateFilter.date = {};
-      if (from)
-        transactionDateFilter.date.$gte = new Date(from + "T00:00:00.000Z");
-      if (to) transactionDateFilter.date.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
+      if (fromDate) transactionDateFilter.date.$gte = fromDate;
+      if (toDate) transactionDateFilter.date.$lte = toDate;
     }
 
-    // Build outlet filter based on role (normalize cartId to ObjectId for match with InventoryTransactionV2)
+    // Build outlet filter based on role (support both ObjectId and string cartId values)
     let transactionOutletFilter = {};
     if (req.user.role === "admin") {
-      transactionOutletFilter.cartId = toObjectIdSafe(req.user._id);
+      transactionOutletFilter.cartId = buildFlexibleCartIdFilter(req.user._id);
       console.log("[PNL_REPORT] Cart admin filter - cartId:", transactionOutletFilter.cartId?.toString());
     } else if (req.user.role === "franchise_admin") {
       if (cartId) {
@@ -5448,18 +5529,20 @@ exports.getPnLReport = async (req, res) => {
             message: "Access denied: Kiosk does not belong to your franchise",
           });
         }
-        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
+        transactionOutletFilter.cartId = buildFlexibleCartIdFilter(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        transactionOutletFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
+        transactionOutletFilter.cartId = {
+          $in: flattenCartIdFilterValues(outlets.map((o) => o._id)),
+        };
       }
     } else if (req.user.role === "super_admin") {
       if (cartId) {
-        transactionOutletFilter.cartId = toObjectIdSafe(cartId);
+        transactionOutletFilter.cartId = buildFlexibleCartIdFilter(cartId);
       }
     }
 
@@ -5492,29 +5575,31 @@ exports.getPnLReport = async (req, res) => {
 
     // Get total sales (from orders - calculate from kotLines)
     const orderFilter = {};
-    if (from || to) {
+    if (fromDate || toDate) {
       orderFilter.createdAt = {};
-      if (from) orderFilter.createdAt.$gte = new Date(from + "T00:00:00.000Z");
-      if (to) orderFilter.createdAt.$lte = new Date(to + "T23:59:59.999Z"); // Include full day
+      if (fromDate) orderFilter.createdAt.$gte = fromDate;
+      if (toDate) orderFilter.createdAt.$lte = toDate;
     }
 
-    // Build order filter based on role (normalize cartId to ObjectId)
+    // Build order filter based on role (support both ObjectId and string cartId values)
     if (req.user.role === "admin") {
-      orderFilter.cartId = toObjectIdSafe(req.user._id);
+      orderFilter.cartId = buildFlexibleCartIdFilter(req.user._id);
     } else if (req.user.role === "franchise_admin") {
       if (cartId) {
-        orderFilter.cartId = toObjectIdSafe(cartId);
+        orderFilter.cartId = buildFlexibleCartIdFilter(cartId);
       } else {
         const outlets = await User.find({
           role: "admin",
           franchiseId: req.user._id,
           isActive: true,
         }).select("_id");
-        orderFilter.cartId = { $in: outlets.map((o) => toObjectIdSafe(o._id)) };
+        orderFilter.cartId = {
+          $in: flattenCartIdFilterValues(outlets.map((o) => o._id)),
+        };
       }
     } else if (req.user.role === "super_admin") {
       if (cartId) {
-        orderFilter.cartId = toObjectIdSafe(cartId);
+        orderFilter.cartId = buildFlexibleCartIdFilter(cartId);
       }
     }
 
@@ -5572,21 +5657,17 @@ exports.getPnLReport = async (req, res) => {
       }
     }
 
-    if (from || to) {
+    if (fromDate || toDate) {
       labourFilter.$or = [
         {
-          periodFrom: { $lte: new Date(to || "2099-12-31") },
-          periodTo: { $gte: new Date(from || "1970-01-01") },
+          periodFrom: { $lte: toDate || new Date("2099-12-31T23:59:59.999Z") },
+          periodTo: { $gte: fromDate || new Date("1970-01-01T00:00:00.000Z") },
         },
       ];
     }
 
     const labourCosts = await LabourCost.find(labourFilter).lean();
-    const totalLabour = Number(
-      labourCosts
-        .reduce((sum, l) => sum + (Number(l.amount) || 0), 0)
-        .toFixed(2)
-    );
+    const totalLabour = sumProratedPeriodAmount(labourCosts, fromDate, toDate);
     console.log(
       "[PNL_REPORT] Total labour:",
       totalLabour,
@@ -5598,9 +5679,7 @@ exports.getPnLReport = async (req, res) => {
 
     // Get overheads (same filter as labour)
     const overheads = await Overhead.find(labourFilter).lean();
-    const totalOverhead = Number(
-      overheads.reduce((sum, o) => sum + (Number(o.amount) || 0), 0).toFixed(2)
-    );
+    const totalOverhead = sumProratedPeriodAmount(overheads, fromDate, toDate);
     console.log(
       "[PNL_REPORT] Total overhead:",
       totalOverhead,
@@ -5636,14 +5715,10 @@ exports.getPnLReport = async (req, res) => {
       }
     }
 
-    if (from || to) {
+    if (fromDate || toDate) {
       expenseFilter.expenseDate = {};
-      if (from) expenseFilter.expenseDate.$gte = new Date(from);
-      if (to) {
-        const toDate = new Date(to);
-        toDate.setHours(23, 59, 59, 999);
-        expenseFilter.expenseDate.$lte = toDate;
-      }
+      if (fromDate) expenseFilter.expenseDate.$gte = fromDate;
+      if (toDate) expenseFilter.expenseDate.$lte = toDate;
     }
 
     const expenses = await CostingExpense.find(expenseFilter).lean();
@@ -5670,7 +5745,7 @@ exports.getPnLReport = async (req, res) => {
     res.json({
       success: true,
       data: {
-        period: { from, to },
+        period: { from: from || null, to: to || null },
         sales: Number(totalSales.toFixed(2)),
         costs: {
           foodCost: Number(foodCost.toFixed(2)),
@@ -6100,18 +6175,61 @@ const pushToCartAdminsInternal = async (cartId = null) => {
   // Cart admins can see all shared data without need for cart-specific copies
   // This prevents duplicates and ensures data consistency
 
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] ⚠️ FUNCTION DISABLED - Using shared ingredients/BOMs approach`);
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] Cart admins automatically see all shared (cartId: null) ingredients and BOMs`);
-  console.log(`[PUSH_TO_CART_ADMINS_INTERNAL] No cart-specific copies will be created`);
+  const targetCartId = cartId || null;
+  const cartFilter = {
+    role: "admin",
+    isActive: { $ne: false },
+  };
+  if (targetCartId) {
+    cartFilter._id = mongoose.Types.ObjectId.isValid(targetCartId)
+      ? new mongoose.Types.ObjectId(targetCartId)
+      : targetCartId;
+  }
+
+  const [cartAdmins, sharedIngredientCount, sharedRecipeCount] =
+    await Promise.all([
+      User.find(cartFilter)
+        .select("_id name cartName cartCode email")
+        .lean(),
+      Ingredient.countDocuments({
+        cartId: null,
+        isActive: { $ne: false },
+      }),
+      Recipe.countDocuments({
+        cartId: null,
+        isActive: { $ne: false },
+      }),
+    ]);
+
+  if (targetCartId && cartAdmins.length === 0) {
+    throw new Error("Cart admin not found");
+  }
+
+  console.log(
+    `[PUSH_TO_CART_ADMINS_INTERNAL] Shared mode active - no copy push required. Targets: ${cartAdmins.length}, shared ingredients: ${sharedIngredientCount}, shared BOMs: ${sharedRecipeCount}`
+  );
 
   return {
     success: true,
-    message: "Push functionality disabled - all carts use shared ingredients and BOMs (no duplication needed)",
+    message:
+      "Shared mode active. Cart admins automatically read shared ingredients/BOMs (no duplication).",
     data: {
       ingredients: { created: 0, updated: 0, skipped: 0 },
       recipes: { created: 0, updated: 0, skipped: 0 },
-      cartAdmins: []
-    }
+      cartAdmins: cartAdmins.map((cartAdmin) => ({
+        cartAdminId: cartAdmin._id.toString(),
+        cartAdminName: cartAdmin.name || cartAdmin.cartName || "Unknown",
+        cartCode: cartAdmin.cartCode || null,
+        ingredients: { created: 0, updated: 0, skipped: 0 },
+        recipes: { created: 0, updated: 0, skipped: 0 },
+        mode: "shared",
+      })),
+      shared: {
+        mode: "shared",
+        ingredients: sharedIngredientCount,
+        recipes: sharedRecipeCount,
+      },
+    },
   };
 
   /* DISABLED CODE - Kept for reference
@@ -6510,9 +6628,10 @@ exports.pushToCartAdmins = async (req, res) => {
       });
     }
 
-    const { cartId } = req.body; // Optional: push to specific cart admin, or all if not provided
+    const { cartId, outletId } = req.body || {};
+    const targetCartId = cartId || outletId || null; // outletId kept for backward compatibility
 
-    const result = await pushToCartAdminsInternal(cartId);
+    const result = await pushToCartAdminsInternal(targetCartId);
     res.json(result);
   } catch (error) {
     console.error("[PUSH_TO_CART_ADMINS] Error:", error);

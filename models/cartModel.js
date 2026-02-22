@@ -38,6 +38,9 @@ const cartSchema = new mongoose.Schema(
     // Menu tracking
     menuInitialized: { type: Boolean, default: false },
     menuInitializedAt: { type: Date },
+    // Contact us (shown on customer menu page)
+    contactPhone: { type: String, trim: true },
+    contactEmail: { type: String, trim: true },
     // Status
     isActive: { type: Boolean, default: true },
   },

@@ -5,9 +5,74 @@ const multer = require("multer");
 const MenuCategory = require("../models/menuCategoryModel");
 const { MenuItem, SPICE_LEVELS } = require("../models/menuItemModel");
 
+const decodeHtmlEntities = (value) => {
+  if (typeof value !== "string") return value;
+  let decoded = value;
+  for (let i = 0; i < 2; i += 1) {
+    const next = decoded
+      .replace(/&amp;#x2F;/gi, "/")
+      .replace(/&#x2F;/gi, "/")
+      .replace(/&#47;/g, "/")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#x27;/gi, "'")
+      .replace(/&nbsp;/g, " ")
+      .trim();
+    if (next === decoded) break;
+    decoded = next;
+  }
+  return decoded;
+};
+
+const decodeStringArray = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => decodeHtmlEntities(String(entry || "")))
+      .filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((entry) => decodeHtmlEntities(entry))
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const decodeCategoryForResponse = (category = {}) => ({
+  ...category,
+  name: decodeHtmlEntities(category?.name || ""),
+  description: decodeHtmlEntities(category?.description || ""),
+  icon: decodeHtmlEntities(category?.icon || ""),
+});
+
+const decodeItemForResponse = (item = {}) => ({
+  ...item,
+  name: decodeHtmlEntities(item?.name || ""),
+  description: decodeHtmlEntities(item?.description || ""),
+  image: decodeHtmlEntities(item?.image || ""),
+  tags: Array.isArray(item?.tags)
+    ? item.tags.map((tag) => decodeHtmlEntities(String(tag || ""))).filter(Boolean)
+    : item?.tags,
+  allergens: Array.isArray(item?.allergens)
+    ? item.allergens
+        .map((allergen) => decodeHtmlEntities(String(allergen || "")))
+        .filter(Boolean)
+    : item?.allergens,
+  extras: Array.isArray(item?.extras)
+    ? item.extras.map((extra) => ({
+        ...extra,
+        name: decodeHtmlEntities(extra?.name || ""),
+      }))
+    : item?.extras,
+});
+
 const buildCategoryWithItems = (categories, itemsByCategory) =>
   categories.map((category) => ({
-    ...category,
+    ...decodeCategoryForResponse(category),
     items: itemsByCategory[category._id.toString()] || [],
   }));
 
@@ -219,31 +284,10 @@ exports.getPublicMenu = async (req, res) => {
         : null,
     });
 
-    // Helper function to decode HTML entities in image URLs
-    const decodeImageUrl = (imageUrl) => {
-      if (!imageUrl || typeof imageUrl !== "string") return "";
-      return imageUrl
-        .replace(/&amp;#x2F;/g, "/")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#x2F;/g, "/")
-        .replace(/&#39;/g, "'")
-        .trim();
-    };
-
-    // Decode image URLs in items
-    itemsWithOrderCount.forEach((item) => {
-      if (item.image) {
-        item.image = decodeImageUrl(item.image);
-      }
-    });
-
     const itemsByCategory = itemsWithOrderCount.reduce((acc, item) => {
       const key = item.category.toString();
       if (!acc[key]) acc[key] = [];
-      acc[key].push(item);
+      acc[key].push(decodeItemForResponse(item));
       return acc;
     }, {});
 
@@ -321,31 +365,10 @@ exports.listMenu = async (req, res) => {
       .sort({ sortOrder: 1, name: 1 })
       .lean();
 
-    // Helper function to decode HTML entities in image URLs
-    const decodeImageUrl = (imageUrl) => {
-      if (!imageUrl || typeof imageUrl !== "string") return "";
-      return imageUrl
-        .replace(/&amp;#x2F;/g, "/")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#x2F;/g, "/")
-        .replace(/&#39;/g, "'")
-        .trim();
-    };
-
-    // Decode image URLs in items
-    items.forEach((item) => {
-      if (item.image) {
-        item.image = decodeImageUrl(item.image);
-      }
-    });
-
     const itemsByCategory = items.reduce((acc, item) => {
       const key = item.category.toString();
       if (!acc[key]) acc[key] = [];
-      acc[key].push(item);
+      acc[key].push(decodeItemForResponse(item));
       return acc;
     }, {});
 
@@ -358,12 +381,15 @@ exports.listMenu = async (req, res) => {
 exports.createCategory = async (req, res) => {
   try {
     const {
-      name,
+      name: rawName,
       description,
       icon,
       sortOrder,
       isActive = true,
     } = req.body || {};
+    const name = decodeHtmlEntities(rawName || "");
+    const decodedDescription = decodeHtmlEntities(description || "");
+    const decodedIcon = decodeHtmlEntities(icon || "");
     if (!name) {
       return res.status(400).json({ message: "Category name is required" });
     }
@@ -373,12 +399,13 @@ exports.createCategory = async (req, res) => {
 
     const category = await MenuCategory.create({
       name,
-      description,
-      icon,
+      description: decodedDescription,
+      icon: decodedIcon,
       sortOrder,
       isActive,
       cartId: cartId, // Use cartId instead of cafeId
     });
+    const categoryResponse = decodeCategoryForResponse(category.toObject());
 
     // Emit socket event to cart room
     const io = req.app.get("io");
@@ -386,11 +413,11 @@ exports.createCategory = async (req, res) => {
     if (cartId) {
       emitToCafe(io, cartId.toString(), "menu:updated", {
         type: "category_created",
-        category,
+        category: categoryResponse,
       });
     }
 
-    return res.status(201).json(category);
+    return res.status(201).json(categoryResponse);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -406,7 +433,12 @@ exports.updateCategory = async (req, res) => {
     const allowed = ["name", "description", "icon", "sortOrder", "isActive"];
     const updates = {};
     allowed.forEach((key) => {
-      if (key in req.body) updates[key] = req.body[key];
+      if (!(key in req.body)) return;
+      if (key === "name" || key === "description" || key === "icon") {
+        updates[key] = decodeHtmlEntities(req.body[key] || "");
+      } else {
+        updates[key] = req.body[key];
+      }
     });
 
     const category = await MenuCategory.findByIdAndUpdate(id, updates, {
@@ -416,6 +448,7 @@ exports.updateCategory = async (req, res) => {
     if (!category) {
       return res.status(404).json({ message: "Category not found" });
     }
+    const categoryResponse = decodeCategoryForResponse(category);
 
     // Emit socket event to cart room
     const io = req.app.get("io");
@@ -424,11 +457,11 @@ exports.updateCategory = async (req, res) => {
     if (categoryCartId) {
       emitToCafe(io, categoryCartId.toString(), "menu:updated", {
         type: "category_updated",
-        category,
+        category: categoryResponse,
       });
     }
 
-    return res.json(category);
+    return res.json(categoryResponse);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -481,7 +514,7 @@ exports.createItem = async (req, res) => {
   try {
     const {
       categoryId,
-      name,
+      name: rawName,
       description,
       price,
       image,
@@ -493,6 +526,11 @@ exports.createItem = async (req, res) => {
       allergens,
       calories,
     } = req.body || {};
+    const name = decodeHtmlEntities(rawName || "");
+    const decodedDescription = decodeHtmlEntities(description || "");
+    const decodedImage = decodeHtmlEntities(image || "");
+    const decodedTags = decodeStringArray(tags) || [];
+    const decodedAllergens = decodeStringArray(allergens) || [];
 
     if (!categoryId || !mongoose.Types.ObjectId.isValid(categoryId)) {
       return res.status(400).json({ message: "Valid categoryId is required" });
@@ -533,18 +571,19 @@ exports.createItem = async (req, res) => {
     const item = await MenuItem.create({
       category: categoryId,
       name,
-      description,
+      description: decodedDescription,
       price,
-      image,
+      image: decodedImage,
       isAvailable,
       isFeatured,
       spiceLevel,
       sortOrder,
-      tags,
-      allergens,
+      tags: decodedTags,
+      allergens: decodedAllergens,
       calories,
       cartId: finalCartId, // Use cartId instead of cafeId
     });
+    const itemResponse = decodeItemForResponse(item.toObject());
 
     // Emit socket event to cart room
     const io = req.app.get("io");
@@ -552,11 +591,11 @@ exports.createItem = async (req, res) => {
     if (finalCartId) {
       emitToCafe(io, finalCartId.toString(), "menu:updated", {
         type: "item_created",
-        item,
+        item: itemResponse,
       });
     }
 
-    return res.status(201).json(item);
+    return res.status(201).json(itemResponse);
   } catch (err) {
     if (err.code === 11000) {
       return res
@@ -596,6 +635,10 @@ exports.updateItem = async (req, res) => {
             return res.status(400).json({ message: "Invalid categoryId" });
           }
           updates.category = req.body[key];
+        } else if (key === "name" || key === "description" || key === "image") {
+          updates[key] = decodeHtmlEntities(req.body[key] || "");
+        } else if (key === "tags" || key === "allergens") {
+          updates[key] = decodeStringArray(req.body[key]) || [];
         } else {
           updates[key] = req.body[key];
         }
@@ -616,6 +659,7 @@ exports.updateItem = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Menu item not found" });
     }
+    const itemResponse = decodeItemForResponse(item);
 
     // Auto-sync to costing if price was updated and user is cart admin
     const itemCartId = item.cartId || item.cafeId; // Support old cafeId field
@@ -648,11 +692,11 @@ exports.updateItem = async (req, res) => {
     if (itemCartId) {
       emitToCafe(io, itemCartId.toString(), "menu:updated", {
         type: "item_updated",
-        item,
+        item: itemResponse,
       });
     }
 
-    return res.json(item);
+    return res.json(itemResponse);
   } catch (err) {
     if (err.code === 11000) {
       return res
@@ -686,6 +730,7 @@ exports.updateItemAvailability = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Menu item not found" });
     }
+    const itemResponse = decodeItemForResponse(item);
 
     // Emit socket event to cart room
     const io = req.app.get("io");
@@ -694,11 +739,11 @@ exports.updateItemAvailability = async (req, res) => {
     if (itemCartId) {
       emitToCafe(io, itemCartId.toString(), "menu:updated", {
         type: "item_availability_updated",
-        item,
+        item: itemResponse,
       });
     }
 
-    return res.json(item);
+    return res.json(itemResponse);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
