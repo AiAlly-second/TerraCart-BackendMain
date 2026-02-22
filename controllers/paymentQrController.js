@@ -4,13 +4,192 @@ const { getStorageCallback, getFileUrl } = require("../config/uploadConfig");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const http = require("http");
+const https = require("https");
 const mongoose = require("mongoose");
+const { Jimp } = require("jimp");
+const jsQR = require("jsqr");
 
 const toObjectIdIfValid = (value) => {
   if (!value) return value;
   return mongoose.Types.ObjectId.isValid(value)
     ? new mongoose.Types.ObjectId(value)
     : value;
+};
+
+const parseUpiPayload = (payload) => {
+  if (!payload || typeof payload !== "string") return null;
+  const trimmed = payload.trim();
+  if (!/^upi:\/\/pay\?/i.test(trimmed)) return null;
+
+  const query = trimmed.split("?")[1] || "";
+  if (!query) return null;
+
+  const params = new URLSearchParams(query);
+  const normalized = {};
+  for (const [key, value] of params.entries()) {
+    const lowered = String(key || "").toLowerCase();
+    if (!lowered) continue;
+
+    let decoded = value;
+    try {
+      decoded = decodeURIComponent(String(value || "").replace(/\+/g, "%20"));
+    } catch (_err) {
+      decoded = String(value || "");
+    }
+    normalized[lowered] = decoded.trim();
+  }
+
+  const upiId = normalized.pa || "";
+  const payeeName = normalized.pn || "";
+
+  if (!upiId) return null;
+
+  return {
+    upiId,
+    payeeName,
+    rawPayload: trimmed,
+  };
+};
+
+const downloadBufferFromUrl = (url, depth = 0) =>
+  new Promise((resolve) => {
+    if (!url || !/^https?:\/\//i.test(url) || depth > 3) {
+      resolve(null);
+      return;
+    }
+
+    const transport = url.startsWith("https://") ? https : http;
+    const request = transport.get(url, (response) => {
+      const { statusCode = 0, headers = {} } = response;
+      const redirectLocation = headers.location;
+      if (
+        statusCode >= 300 &&
+        statusCode < 400 &&
+        redirectLocation
+      ) {
+        response.resume();
+        const redirectedUrl = new URL(redirectLocation, url).toString();
+        resolve(downloadBufferFromUrl(redirectedUrl, depth + 1));
+        return;
+      }
+
+      if (statusCode !== 200) {
+        response.resume();
+        resolve(null);
+        return;
+      }
+
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+
+    request.on("error", () => resolve(null));
+    request.setTimeout(10000, () => {
+      request.destroy();
+      resolve(null);
+    });
+  });
+
+const resolveQrImagePath = (rawPath) => {
+  if (!rawPath || typeof rawPath !== "string") return null;
+  if (path.isAbsolute(rawPath)) return rawPath;
+  return path.join(__dirname, "..", rawPath.replace(/^\/+/, ""));
+};
+
+const readUploadedQrBuffer = async (source) => {
+  if (!source) return null;
+
+  if (Buffer.isBuffer(source)) {
+    return source;
+  }
+
+  if (typeof source === "string") {
+    if (/^https?:\/\//i.test(source)) {
+      return downloadBufferFromUrl(source);
+    }
+    const absolutePath = resolveQrImagePath(source);
+    if (!absolutePath || !fs.existsSync(absolutePath)) return null;
+    return fs.promises.readFile(absolutePath);
+  }
+
+  if (source.buffer && Buffer.isBuffer(source.buffer)) {
+    return source.buffer;
+  }
+
+  if (source.path && fs.existsSync(source.path)) {
+    return fs.promises.readFile(source.path);
+  }
+
+  if (source.location && /^https?:\/\//i.test(source.location)) {
+    return downloadBufferFromUrl(source.location);
+  }
+
+  if (source.qrImageUrl) {
+    return readUploadedQrBuffer(source.qrImageUrl);
+  }
+
+  return null;
+};
+
+const decodeUpiFromQrImage = async (file) => {
+  try {
+    const imageBuffer = await readUploadedQrBuffer(file);
+    if (!imageBuffer) return null;
+
+    const image = await Jimp.read(imageBuffer);
+    const { data, width, height } = image.bitmap || {};
+    if (!data || !width || !height) return null;
+
+    const pixels = new Uint8ClampedArray(
+      data.buffer,
+      data.byteOffset,
+      data.byteLength,
+    );
+
+    const decoded = jsQR(pixels, width, height, {
+      inversionAttempts: "attemptBoth",
+    });
+
+    if (!decoded?.data) return null;
+
+    return parseUpiPayload(decoded.data);
+  } catch (error) {
+    console.warn("[PAYMENT_QR] Failed to decode uploaded QR image:", error.message);
+    return null;
+  }
+};
+
+const persistDecodedQrIdentity = async (qrCode) => {
+  if (!qrCode || (qrCode.upiId && qrCode.gatewayName) || !qrCode.qrImageUrl) {
+    return qrCode;
+  }
+
+  const extractedUpi = await decodeUpiFromQrImage(qrCode.qrImageUrl);
+  if (!extractedUpi) return qrCode;
+
+  let changed = false;
+  if (!qrCode.upiId && extractedUpi.upiId) {
+    qrCode.upiId = extractedUpi.upiId;
+    changed = true;
+  }
+  if (!qrCode.gatewayName && extractedUpi.payeeName) {
+    qrCode.gatewayName = extractedUpi.payeeName;
+    changed = true;
+  }
+
+  if (changed && typeof qrCode.save === "function") {
+    try {
+      await qrCode.save();
+    } catch (saveError) {
+      console.warn(
+        "[PAYMENT_QR] Failed to persist decoded identity details:",
+        saveError.message,
+      );
+    }
+  }
+  return qrCode;
 };
 
 const buildScopeOrFilter = (scopeId) => {
@@ -65,6 +244,9 @@ exports.uploadPaymentQR = async (req, res) => {
     }
 
     const { upiId, gatewayName } = req.body;
+    const providedUpiId = typeof upiId === "string" ? upiId.trim() : "";
+    const providedGatewayName =
+      typeof gatewayName === "string" ? gatewayName.trim() : "";
     const userId = req.user?._id ? toObjectIdIfValid(req.user._id) : null;
     const requestedCartId = req.body?.cartId || req.query?.cartId || null;
     const role = req.user?.role;
@@ -77,6 +259,12 @@ exports.uploadPaymentQR = async (req, res) => {
     // Construct image URL
     // Use helper to get URL (handles S3 vs Local)
     const qrImageUrl = getFileUrl(req, req.file, "payment-qr");
+
+    // If admin did not enter UPI details manually, try extracting from QR image.
+    const extractedUpi = await decodeUpiFromQrImage(req.file);
+    const finalUpiId = providedUpiId || extractedUpi?.upiId || "";
+    const finalGatewayName =
+      providedGatewayName || extractedUpi?.payeeName || "";
 
     // Deactivate existing active QR codes for this scope/user
     const scopeOrFilter = buildScopeOrFilter(scopeCartId);
@@ -92,8 +280,8 @@ exports.uploadPaymentQR = async (req, res) => {
       userId,
       cartId: scopeCartId,
       qrImageUrl,
-      upiId,
-      gatewayName,
+      upiId: finalUpiId || undefined,
+      gatewayName: finalGatewayName || undefined,
       isActive: true,
     });
 
@@ -104,6 +292,7 @@ exports.uploadPaymentQR = async (req, res) => {
         qrImageUrl: paymentQR.qrImageUrl,
         upiId: paymentQR.upiId,
         gatewayName: paymentQR.gatewayName,
+        extractedFromQr: Boolean(extractedUpi),
         isActive: paymentQR.isActive,
         createdAt: paymentQR.createdAt,
       },
@@ -111,7 +300,7 @@ exports.uploadPaymentQR = async (req, res) => {
   } catch (err) {
     console.error("Error uploading QR code:", err);
     // Delete uploaded file if database save fails
-    if (req.file) {
+    if (req.file?.path && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
     return res.status(500).json({ message: err.message || "Failed to upload QR code" });
@@ -136,6 +325,7 @@ exports.getActivePaymentQR = async (req, res) => {
     if (!qrCode) {
       return res.status(404).json({ message: "No active QR code found" });
     }
+    qrCode = await persistDecodedQrIdentity(qrCode);
 
     return res.json({
       id: qrCode._id,
@@ -179,6 +369,7 @@ exports.getActivePaymentQRPublic = async (req, res) => {
       // Return 200 with null instead of 404 - no active QR code is a valid state
       return res.json(null);
     }
+    qrCode = await persistDecodedQrIdentity(qrCode);
 
     return res.json({
       id: qrCode._id,

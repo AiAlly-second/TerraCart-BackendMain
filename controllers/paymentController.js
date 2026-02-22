@@ -1,10 +1,16 @@
 const mongoose = require("mongoose");
+const fs = require("fs");
+const path = require("path");
+const http = require("http");
+const https = require("https");
 const { Payment, PAYMENT_METHODS, PAYMENT_STATUSES } = require("../models/paymentModel");
 const Order = require("../models/orderModel");
 const PaymentQR = require("../models/paymentQrModel");
 const Employee = require("../models/employeeModel");
 const { releaseTableForOrder } = require("./orderController");
 const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
+const { Jimp } = require("jimp");
+const jsQR = require("jsqr");
 
 const toObjectIdIfValid = (value) => {
   if (!value) return value;
@@ -60,6 +66,122 @@ const shouldResetInventoryDeduction = (result) => {
   return consumedCount === 0 && processedCount === 0;
 };
 
+const parseUpiPayload = (payload) => {
+  if (!payload || typeof payload !== "string") return null;
+  const trimmed = payload.trim();
+  if (!/^upi:\/\/pay\?/i.test(trimmed)) return null;
+
+  const query = trimmed.split("?")[1] || "";
+  if (!query) return null;
+
+  const params = new URLSearchParams(query);
+  const normalized = {};
+  for (const [key, value] of params.entries()) {
+    const lowered = String(key || "").toLowerCase();
+    if (!lowered) continue;
+
+    let decoded = value;
+    try {
+      decoded = decodeURIComponent(String(value || "").replace(/\+/g, "%20"));
+    } catch (_err) {
+      decoded = String(value || "");
+    }
+    normalized[lowered] = decoded.trim();
+  }
+
+  const upiId = normalized.pa || "";
+  const payeeName = normalized.pn || "";
+
+  if (!upiId) return null;
+
+  return {
+    upiId,
+    payeeName,
+    rawPayload: trimmed,
+  };
+};
+
+const downloadBufferFromUrl = (url, depth = 0) =>
+  new Promise((resolve) => {
+    if (!url || !/^https?:\/\//i.test(url) || depth > 3) {
+      resolve(null);
+      return;
+    }
+
+    const transport = url.startsWith("https://") ? https : http;
+    const request = transport.get(url, (response) => {
+      const { statusCode = 0, headers = {} } = response;
+      const redirectLocation = headers.location;
+      if (statusCode >= 300 && statusCode < 400 && redirectLocation) {
+        response.resume();
+        const redirectedUrl = new URL(redirectLocation, url).toString();
+        resolve(downloadBufferFromUrl(redirectedUrl, depth + 1));
+        return;
+      }
+
+      if (statusCode !== 200) {
+        response.resume();
+        resolve(null);
+        return;
+      }
+
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.on("end", () => resolve(Buffer.concat(chunks)));
+    });
+
+    request.on("error", () => resolve(null));
+    request.setTimeout(10000, () => {
+      request.destroy();
+      resolve(null);
+    });
+  });
+
+const readQrImageBuffer = async (qrImageUrl) => {
+  if (!qrImageUrl) return null;
+
+  // Local storage path style: uploads/payment-qr/xxx.png
+  if (!/^https?:\/\//i.test(qrImageUrl)) {
+    const normalizedRelativePath = String(qrImageUrl).replace(/^\/+/, "");
+    const absolutePath = path.join(__dirname, "..", normalizedRelativePath);
+    if (!fs.existsSync(absolutePath)) return null;
+    return fs.promises.readFile(absolutePath);
+  }
+
+  // Remote URL (e.g., S3)
+  return downloadBufferFromUrl(qrImageUrl);
+};
+
+const extractUpiFromQrImageUrl = async (qrImageUrl) => {
+  try {
+    const imageBuffer = await readQrImageBuffer(qrImageUrl);
+    if (!imageBuffer) return null;
+
+    const image = await Jimp.read(imageBuffer);
+    const { data, width, height } = image.bitmap || {};
+    if (!data || !width || !height) return null;
+
+    const pixels = new Uint8ClampedArray(
+      data.buffer,
+      data.byteOffset,
+      data.byteLength,
+    );
+
+    const decoded = jsQR(pixels, width, height, {
+      inversionAttempts: "attemptBoth",
+    });
+    if (!decoded?.data) return null;
+
+    return parseUpiPayload(decoded.data);
+  } catch (error) {
+    console.warn(
+      "[PAYMENT] Failed to extract UPI from QR image URL:",
+      error.message,
+    );
+    return null;
+  }
+};
+
 const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
   // Try to get UPI ID from admin uploaded QR code
   let payee = process.env.UPI_PAYEE_VPA || "sarvacafe@upi";
@@ -88,11 +210,41 @@ const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
       }).sort({ createdAt: -1 });
     }
     
-    // Use UPI ID from uploaded QR if available
-    if (qrCode && qrCode.upiId) {
-      payee = qrCode.upiId.trim();
+    if (qrCode) {
+      // Use explicit values if admin entered them.
+      if (qrCode.upiId) {
+        payee = qrCode.upiId.trim();
+      }
       if (qrCode.gatewayName) {
-        payeeName = qrCode.gatewayName;
+        payeeName = qrCode.gatewayName.trim();
+      }
+
+      // Backfill legacy records: decode UPI details from QR image when not saved explicitly.
+      if ((!qrCode.upiId || !qrCode.gatewayName) && qrCode.qrImageUrl) {
+        const extracted = await extractUpiFromQrImageUrl(qrCode.qrImageUrl);
+        if (extracted?.upiId) {
+          payee = extracted.upiId.trim();
+          if (!qrCode.upiId) {
+            qrCode.upiId = extracted.upiId.trim();
+          }
+        }
+        if (extracted?.payeeName) {
+          payeeName = extracted.payeeName.trim();
+          if (!qrCode.gatewayName) {
+            qrCode.gatewayName = extracted.payeeName.trim();
+          }
+        }
+
+        if ((qrCode.isModified?.("upiId") || qrCode.isModified?.("gatewayName"))) {
+          try {
+            await qrCode.save();
+          } catch (saveErr) {
+            console.warn(
+              "[PAYMENT] Failed to persist decoded UPI details on PaymentQR:",
+              saveErr.message,
+            );
+          }
+        }
       }
     }
   } catch (err) {
