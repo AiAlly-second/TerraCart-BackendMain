@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { Payment, PAYMENT_METHODS, PAYMENT_STATUSES } = require("../models/paymentModel");
 const Order = require("../models/orderModel");
 const PaymentQR = require("../models/paymentQrModel");
+const Employee = require("../models/employeeModel");
 const { releaseTableForOrder } = require("./orderController");
 const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
 
@@ -154,6 +155,110 @@ const ensurePaymentForOrder = async (order, options = {}) => {
   return { payment, created };
 };
 
+const MOBILE_PAYMENT_ROLES = new Set([
+  "waiter",
+  "cook",
+  "captain",
+  "manager",
+  "employee",
+]);
+
+const resolveMobileCartId = async (user) => {
+  if (!user) return null;
+
+  if (user.cartId || user.cafeId) {
+    return user.cartId || user.cafeId;
+  }
+
+  let employee = null;
+  if (user.employeeId) {
+    employee = await Employee.findById(user.employeeId).select("cartId cafeId").lean();
+  }
+
+  if (!employee && user._id) {
+    employee = await Employee.findOne({ userId: user._id })
+      .select("cartId cafeId")
+      .lean();
+  }
+
+  if (!employee && user.email) {
+    employee = await Employee.findOne({
+      email: String(user.email).toLowerCase(),
+    })
+      .select("cartId cafeId")
+      .lean();
+  }
+
+  return employee?.cartId || employee?.cafeId || null;
+};
+
+const resolvePaymentScope = async (user) => {
+  if (!user) return { type: "none" };
+
+  if (user.role === "super_admin") {
+    return { type: "super_admin" };
+  }
+
+  if (user.role === "franchise_admin" && user._id) {
+    return { type: "franchise", franchiseId: user._id };
+  }
+
+  if (user.role === "admin" && user._id) {
+    return { type: "cart", cartId: user._id };
+  }
+
+  if (MOBILE_PAYMENT_ROLES.has(user.role)) {
+    const mobileCartId = await resolveMobileCartId(user);
+    if (!mobileCartId) {
+      return { type: "none" };
+    }
+    return { type: "cart", cartId: mobileCartId };
+  }
+
+  return { type: "none" };
+};
+
+const canAccessOrderByScope = (scope, order) => {
+  if (!scope || !order) return false;
+
+  if (scope.type === "super_admin") return true;
+
+  if (scope.type === "franchise") {
+    return (
+      scope.franchiseId &&
+      order.franchiseId &&
+      order.franchiseId.toString() === scope.franchiseId.toString()
+    );
+  }
+
+  if (scope.type === "cart") {
+    return (
+      scope.cartId &&
+      order.cartId &&
+      order.cartId.toString() === scope.cartId.toString()
+    );
+  }
+
+  return false;
+};
+
+const buildOrderScopeQuery = (scope, baseQuery = {}) => {
+  const query = { ...baseQuery };
+
+  if (!scope || scope.type === "none") {
+    return null;
+  }
+
+  if (scope.type === "cart") {
+    query.cartId = toObjectIdIfValid(scope.cartId);
+  } else if (scope.type === "franchise") {
+    query.franchiseId = toObjectIdIfValid(scope.franchiseId);
+  }
+
+  // super_admin keeps base query without additional scope.
+  return query;
+};
+
 exports.createPaymentIntent = async (req, res) => {
   try {
     const { orderId, method = "ONLINE", description } = req.body || {};
@@ -228,36 +333,25 @@ exports.listPayments = async (req, res) => {
       filter.method = method;
     }
 
-    // Filter payments based on admin role:
-    // - Cafe admin: only payments for orders from their cafe
-    // - Franchise admin: only payments for orders from cafes under their franchise
-    // - Super admin: see all payments (no filter)
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - get orders for this cafe only (use cartId, not cafeId)
-      const cafeOrders = await Order.find({ cartId: req.user._id })
+    // Scope payments to the caller's outlet/franchise unless super_admin.
+    const scope = await resolvePaymentScope(req.user);
+    if (scope.type === "none") {
+      return res.json([]);
+    }
+
+    if (scope.type !== "super_admin") {
+      const scopedOrderQuery = buildOrderScopeQuery(scope);
+      const scopedOrders = await Order.find(scopedOrderQuery)
         .select("_id")
-        .limit(10000) // Safety limit
+        .limit(10000)
         .lean();
-      const orderIds = cafeOrders.map(o => o._id);
-      if (orderIds.length > 0) {
-        filter.orderId = { $in: orderIds };
-      } else {
-        // No orders, return empty
+
+      const orderIds = scopedOrders.map((order) => order._id);
+      if (!orderIds.length) {
         return res.json([]);
       }
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      // Franchise admin - get orders from cafes under their franchise only
-      const franchiseOrders = await Order.find({ franchiseId: req.user._id })
-        .select("_id")
-        .limit(10000) // Safety limit
-        .lean();
-      const orderIds = franchiseOrders.map(o => o._id);
-      if (orderIds.length > 0) {
-        filter.orderId = { $in: orderIds };
-      } else {
-        // No orders, return empty
-        return res.json([]);
-      }
+
+      filter.orderId = { $in: orderIds };
     }
 
     const payments = await Payment.find(filter)
@@ -276,6 +370,21 @@ exports.getPaymentById = async (req, res) => {
     if (!payment) {
       return res.status(404).json({ message: "Payment not found" });
     }
+
+    const scope = await resolvePaymentScope(req.user);
+    if (scope.type === "none") {
+      return res.status(403).json({ message: "Not authorized to access this payment" });
+    }
+
+    if (scope.type !== "super_admin") {
+      const order = await Order.findById(payment.orderId)
+        .select("cartId franchiseId")
+        .lean();
+      if (!order || !canAccessOrderByScope(scope, order)) {
+        return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
+      }
+    }
+
     return res.json(formatPaymentResponse(payment));
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -285,6 +394,16 @@ exports.getPaymentById = async (req, res) => {
 exports.getPaymentsForOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
+    const order = await Order.findById(orderId).select("cartId franchiseId").lean();
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    const scope = await resolvePaymentScope(req.user);
+    if (!canAccessOrderByScope(scope, order)) {
+      return res.status(403).json({ message: "Order does not belong to your cart/franchise" });
+    }
+
     const payments = await Payment.find({ orderId }).sort({ createdAt: -1 }).lean();
     return res.json(payments.map(formatPaymentResponse));
   } catch (err) {
@@ -319,6 +438,22 @@ exports.cancelPayment = async (req, res) => {
     if (!payment) {
       return res.status(404).json({ message: "Payment not found" });
     }
+
+    if (req.user) {
+      const scope = await resolvePaymentScope(req.user);
+      if (scope.type === "none") {
+        return res.status(403).json({ message: "Not authorized to cancel this payment" });
+      }
+      if (scope.type !== "super_admin") {
+        const order = await Order.findById(payment.orderId)
+          .select("cartId franchiseId")
+          .lean();
+        if (!order || !canAccessOrderByScope(scope, order)) {
+          return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
+        }
+      }
+    }
+
     if (["PAID", "CANCELLED"].includes(payment.status)) {
       return res.status(400).json({ message: "Payment is already finalised" });
     }
@@ -346,6 +481,21 @@ exports.markPaymentPaid = async (req, res) => {
     if (!payment) {
       return res.status(404).json({ message: "Payment not found" });
     }
+
+    const scope = await resolvePaymentScope(req.user);
+    if (scope.type === "none") {
+      return res.status(403).json({ message: "Not authorized to mark this payment as paid" });
+    }
+
+    const order = await Order.findById(payment.orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found for this payment" });
+    }
+
+    if (!canAccessOrderByScope(scope, order)) {
+      return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
+    }
+
     if (payment.status === "PAID") {
       return res.json(formatPaymentResponse(payment));
     }
@@ -354,7 +504,6 @@ exports.markPaymentPaid = async (req, res) => {
     payment.paidAt = new Date();
     await payment.save();
 
-    const order = await Order.findById(payment.orderId);
     if (order) {
       order.status = "Paid";
       order.paidAt = new Date();
@@ -434,18 +583,13 @@ exports.PAYMENT_STATUSES = PAYMENT_STATUSES;
 
 exports.syncPaidOrders = async (req, res) => {
   try {
-    // Filter orders based on admin role (same as listPayments)
-    const query = { status: "Paid" };
-    
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - only sync orders from their cafe (use cartId, not cafeId)
-      query.cartId = req.user._id;
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      // Franchise admin - only sync orders from cafes under their franchise
-      query.franchiseId = req.user._id;
+    // Filter orders by caller scope so no cross-cart sync happens.
+    const scope = await resolvePaymentScope(req.user);
+    const query = buildOrderScopeQuery(scope, { status: "Paid" });
+    if (!query) {
+      return res.json({ synced: 0, payments: [] });
     }
-    // For super_admin, no filter (sync all paid orders)
-    
+
     const orders = await Order.find(query).sort({ updatedAt: -1 });
     const results = [];
     for (const order of orders) {

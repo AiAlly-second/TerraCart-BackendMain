@@ -406,6 +406,16 @@ const errorHandler = (err, req, res, next) => {
  */
 const getCorsConfig = () => {
   const isProduction = process.env.NODE_ENV === 'production';
+  const allowedHeaders = [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin',
+    'X-Idempotency-Key',
+    'x-idempotency-key',
+    'Idempotency-Key',
+  ];
   const allowedOrigins = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
     : [
@@ -427,7 +437,7 @@ const getCorsConfig = () => {
       origin: true, // Allow all origins in development
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+      allowedHeaders,
       exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
       maxAge: 86400,
       preflightContinue: false,
@@ -449,7 +459,7 @@ const getCorsConfig = () => {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+    allowedHeaders,
     exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
     maxAge: 86400,
     preflightContinue: false,

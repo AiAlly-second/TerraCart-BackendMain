@@ -7,6 +7,8 @@ const itemSchema = new mongoose.Schema(
     quantity: { type: Number, required: true, min: 1 },
     price: { type: Number, required: true, min: 0 },
     returned: { type: Boolean, default: false },
+    note: { type: String, trim: true, default: "" },
+    specialInstructions: { type: String, trim: true, default: "" },
     convertedToTakeaway: { type: Boolean, default: false },
     // Optional: Finances MenuItemV2 ID for reliable consumption matching (pass-through from frontend)
     menuItemId: { type: mongoose.Schema.Types.ObjectId, ref: "MenuItemV2", default: null },
@@ -24,6 +26,7 @@ const itemSchema = new mongoose.Schema(
 
 const kotLineSchema = new mongoose.Schema(
   {
+    kotNumber: { type: Number, min: 1 },
     items: { type: [itemSchema], required: true },
     subtotal: { type: Number, required: true },
     gst: { type: Number, required: true },
@@ -135,6 +138,8 @@ const orderSchema = new mongoose.Schema(
     returnedAt: Date,
     autoReleasedAt: Date,
     sessionToken: { type: String, index: true, sparse: true }, // Session token for dine-in orders
+    // Client-generated key to make create-order requests idempotent.
+    idempotencyKey: { type: String, index: true, sparse: true },
     // Simple sequential token for takeaway orders (1, 2, 3, etc.) - unique per cart
     takeawayToken: { type: Number, index: true, sparse: true },
     // Cart admin association for data isolation
@@ -151,6 +156,8 @@ const orderSchema = new mongoose.Schema(
       billPrinted: { type: Boolean, default: false },
       lastPrintedKotIndex: { type: Number, default: -1 },
     },
+    // Idempotency keys already consumed by add-kot requests.
+    kotRequestKeys: { type: [String], default: [] },
     // First-come-first-serve order acceptance (TAKEAWAY/PICKUP/DELIVERY)
     acceptedBy: {
       employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
@@ -179,5 +186,7 @@ orderSchema.index({ createdAt: -1 });
 orderSchema.index({ cartId: 1, createdAt: -1 });
 // Index for service type queries
 orderSchema.index({ cartId: 1, serviceType: 1, status: 1 });
+// Prevent duplicate order creation when the same client request is retried.
+orderSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("Order", orderSchema);

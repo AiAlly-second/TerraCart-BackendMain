@@ -65,6 +65,12 @@ exports.getDashboardStats = async (req, res) => {
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
+    const orderScope = {
+      $or: [
+        { cartId: cafeId },
+        { cafeId: cafeId }, // Backward compatibility for old records
+      ],
+    };
 
     // Run all queries in parallel for faster response
     const [
@@ -77,26 +83,22 @@ exports.getDashboardStats = async (req, res) => {
       totalTables,
       pendingTasks,
     ] = await Promise.all([
-      // Active orders (today, excluding all completed/inactive statuses)
+      // Active orders (real-time, excluding terminal statuses)
       Order.countDocuments({
-        cartId: cafeId,
-        createdAt: { $gte: today },
-        status: { 
-          $nin: [
-            "Finalized", 
-            "Cancelled", 
-            "Paid", 
-            "Returned", 
-            "Exit" // Takeaway final status
-          ] 
-        },
+        ...orderScope,
+        $nor: [
+          { status: /^paid$/i },
+          { status: /^cancelled$/i },
+          { status: /^returned$/i },
+          { status: /^exit$/i },
+        ],
       }),
 
       // Today's revenue orders - use aggregation for faster calculation
       Order.aggregate([
         {
           $match: {
-            cartId: cafeId,
+            ...orderScope,
             createdAt: { $gte: today, $lt: tomorrow },
             status: { $in: ["Paid", "Finalized", "Exit"] },
           },
@@ -120,10 +122,20 @@ exports.getDashboardStats = async (req, res) => {
         },
       ]),
 
-      // Pending KOTs (orders with status pending/preparing)
+      // Pending KOTs (orders with status pending/preparing/ready)
+      // Keep cart scope and status scope in separate clauses to avoid key collisions.
       Order.countDocuments({
-        cartId: cafeId,
-        status: { $in: ["Pending", "Confirmed", "Preparing", "Ready"] },
+        $and: [
+          orderScope,
+          {
+            $or: [
+              { status: /^pending$/i },
+              { status: /^confirmed$/i },
+              { status: /^preparing$/i },
+              { status: /^ready$/i },
+            ],
+          },
+        ],
       }),
 
       // Low stock items (threshold can be configured)

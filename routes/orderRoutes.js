@@ -6,8 +6,11 @@ const {
   finalizeOrder,
   getOrders,
   getOrderById,
+  getKotPrintTemplate,
   updateOrderStatus,
   updatePrintStatus,
+  claimPrintJob,
+  completePrintJob,
   acceptOrder,
   cancelOrderByCustomer,
   confirmPaymentByCustomer,
@@ -49,6 +52,12 @@ router.get(
   ]),
   getOrders,
 );
+router.get(
+  "/:id/kot-print",
+  protect,
+  authorize(["admin", "manager", "waiter", "captain"]),
+  getKotPrintTemplate,
+);
 router.get("/:id", getOrderById); // Public for customers to view their order
 router.patch(
   "/:id/status",
@@ -78,6 +87,18 @@ router.patch(
   authorize(["admin", "manager", "waiter", "captain"]),
   blockActionsIfCheckedOut,
   updatePrintStatus,
+);
+router.patch(
+  "/:id/print-claim",
+  protect,
+  authorize(["admin", "manager", "waiter", "captain"]),
+  claimPrintJob,
+);
+router.patch(
+  "/:id/print-complete",
+  protect,
+  authorize(["admin", "manager", "waiter", "captain"]),
+  completePrintJob,
 );
 router.post(
   "/:id/add-items",

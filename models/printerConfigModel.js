@@ -10,6 +10,10 @@ const printerConfigSchema = new mongoose.Schema(
     },
     printerIp: { type: String, required: true },
     printerPort: { type: Number, default: 9100 },
+    businessName: { type: String, default: "TERRA CART" },
+    kotHeaderText: { type: String, default: "" },
+    billHeaderText: { type: String, default: "" },
+    centerAlign: { type: Boolean, default: true },
     updatedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }

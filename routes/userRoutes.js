@@ -11,8 +11,10 @@ const {
   toggleCafeStatus,
   getUserById,
   getMe,
+  getEmergencyContacts,
   logoutUser,
   updateUser,
+  updateEmergencyContacts,
   toggleFranchiseStatus,
   bulkUpdateAdministrativeStatus,
   deleteUser,
@@ -67,6 +69,10 @@ router.use(protect);
 
 // Get current user (me)
 router.get("/me", getMe);
+
+// Emergency contacts for current user's profile/cart
+router.get("/emergency-contacts", getEmergencyContacts);
+router.put("/emergency-contacts", updateEmergencyContacts);
 
 // Logout user
 router.post("/logout", logoutUser);

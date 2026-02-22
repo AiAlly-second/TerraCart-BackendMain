@@ -8,9 +8,9 @@ const {
 
 router.use(protect);
 
-// GET: waiter, captain, manager (to print KOT/Bill)
-router.get("/", authorize(["waiter", "captain", "manager"]), getPrinterConfig);
-// PUT: manager only (to configure printer)
-router.put("/", authorize(["manager"]), savePrinterConfig);
+// GET: waiter/captain/manager/admin (to print KOT/Bill)
+router.get("/", authorize(["waiter", "captain", "manager", "admin"]), getPrinterConfig);
+// PUT: manager/admin (to configure printer)
+router.put("/", authorize(["manager", "admin"]), savePrinterConfig);
 
 module.exports = router;

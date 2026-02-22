@@ -113,6 +113,149 @@ const generateToken = (id) => {
   });
 };
 
+const MOBILE_ROLES = ["waiter", "cook", "captain", "manager", "employee"];
+
+const resolveEmergencyContactOwnerId = async (user) => {
+  if (!user) return null;
+
+  if (["admin", "franchise_admin", "super_admin"].includes(user.role)) {
+    return user._id;
+  }
+
+  if (MOBILE_ROLES.includes(user.role)) {
+    if (user.cartId) return user.cartId;
+    if (user.cafeId) return user.cafeId;
+
+    const employee = await Employee.findOne({
+      $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
+    })
+      .select("cartId cafeId")
+      .lean();
+    if (employee?.cartId) return employee.cartId;
+    if (employee?.cafeId) return employee.cafeId;
+  }
+
+  return user._id;
+};
+
+const sanitizeEmergencyContacts = (contacts) => {
+  if (!Array.isArray(contacts)) return [];
+
+  const cleaned = contacts
+    .map((entry) => ({
+      name: typeof entry?.name === "string" ? entry.name.trim() : "",
+      phone: typeof entry?.phone === "string" ? entry.phone.trim() : "",
+      relation:
+        typeof entry?.relation === "string" ? entry.relation.trim() : "",
+      notes: typeof entry?.notes === "string" ? entry.notes.trim() : "",
+      isPrimary: entry?.isPrimary === true,
+    }))
+    .filter((entry) => entry.phone);
+
+  const firstPrimaryIndex = cleaned.findIndex((entry) => entry.isPrimary);
+  return cleaned.map((entry, index) => ({
+    ...entry,
+    isPrimary:
+      firstPrimaryIndex === -1
+        ? index === 0
+        : index === firstPrimaryIndex,
+  }));
+};
+
+// @desc    Get emergency contacts for current user's cart/profile
+// @route   GET /api/users/emergency-contacts
+exports.getEmergencyContacts = async (req, res) => {
+  try {
+    const ownerId = await resolveEmergencyContactOwnerId(req.user);
+    if (!ownerId) {
+      return res
+        .status(404)
+        .json({ message: "No associated cart/profile found for this user" });
+    }
+
+    const owner = await User.findById(ownerId)
+      .select("managerHelplineNumber phone emergencyContacts")
+      .lean();
+
+    if (!owner) {
+      return res.status(404).json({ message: "User profile not found" });
+    }
+
+    const emergencyContacts = Array.isArray(owner.emergencyContacts)
+      ? owner.emergencyContacts
+      : [];
+    const primaryContact =
+      emergencyContacts.find((entry) => entry?.isPrimary) ||
+      emergencyContacts[0] ||
+      null;
+
+    return res.json({
+      success: true,
+      data: {
+        managerHelplineNumber:
+          owner.managerHelplineNumber || owner.phone || primaryContact?.phone || null,
+        emergencyContacts,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+// @desc    Update emergency contacts for current user's cart/profile
+// @route   PUT /api/users/emergency-contacts
+exports.updateEmergencyContacts = async (req, res) => {
+  try {
+    if (
+      !["admin", "franchise_admin", "super_admin", "manager"].includes(
+        req.user.role
+      )
+    ) {
+      return res.status(403).json({
+        message: "Access denied. You are not allowed to update emergency contacts.",
+      });
+    }
+
+    const ownerId = await resolveEmergencyContactOwnerId(req.user);
+    if (!ownerId) {
+      return res
+        .status(404)
+        .json({ message: "No associated cart/profile found for this user" });
+    }
+
+    const owner = await User.findById(ownerId);
+    if (!owner) {
+      return res.status(404).json({ message: "User profile not found" });
+    }
+
+    if (req.body.managerHelplineNumber !== undefined) {
+      owner.managerHelplineNumber =
+        typeof req.body.managerHelplineNumber === "string"
+          ? req.body.managerHelplineNumber.trim()
+          : "";
+    }
+
+    if (req.body.emergencyContacts !== undefined) {
+      owner.emergencyContacts = sanitizeEmergencyContacts(
+        req.body.emergencyContacts
+      );
+    }
+
+    await owner.save();
+
+    return res.json({
+      success: true,
+      data: {
+        managerHelplineNumber: owner.managerHelplineNumber || owner.phone || null,
+        emergencyContacts: owner.emergencyContacts || [],
+      },
+      message: "Emergency contacts updated successfully",
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message });
+  }
+};
+
 // @desc    Login user
 // @route   POST /api/users/login
 exports.loginUser = async (req, res) => {

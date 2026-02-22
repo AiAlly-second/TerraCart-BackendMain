@@ -50,7 +50,7 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.14"
   },
   "overrides": {
     "form-data": ">=2.5.4",

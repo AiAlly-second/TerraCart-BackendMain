@@ -5,36 +5,25 @@ const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddlewa
 const Order = require("../models/orderModel");
 const Employee = require("../models/employeeModel");
 
-// Helper to get cafeId based on user role
-// Uses req.user.cafeId (populated by middleware) for mobile users to avoid Employee lookup
+// Helper to get cartId based on user role
+// Uses req.user.cartId / req.user.cafeId (populated by middleware) for mobile users.
 const getCafeId = async (user) => {
   if (user.role === "admin") {
     return user._id;
-  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // First try req.user.cafeId (populated by middleware)
-    if (user.cafeId) {
-      return user.cafeId;
+  } else if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+    // First try pre-populated cart binding from auth middleware.
+    if (user.cartId || user.cafeId) {
+      return user.cartId || user.cafeId;
     }
-    // Fallback: Employee lookup (should not be needed if middleware works correctly)
-    const employee = await Employee.findOne({ 
-      $or: [
-        { userId: user._id },
-        { email: user.email?.toLowerCase() }
-      ]
-    }).lean();
-    return employee?.cafeId;
-  } else if (user.role === "employee") {
-    // Legacy employee role
-    if (user.cafeId) {
-      return user.cafeId;
-    }
-    const employee = await Employee.findOne({ 
-      $or: [
-        { userId: user._id },
-        { email: user.email?.toLowerCase() }
-      ]
-    }).lean();
-    return employee?.cafeId;
+
+    // Fallback: resolve from Employee record (Employee model uses cartId).
+    const employee = await Employee.findOne({
+      $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
+    })
+      .select("cartId cafeId")
+      .lean();
+
+    return employee?.cartId || employee?.cafeId || null;
   }
   return null;
 };
@@ -65,6 +54,8 @@ router.get("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", 
             _id: `${order._id}-kot-${index}`,
             orderId: order._id,
             orderNumber: order.orderNumber,
+            cartId: order.cartId ? order.cartId.toString() : null,
+            franchiseId: order.franchiseId ? order.franchiseId.toString() : null,
             tableNumber: order.tableNumber,
             serviceType: order.serviceType || 'DINE_IN', // Include serviceType for filtering
             status: order.status,
@@ -109,6 +100,8 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
             _id: `${order._id}-kot-${index}`,
             orderId: order._id,
             orderNumber: order.orderNumber,
+            cartId: order.cartId ? order.cartId.toString() : null,
+            franchiseId: order.franchiseId ? order.franchiseId.toString() : null,
             tableNumber: order.tableNumber,
             serviceType: order.serviceType || 'DINE_IN', // Include serviceType for filtering
             status: order.status,
@@ -186,6 +179,11 @@ router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter
       return res.status(404).json({ message: "KOT not found" });
     }
 
+    const cafeId = await getCafeId(req.user);
+    if (!cafeId || !order.cartId || order.cartId.toString() !== cafeId.toString()) {
+      return res.status(403).json({ message: "Access denied. KOT does not belong to your cart/kiosk." });
+    }
+
     if (!order.kotLines || !order.kotLines[kotIndex]) {
       return res.status(404).json({ message: "KOT not found" });
     }
@@ -195,6 +193,8 @@ router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter
       _id: req.params.id,
       orderId: order._id,
       orderNumber: order.orderNumber,
+      cartId: order.cartId ? order.cartId.toString() : null,
+      franchiseId: order.franchiseId ? order.franchiseId.toString() : null,
       tableNumber: order.tableNumber,
       status: order.status,
       items: kot.items,

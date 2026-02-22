@@ -24,6 +24,24 @@ function resolveCartDisplayName(cart) {
   );
 }
 
+function resolvePrimaryEmergencyContact(cartAdmin) {
+  if (!Array.isArray(cartAdmin?.emergencyContacts)) return null;
+  return (
+    cartAdmin.emergencyContacts.find((entry) => entry?.isPrimary) ||
+    cartAdmin.emergencyContacts[0] ||
+    null
+  );
+}
+
+function resolveHelplineNumber(cartAdmin) {
+  const primaryContact = resolvePrimaryEmergencyContact(cartAdmin);
+  return pickFirstNonEmptyString(
+    cartAdmin?.managerHelplineNumber,
+    cartAdmin?.phone,
+    primaryContact?.phone
+  );
+}
+
 /**
  * Get nearby carts based on customer location
  * @route GET /api/carts/nearby
@@ -53,7 +71,7 @@ exports.getNearbyCarts = async (req, res) => {
           }
         ]
       })
-        .populate("cartAdminId", "name cartName cafeName email isActive")
+        .populate("cartAdminId", "name cartName cafeName email isActive phone managerHelplineNumber emergencyContacts")
         .populate("franchiseId", "name")
         .lean();
 
@@ -71,9 +89,17 @@ exports.getNearbyCarts = async (req, res) => {
 
         // Only include carts with delivery enabled
         if (deliveryEnabled) {
+          const helplineNumber = resolveHelplineNumber(cart.cartAdminId);
+          const primaryEmergencyContact = resolvePrimaryEmergencyContact(
+            cart.cartAdminId
+          );
           nearbyCarts.push({
             ...cart,
             name: resolvedName,
+            helplineNumber,
+            managerHelplineNumber:
+              cart.cartAdminId?.managerHelplineNumber || helplineNumber || null,
+            primaryEmergencyContact,
             distance: null, // Distance not calculated for pin code match
             canDeliver: true, // Assume can deliver if pin code matches
             canPickup: pickupEnabled,
@@ -121,7 +147,7 @@ exports.getNearbyCarts = async (req, res) => {
         { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cartName cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive phone managerHelplineNumber emergencyContacts")
       .populate("franchiseId", "name")
       .lean();
 
@@ -144,9 +170,17 @@ exports.getNearbyCarts = async (req, res) => {
       if (!cart.coordinates?.latitude || !cart.coordinates?.longitude) {
         // If no coordinates, skip distance calculation but include if pickup is enabled
         if (orderType === "PICKUP" && pickupEnabled) {
+          const helplineNumber = resolveHelplineNumber(cart.cartAdminId);
+          const primaryEmergencyContact = resolvePrimaryEmergencyContact(
+            cart.cartAdminId
+          );
           nearbyCarts.push({
             ...cart,
             name: resolvedName,
+            helplineNumber,
+            managerHelplineNumber:
+              cart.cartAdminId?.managerHelplineNumber || helplineNumber || null,
+            primaryEmergencyContact,
             distance: null,
             canDeliver: false,
             canPickup: true,
@@ -195,9 +229,17 @@ exports.getNearbyCarts = async (req, res) => {
         (orderType === "PICKUP" && canPickup) ||
         (orderType === "DELIVERY" && canDeliver)
       ) {
+        const helplineNumber = resolveHelplineNumber(cart.cartAdminId);
+        const primaryEmergencyContact = resolvePrimaryEmergencyContact(
+          cart.cartAdminId
+        );
         nearbyCarts.push({
           ...cart,
           name: resolvedName,
+          helplineNumber,
+          managerHelplineNumber:
+            cart.cartAdminId?.managerHelplineNumber || helplineNumber || null,
+          primaryEmergencyContact,
           distance: distance,
           canDeliver,
           canPickup,
@@ -240,7 +282,7 @@ exports.getCartById = async (req, res) => {
     const { latitude, longitude, orderType } = req.query;
 
     const cart = await Cart.findById(id)
-      .populate("cartAdminId", "name cartName cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive phone managerHelplineNumber emergencyContacts")
       .populate("franchiseId", "name")
       .lean();
 
@@ -304,6 +346,12 @@ exports.getCartById = async (req, res) => {
       data: {
         ...cart,
         name: resolveCartDisplayName(cart),
+        helplineNumber: resolveHelplineNumber(cart.cartAdminId),
+        managerHelplineNumber:
+          cart.cartAdminId?.managerHelplineNumber ||
+          resolveHelplineNumber(cart.cartAdminId) ||
+          null,
+        primaryEmergencyContact: resolvePrimaryEmergencyContact(cart.cartAdminId),
         distance,
         canDeliver,
         canPickup: cart.pickupEnabled !== undefined ? cart.pickupEnabled : true,
@@ -394,7 +442,7 @@ exports.updateCartSettings = async (req, res) => {
     await Cart.findByIdAndUpdate(cart._id, { $set: updateData }, { new: true });
 
     const updatedCart = await Cart.findById(cart._id)
-      .populate("cartAdminId", "name cartName cafeName email")
+      .populate("cartAdminId", "name cartName cafeName email phone managerHelplineNumber emergencyContacts")
       .populate("franchiseId", "name")
       .lean();
 
@@ -432,7 +480,7 @@ exports.getAvailableCarts = async (req, res) => {
         { isActive: { $exists: false } }
       ]
     })
-      .populate("cartAdminId", "name cartName cafeName email isActive")
+      .populate("cartAdminId", "name cartName cafeName email isActive phone managerHelplineNumber emergencyContacts")
       .populate("franchiseId", "name")
       .lean();
 
@@ -457,9 +505,17 @@ exports.getAvailableCarts = async (req, res) => {
         (orderType === "DELIVERY" && deliveryEnabled) ||
         !orderType // If no orderType specified, include all
       ) {
+        const helplineNumber = resolveHelplineNumber(cart.cartAdminId);
+        const primaryEmergencyContact = resolvePrimaryEmergencyContact(
+          cart.cartAdminId
+        );
         availableCarts.push({
           ...cart,
           name: resolvedName,
+          helplineNumber,
+          managerHelplineNumber:
+            cart.cartAdminId?.managerHelplineNumber || helplineNumber || null,
+          primaryEmergencyContact,
           distance: null, // Will be calculated when location is available
           canDeliver: deliveryEnabled,
           canPickup: pickupEnabled,
@@ -500,7 +556,7 @@ exports.getMyCartSettings = async (req, res) => {
 
     // Find cart by cartAdminId
     let cart = await Cart.findOne({ cartAdminId: req.user._id })
-      .populate("cartAdminId", "name cartName cafeName email")
+      .populate("cartAdminId", "name cartName cafeName email phone managerHelplineNumber emergencyContacts")
       .populate("franchiseId", "name")
       .lean();
 
@@ -534,7 +590,7 @@ exports.getMyCartSettings = async (req, res) => {
 
       // Populate and return
       cart = await Cart.findById(newCart._id)
-        .populate("cartAdminId", "name cartName cafeName email")
+        .populate("cartAdminId", "name cartName cafeName email phone managerHelplineNumber emergencyContacts")
         .populate("franchiseId", "name")
         .lean();
     }

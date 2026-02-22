@@ -19,132 +19,210 @@ const PRINTER_ENABLED = process.env.PRINTER_ENABLED !== "false"; // Default to t
 /**
  * Format KOT for printing
  */
-function formatKOT(order, kot, kotIndex = 0) {
+function sanitizeText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function wrapText(text, maxChars = 32) {
+  const normalized = sanitizeText(text);
+  if (!normalized) return [];
+  if (normalized.length <= maxChars) return [normalized];
+
+  const words = normalized.split(" ");
   const lines = [];
-  const time = new Date();
-  const timeStr = time.toLocaleTimeString("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
-  const dateStr = time.toLocaleDateString("en-IN", {
-    timeZone: "Asia/Kolkata",
+  let current = "";
+  for (const word of words) {
+    if (!current) {
+      current = word;
+      continue;
+    }
+    if ((`${current} ${word}`).length <= maxChars) {
+      current = `${current} ${word}`;
+    } else {
+      lines.push(current);
+      current = word;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function resolveServiceLabel(order = {}) {
+  const serviceType = String(order.serviceType || "")
+    .trim()
+    .toUpperCase();
+  const orderType = String(order.orderType || "")
+    .trim()
+    .toUpperCase();
+
+  if (
+    serviceType === "DELIVERY" ||
+    (serviceType === "TAKEAWAY" && orderType === "DELIVERY")
+  ) {
+    return "DELIVERY";
+  }
+  if (
+    serviceType === "PICKUP" ||
+    (serviceType === "TAKEAWAY" && orderType === "PICKUP")
+  ) {
+    return "TAKEAWAY";
+  }
+  if (serviceType === "TAKEAWAY") return "TAKEAWAY";
+  return "DINE-IN";
+}
+
+function isTakeawayLike(order = {}) {
+  return resolveServiceLabel(order) !== "DINE-IN";
+}
+
+function collectItemModifiers(item = {}) {
+  const buckets = [
+    item.extras,
+    item.addOns,
+    item.addons,
+    item.modifiers,
+    item.variants,
+  ];
+  const names = [];
+  for (const bucket of buckets) {
+    if (!Array.isArray(bucket)) continue;
+    for (const entry of bucket) {
+      if (!entry) continue;
+      if (typeof entry === "string") {
+        const text = sanitizeText(entry);
+        if (text) names.push(text);
+        continue;
+      }
+      const name = sanitizeText(entry.name || entry.label || entry.value);
+      if (name) names.push(name);
+    }
+  }
+  return [...new Set(names)];
+}
+
+function resolveOrderNote(order = {}, kot = {}) {
+  const candidates = [
+    order.specialInstructions,
+    order.specialInstruction,
+    order.orderNote,
+    order.note,
+    order.notes,
+    kot.specialInstructions,
+    kot.note,
+  ];
+  for (const candidate of candidates) {
+    const text = sanitizeText(candidate);
+    if (text) return text;
+  }
+  return "";
+}
+
+function formatKOT(order, kot, kotIndex = 0) {
+  const maxChars = 32;
+  const separator = "-".repeat(maxChars);
+  const lines = [];
+
+  const outletName = sanitizeText(order?.cartName || order?.cafeName || "TERRA CART");
+  const explicitKotNumber = Number(kot?.kotNumber);
+  const kotNumber =
+    Number.isFinite(explicitKotNumber) && explicitKotNumber > 0
+      ? explicitKotNumber
+      : kotIndex + 1;
+
+  const orderRef = String(order?._id || "")
+    .trim()
+    .slice(-8)
+    .toUpperCase();
+  const serviceLabel = resolveServiceLabel(order);
+  const takeawayLike = isTakeawayLike(order);
+  const tableLabel = sanitizeText(order?.tableNumber || "");
+  const tokenLabel = takeawayLike ? sanitizeText(order?.takeawayToken || "") : "";
+  const orderNote = resolveOrderNote(order, kot);
+
+  const timestampCandidate = kot?.createdAt || order?.createdAt || order?.updatedAt;
+  const parsedTimestamp = timestampCandidate
+    ? new Date(timestampCandidate)
+    : null;
+  const printDate =
+    parsedTimestamp instanceof Date && !Number.isNaN(parsedTimestamp.getTime())
+      ? parsedTimestamp
+      : new Date();
+  const dateLabel = printDate.toLocaleString("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
   });
 
-  // Restaurant Header
-  lines.push("=".repeat(32));
-  lines.push("       ** TERRA CART **");
-  lines.push("=".repeat(32));
-  lines.push("");
+  lines.push(outletName || "TERRA CART");
+  lines.push(`KOT #${String(kotNumber).padStart(2, "0")} ${serviceLabel}`);
+  lines.push(dateLabel);
+  lines.push(separator);
 
-  // KOT Title - Large and Bold
-  lines.push("   -----------------------");
-  lines.push("   | KITCHEN ORDER TICKET |");
-  lines.push("   -----------------------");
-  lines.push("");
-
-  // Critical ID Info
-  lines.push(`   KOT NUMBER: #${String(kotIndex + 1).padStart(3, "0")}`);
-  lines.push("");
-
-  // Service Type Badge
-  const serviceTypeLine = order.serviceType === "TAKEAWAY" 
-    ? "   *** TAKEAWAY ORDER ***" 
-    : "   ~~~ DINE-IN ORDER ~~~";
-  lines.push(serviceTypeLine);
-  lines.push("");
-
-  // Date & Time
-  lines.push(`  Date: ${dateStr}`);
-  lines.push(`  Time: ${timeStr}`);
-  lines.push("-".repeat(32));
-  lines.push("");
-
-  // Table/Token - HIGHLIGHTED
-  if (
-    order.serviceType === "TAKEAWAY" &&
-    order.orderType !== "DELIVERY" &&
-    order.takeawayToken
-  ) {
-    lines.push("********************************");
-    lines.push(`**  TOKEN: ${String(order.takeawayToken).toUpperCase().padEnd(20, " ")}**`);
-    lines.push("********************************");
-  } else if (order.tableNumber) {
-    lines.push("********************************");
-    lines.push(`**  TABLE: ${String(order.tableNumber).padEnd(20, " ")}**`);
-    lines.push("********************************");
+  if (!takeawayLike && tableLabel) {
+    lines.push(`Table: ${tableLabel}`);
   }
-  lines.push("");
-
-  // Customer Info (Takeaway only)
-  if (order.serviceType === "TAKEAWAY") {
-    if (order.customerName) {
-      lines.push(`  Customer: ${order.customerName}`);
-    }
-    if (order.customerMobile) {
-      lines.push(`  Mobile: ${order.customerMobile}`);
-    }
-    if (order.customerName || order.customerMobile) {
-      lines.push("");
+  if (takeawayLike && serviceLabel !== "DELIVERY" && tokenLabel) {
+    lines.push(`Token: ${tokenLabel}`);
+  }
+  if (orderRef) {
+    lines.push(`Ref: ${orderRef}`);
+  }
+  if (orderNote) {
+    for (const wrapped of wrapText(`Note: ${orderNote}`, maxChars)) {
+      lines.push(wrapped);
     }
   }
+  lines.push(separator);
 
-  // Order Reference
-  const orderId = (order._id || "").toString().slice(-8).toUpperCase();
-  lines.push(`  Order Ref: ${orderId}`);
-  lines.push("");
-  lines.push("=".repeat(32));
-  lines.push("");
+  const items = Array.isArray(kot?.items) ? kot.items : [];
+  const activeItems = items.filter((item) => item && item.returned !== true);
 
-  // Items Header
-  lines.push("   ITEMS TO PREPARE:");
-  lines.push("");
-  lines.push("-".repeat(32));
+  if (!activeItems.length) {
+    lines.push("No items");
+  } else {
+    for (const item of activeItems) {
+      const qty = Math.max(1, Number(item.quantity) || 1);
+      const name = sanitizeText(item.name || "Item");
+      const itemLines = wrapText(`${qty} x ${name}`, maxChars);
+      itemLines.forEach((line) => lines.push(line));
 
-  // Items List
-  if (kot.items && Array.isArray(kot.items)) {
-    kot.items.forEach((item, idx) => {
-      if (item.returned) {
-        lines.push("");
-        lines.push(`  X [CANCELLED] ${item.name}`);
-        lines.push("");
-      } else {
-        lines.push("");
-        // Quantity in bold-like format
-        const qtyDisplay = `[${item.quantity}x]`;
-        lines.push(`  ${qtyDisplay} ${item.name}`);
-        
-        // Special instructions if any
-        if (item.specialInstructions) {
-          lines.push(`      Note: ${item.specialInstructions}`);
-        }
+      const modifiers = collectItemModifiers(item);
+      for (const modifier of modifiers) {
+        const wrapped = wrapText(`+ ${modifier}`, maxChars - 2);
+        wrapped.forEach((line) => lines.push(`  ${line}`));
       }
-    });
+
+      const itemNote = sanitizeText(item.specialInstructions || item.note || "");
+      if (itemNote) {
+        const wrapped = wrapText(`Note: ${itemNote}`, maxChars - 2);
+        wrapped.forEach((line) => lines.push(`  ${line}`));
+      }
+    }
   }
 
-  lines.push("");
-  lines.push("-".repeat(32));
-  lines.push("");
+  const selectedAddons = Array.isArray(order?.selectedAddons)
+    ? order.selectedAddons.filter((addon) => addon && Number(addon.quantity || 1) > 0)
+    : [];
+  for (const addon of selectedAddons) {
+    const qty = Math.max(1, Number(addon.quantity) || 1);
+    const name = sanitizeText(addon.name || "Add-on");
+    const wrapped = wrapText(`+ ${qty} x ${name}`, maxChars - 2);
+    wrapped.forEach((line) => lines.push(`  ${line}`));
+  }
 
-  // Total items count
-  const activeItems = (kot.items || []).filter(i => !i.returned);
-  const totalQty = activeItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
-  lines.push(`  Total Items: ${activeItems.length}`);
-  lines.push(`  Total Quantity: ${totalQty}`);
-  lines.push("");
-
-  // Footer
-  lines.push("=".repeat(32));
-  lines.push("   Prepare with care!");
-  lines.push("   Terra Cart Kitchen");
-  lines.push("=".repeat(32));
+  const totalQty = activeItems.reduce(
+    (sum, item) => sum + (Number(item?.quantity) || 0),
+    0,
+  );
+  lines.push(separator);
+  lines.push(`Items: ${activeItems.length}  Qty: ${totalQty}`);
   lines.push("");
   lines.push("");
-  lines.push(""); // Extra blank lines for cutting
+  lines.push("");
 
   return lines.join("\n");
 }
@@ -179,7 +257,7 @@ async function printKOT(order, kot, kotIndex = 0) {
         // Print KOT
         printer
           .font("a")
-          .align("ct")
+          .align("lt")
           .text(kotContent)
           .cut()
           .close((err) => {
