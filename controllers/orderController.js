@@ -1214,6 +1214,8 @@ const createOrder = async (req, res) => {
       }
     }
 
+    const shouldStartPendingForPayment = isPickup || isDelivery;
+
     const orderData = {
       _id: orderId,
       tableNumber: String(tableNumber),
@@ -1226,9 +1228,9 @@ const createOrder = async (req, res) => {
       selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
       // UNIFIED STATUS FLOW:
-      // - TAKEAWAY: Start as 'Pending' (awaiting staff acceptance/confirmation)
-      // - DINE_IN: Start as 'Confirmed' (customer is already at table, order is being placed)
-      status: isTakeaway ? "Pending" : "Confirmed",
+      // - PICKUP/DELIVERY: Start as 'Pending' (awaiting payment confirmation)
+      // - DINE_IN and regular TAKEAWAY: Start as 'Confirmed'
+      status: shouldStartPendingForPayment ? "Pending" : "Confirmed",
       // Payment tracking: All orders start as UNPAID
       paymentStatus: "UNPAID",
       paymentMode: null,
@@ -1753,11 +1755,14 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
-    // TAKEAWAY/PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
+    // PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
+    const isPickupOrDeliveryOrder =
+      order.orderType === "PICKUP" ||
+      order.orderType === "DELIVERY" ||
+      order.serviceType === "PICKUP" ||
+      order.serviceType === "DELIVERY";
     const isTakeawayAwaitingPayment =
-      ["TAKEAWAY", "PICKUP", "DELIVERY"].includes(
-        order.serviceType || ""
-      ) && order.status === "Pending";
+      isPickupOrDeliveryOrder && order.status === "Pending";
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId && io && emitToCafe && !isTakeawayAwaitingPayment) {
@@ -2292,12 +2297,16 @@ const getOrders = async (req, res) => {
     }
     // For super_admin, no query-level restriction (see all orders)
 
-    // TAKEAWAY/PICKUP/DELIVERY: hide order from cart admin until payment is done (status Pending = unpaid; after pay, status becomes Paid)
+    // PICKUP/DELIVERY: hide unpaid Pending orders from cart admin until payment is done.
+    // Regular TAKEAWAY should follow dine-in visibility.
     query.$and = query.$and || [];
     query.$and.push({
       $or: [
-        { serviceType: { $nin: ["TAKEAWAY", "PICKUP", "DELIVERY"] } },
         { status: { $ne: "Pending" } },
+        {
+          orderType: { $nin: ["PICKUP", "DELIVERY"] },
+          serviceType: { $nin: ["PICKUP", "DELIVERY"] },
+        },
       ],
     });
 
@@ -3085,11 +3094,12 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
-    // TAKEAWAY/PICKUP/DELIVERY: block order from proceeding until payment is complete (admin must mark payment paid first)
-    const isTakeawayLike =
-      order.serviceType === "TAKEAWAY" ||
+    // PICKUP/DELIVERY: block order from proceeding until payment is complete.
+    const isPickupOrDeliveryOrder =
       order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY";
+      order.orderType === "DELIVERY" ||
+      order.serviceType === "PICKUP" ||
+      order.serviceType === "DELIVERY";
     const isProceedingStatus = [
       "Confirmed",
       "Preparing",
@@ -3099,7 +3109,7 @@ const updateOrderStatus = async (req, res) => {
       "Completed",
       "Served",
     ].includes(status);
-    if (isTakeawayLike && isProceedingStatus) {
+    if (isPickupOrDeliveryOrder && isProceedingStatus) {
       const alreadyPaid =
         order.status === "Paid" || order.paymentStatus === "PAID";
       let paymentComplete = alreadyPaid;

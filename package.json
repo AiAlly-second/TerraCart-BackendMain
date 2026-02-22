@@ -22,6 +22,7 @@
     "fix:cart-menu": "node scripts/diagnose-and-fix-cart-menu.js",
     "fix:tables": "node scripts/fix-table-database.js",
     "fix:table-indexes": "node scripts/fix-table-indexes.js",
+    "reset:cart-operational": "node scripts/reset-cart-operational-data.js",
     "migrate:codes": "node scripts/migrate-codes.js",
     "fix:duplicate-codes": "node scripts/fix-duplicate-codes.js"
   },
