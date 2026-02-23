@@ -71,6 +71,46 @@ exports.getDashboardStats = async (req, res) => {
         { cafeId: cafeId }, // Backward compatibility for old records
       ],
     };
+    const normalizedRole = String(req.user?.role || "").toLowerCase();
+    const requireAcceptedKotAssignment =
+      normalizedRole === "cook" || normalizedRole === "manager";
+
+    const acceptedKotScope = requireAcceptedKotAssignment
+      ? {
+        $or: [
+          { "acceptedBy.employeeId": { $exists: true, $ne: null } },
+          { "acceptedBy.employeeName": { $exists: true, $nin: ["", null] } },
+        ],
+      }
+      : null;
+
+    const buildKotStatusQuery = (statusMatchers) => {
+      const clauses = [
+        orderScope,
+        {
+          $or: statusMatchers.map((matcher) => ({ status: matcher })),
+        },
+      ];
+      if (acceptedKotScope) {
+        clauses.push(acceptedKotScope);
+      }
+      return { $and: clauses };
+    };
+
+    const pendingKotStatusMatchers = [
+      /^pending$/i,
+      /^confirmed$/i,
+      /^accept$/i,
+      /^accepted$/i,
+    ];
+    const preparingKotStatusMatchers = [
+      /^preparing$/i,
+      /^being prepared$/i,
+      /^beingprepared$/i,
+    ];
+    const readyKotStatusMatchers = requireAcceptedKotAssignment
+      ? [/^ready$/i, /^served$/i, /^completed$/i, /^finalized$/i]
+      : [/^ready$/i];
 
     // Run all queries in parallel for faster response
     const [
@@ -144,44 +184,13 @@ exports.getDashboardStats = async (req, res) => {
       ]),
 
       // Pending KOTs (orders waiting for kitchen start).
-      // Keep cart scope and status scope in separate clauses to avoid key collisions.
-      Order.countDocuments({
-        $and: [
-          orderScope,
-          {
-            $or: [
-              { status: /^pending$/i },
-              { status: /^confirmed$/i },
-              { status: /^accept$/i },
-              { status: /^accepted$/i },
-            ],
-          },
-        ],
-      }),
+      Order.countDocuments(buildKotStatusQuery(pendingKotStatusMatchers)),
 
       // Preparing KOTs.
-      Order.countDocuments({
-        $and: [
-          orderScope,
-          {
-            $or: [
-              { status: /^preparing$/i },
-              { status: /^being prepared$/i },
-              { status: /^beingprepared$/i },
-            ],
-          },
-        ],
-      }),
+      Order.countDocuments(buildKotStatusQuery(preparingKotStatusMatchers)),
 
       // Ready KOTs.
-      Order.countDocuments({
-        $and: [
-          orderScope,
-          {
-            $or: [{ status: /^ready$/i }],
-          },
-        ],
-      }),
+      Order.countDocuments(buildKotStatusQuery(readyKotStatusMatchers)),
 
       // Low stock items (threshold can be configured)
       // InventoryItem model uses cartId, support cafeId for backward compatibility
