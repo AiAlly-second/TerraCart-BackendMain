@@ -39,7 +39,9 @@ const readUpdateConfig = () => {
     if (!fs.existsSync(APP_UPDATE_CONFIG_PATH)) return {};
     const raw = fs.readFileSync(APP_UPDATE_CONFIG_PATH, "utf8");
     if (!raw || raw.trim().length === 0) return {};
-    const parsed = JSON.parse(raw);
+    // Support UTF-8 with BOM (common when file is edited by Windows PowerShell).
+    const normalizedRaw = raw.replace(/^\uFEFF/, "");
+    const parsed = JSON.parse(normalizedRaw);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed;
     }
