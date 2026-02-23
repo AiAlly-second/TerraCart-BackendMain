@@ -186,6 +186,7 @@ app.use("/api/analytics", require("./routes/analyticsRoutes"));
 app.use("/api/print", require("./routes/printRoutes")); // Network printer routes
 app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queue for mobile agent
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
+app.use("/api/app", require("./routes/appUpdateRoutes"));
 
 
 // Health check endpoints (both /health and /api/health for compatibility)

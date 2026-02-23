@@ -23,6 +23,12 @@ function sanitizeText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeMultilineNote(value) {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
 function wrapText(text, maxChars = 32) {
   const normalized = sanitizeText(text);
   if (!normalized) return [];
@@ -45,6 +51,12 @@ function wrapText(text, maxChars = 32) {
   }
   if (current) lines.push(current);
   return lines;
+}
+
+function wrapMultilineNote(text, maxChars = 32) {
+  const normalized = normalizeMultilineNote(text);
+  if (!normalized.trim()) return [];
+  return normalized.split("\n");
 }
 
 function resolveServiceLabel(order = {}) {
@@ -111,8 +123,8 @@ function resolveOrderNote(order = {}, kot = {}) {
     kot.note,
   ];
   for (const candidate of candidates) {
-    const text = sanitizeText(candidate);
-    if (text) return text;
+    const text = normalizeMultilineNote(candidate);
+    if (text.trim()) return text;
   }
   return "";
 }
@@ -172,8 +184,9 @@ function formatKOT(order, kot, kotIndex = 0) {
     lines.push(`Ref: ${orderRef}`);
   }
   if (orderNote) {
-    for (const wrapped of wrapText(`Note: ${orderNote}`, maxChars)) {
-      lines.push(wrapped);
+    lines.push("Note:");
+    for (const wrapped of wrapMultilineNote(orderNote, maxChars)) {
+      lines.push(wrapped || " ");
     }
   }
   lines.push(separator);

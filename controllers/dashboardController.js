@@ -77,6 +77,8 @@ exports.getDashboardStats = async (req, res) => {
       activeOrders,
       todayOrders,
       pendingKOTs,
+      preparingKOTs,
+      readyKOTs,
       lowStockItems,
       todayAttendance,
       occupiedTables,
@@ -90,7 +92,26 @@ exports.getDashboardStats = async (req, res) => {
           { status: /^paid$/i },
           { status: /^cancelled$/i },
           { status: /^returned$/i },
+          { status: /^rejected$/i },
+          { status: /^completed$/i },
+          { status: /^finalized$/i },
+          { status: /^closed$/i },
           { status: /^exit$/i },
+          {
+            $and: [
+              { status: /^served$/i },
+              {
+                $or: [
+                  { serviceType: /^takeaway$/i },
+                  { serviceType: /^pickup$/i },
+                  { serviceType: /^delivery$/i },
+                  { orderType: /^takeaway$/i },
+                  { orderType: /^pickup$/i },
+                  { orderType: /^delivery$/i },
+                ],
+              },
+            ],
+          },
         ],
       }),
 
@@ -122,7 +143,7 @@ exports.getDashboardStats = async (req, res) => {
         },
       ]),
 
-      // Pending KOTs (orders with status pending/preparing/ready)
+      // Pending KOTs (orders waiting for kitchen start).
       // Keep cart scope and status scope in separate clauses to avoid key collisions.
       Order.countDocuments({
         $and: [
@@ -131,9 +152,33 @@ exports.getDashboardStats = async (req, res) => {
             $or: [
               { status: /^pending$/i },
               { status: /^confirmed$/i },
-              { status: /^preparing$/i },
-              { status: /^ready$/i },
+              { status: /^accept$/i },
+              { status: /^accepted$/i },
             ],
+          },
+        ],
+      }),
+
+      // Preparing KOTs.
+      Order.countDocuments({
+        $and: [
+          orderScope,
+          {
+            $or: [
+              { status: /^preparing$/i },
+              { status: /^being prepared$/i },
+              { status: /^beingprepared$/i },
+            ],
+          },
+        ],
+      }),
+
+      // Ready KOTs.
+      Order.countDocuments({
+        $and: [
+          orderScope,
+          {
+            $or: [{ status: /^ready$/i }],
           },
         ],
       }),
@@ -196,6 +241,8 @@ exports.getDashboardStats = async (req, res) => {
         todayRevenue,
         pendingTasks,
         pendingKOTs,
+        preparingKOTs,
+        readyKOTs,
         lowStockItems,
         todayAttendance,
         occupiedTables,

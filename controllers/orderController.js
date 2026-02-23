@@ -9,7 +9,6 @@ const Customer = require("../models/customerModel");
 const Employee = require("../models/employeeModel");
 
 const Cart = require("../models/cartModel");
-const { printKOT } = require("../services/kotPrinter");
 const {
   consumeIngredientsForOrder,
 } = require("../services/costing-v2/orderConsumptionService");
@@ -596,6 +595,12 @@ function sanitizeKotText(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
+function normalizeKotMultilineNote(value) {
+  return String(value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n");
+}
+
 function isTakeawayLikeForKot(order = {}) {
   const serviceType = String(order.serviceType || "")
     .trim()
@@ -664,8 +669,8 @@ function resolveKotOrderNote(order = {}, kot = {}) {
     kot.note,
   ];
   for (const value of candidates) {
-    const text = sanitizeKotText(value);
-    if (text) return text;
+    const text = normalizeKotMultilineNote(value);
+    if (text.trim()) return text;
   }
   return "";
 }
@@ -700,6 +705,12 @@ function wrapKotText(text, maxChars = 32) {
   }
   if (current) lines.push(current);
   return lines;
+}
+
+function wrapKotMultilineNote(text, maxChars = 32) {
+  const normalized = normalizeKotMultilineNote(text);
+  if (!normalized.trim()) return [];
+  return normalized.split("\n");
 }
 
 function formatRow(left, right, width = 32) {
@@ -766,7 +777,8 @@ function getOrderRefForKot(order = {}) {
 }
 
 function buildLine(text, options = {}) {
-  const sanitized = sanitizeKotText(text);
+  const sanitized =
+    options.raw === true ? String(text ?? "") : sanitizeKotText(text);
   return {
     text: sanitized,
     align: options.align || "left",
@@ -952,8 +964,8 @@ async function buildKotPrintTemplate({
     ? [
         buildLine(separator, { separator: true }),
         buildLine("Note:", { align: lineAlign, bold: true }),
-        ...wrapKotText(orderNote, maxChars).map((lineText) =>
-          buildLine(lineText, { align: lineAlign }),
+        ...wrapKotMultilineNote(orderNote, maxChars).map((lineText) =>
+          buildLine(lineText, { align: lineAlign, raw: true }),
         ),
         buildLine(separator, { separator: true }),
       ]
@@ -2548,15 +2560,8 @@ const createOrder = async (req, res) => {
         );
       }
     }
-
-    // Print KOT to printer (non-blocking). Skip for takeaway awaiting payment – print when payment is done.
-    if (!isTakeawayAwaitingPayment) {
-      printKOT(order, kot, 0).catch((err) => {
-        console.error("[ORDER] Failed to print KOT:", err);
-      });
-    }
-
-
+    // KOT printing is handled by print-claim/template clients.
+    // Keep order creation side-effect free to avoid duplicate legacy prints.
     return res.status(201).json(order);
   } catch (err) {
     console.error("[ORDER] createOrder - Unhandled error:", err);
