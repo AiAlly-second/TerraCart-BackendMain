@@ -2,6 +2,11 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/userModel');
 const Employee = require('../models/employeeModel');
 
+const getJwtSecret = () => {
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  return secret || null;
+};
+
 exports.protect = async (req, res, next) => {
   let token;
 
@@ -14,7 +19,14 @@ exports.protect = async (req, res, next) => {
       token = req.headers.authorization.split(' ')[1];
 
       // Verify token
-      const secret = process.env.JWT_SECRET || 'your-secret-key';
+      const secret = getJwtSecret();
+      if (!secret) {
+        console.error("[AUTH] JWT_SECRET is not configured");
+        return res.status(500).json({
+          message: "Server authentication configuration error",
+          code: "AUTH_CONFIG_ERROR",
+        });
+      }
       const decoded = jwt.verify(token, secret);
 
       // Get user from token (always fetch fresh from DB to check current status)
@@ -236,8 +248,12 @@ exports.authorize = (allowedRoles = []) => async (req, res, next) => {
 exports.optionalProtect = async (req, res, next) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (token) {
+    const secret = getJwtSecret();
+    if (!secret) {
+      req.user = null;
+      return next();
+    }
     try {
-      const secret = process.env.JWT_SECRET || 'your-secret-key';
       const decoded = jwt.verify(token, secret);
       req.user = await User.findById(decoded.id).select('-password');
       // Continue even if user not found (for public access)
@@ -249,9 +265,8 @@ exports.optionalProtect = async (req, res, next) => {
         // If token version doesn't match, don't set req.user (treat as unauthenticated)
         if (tokenVersion !== userTokenVersion) {
           req.user = null;
-        }
-        // For mobile app users, populate cafeId and employeeId if not already set
-        if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
+        } else if (["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role)) {
+          // For mobile app users, populate cafeId and employeeId if not already set
           if (!req.user.cafeId || !req.user.employeeId) {
             let employee = null;
             

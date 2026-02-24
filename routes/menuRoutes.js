@@ -1,5 +1,5 @@
 const express = require("express");
-const { protect, authorize } = require("../middleware/authMiddleware");
+const { protect, authorize, optionalProtect } = require("../middleware/authMiddleware");
 const {
   getPublicMenu,
   listMenu,
@@ -15,26 +15,6 @@ const {
 } = require("../controllers/menuController");
 
 const router = express.Router();
-
-// Public routes (optional auth - works with or without authentication)
-// This allows both public access (with cartId query param) and authenticated mobile user access
-const optionalProtect = async (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  if (token) {
-    try {
-      const jwt = require('jsonwebtoken');
-      const User = require('../models/userModel');
-      const secret = process.env.JWT_SECRET || 'your-secret-key';
-      const decoded = jwt.verify(token, secret);
-      req.user = await User.findById(decoded.id).select('-password');
-      // Continue even if user not found (for public access)
-    } catch (error) {
-      // Ignore auth errors for optional auth
-      req.user = null;
-    }
-  }
-  next();
-};
 
 router.get("/public", optionalProtect, getPublicMenu);
 router.get("/meta/spice-levels", (_req, res) => {

@@ -57,6 +57,32 @@ const tableSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    // QR use-case: default TABLE, OFFICE for fixed office/customer QR entries
+    qrContextType: {
+      type: String,
+      enum: ["TABLE", "OFFICE"],
+      default: "TABLE",
+    },
+    officeName: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    officeAddress: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    officePhone: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    officeDeliveryCharge: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
     // Cafe admin association for data isolation
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Franchise association - tables belong to franchises through cafes

@@ -3641,6 +3641,7 @@ exports.getRecipes = async (req, res) => {
         "ingredients.ingredientId",
         "name uom baseUnit currentCostPerBaseUnit"
       )
+      .populate("addonId", "name price")
       .populate("cartId", "name cafeName")
       .sort({ name: 1 })
       .lean(); // Use lean() for better performance
@@ -3739,6 +3740,7 @@ exports.createRecipe = async (req, res) => {
     const rawName = typeof data.name === "string" ? data.name : "";
     data.name = rawName.trim().replace(/\s+/g, " ");
     data.nameNormalized = data.name.toLowerCase();
+    if (data.addonId === "") data.addonId = null;
 
     // De-duplicate ingredient lines (same ingredient + same uom)
     if (Array.isArray(data.ingredients)) {
@@ -3785,6 +3787,7 @@ exports.createRecipe = async (req, res) => {
       "ingredients.ingredientId",
       "name uom baseUnit currentCostPerBaseUnit"
     );
+    await recipe.populate("addonId", "name price");
     await recipe.populate("cartId", "name cafeName");
 
     // Auto-link menu item if it exists (for cart admin)
@@ -3907,6 +3910,9 @@ exports.updateRecipe = async (req, res) => {
       }
       updateBody.ingredients = Array.from(merged.values());
     }
+    if (updateBody.addonId === "") {
+      updateBody.addonId = null;
+    }
 
     Object.assign(recipe, updateBody);
 
@@ -3922,6 +3928,7 @@ exports.updateRecipe = async (req, res) => {
       "ingredients.ingredientId",
       "name uom baseUnit currentCostPerBaseUnit"
     );
+    await recipe.populate("addonId", "name price");
 
     // Update linked menu items
     await MenuItem.updateMany(
@@ -4013,6 +4020,7 @@ exports.recalculateRecipeCost = async (req, res) => {
       "ingredients.ingredientId",
       "name uom baseUnit currentCostPerBaseUnit"
     );
+    await recipe.populate("addonId", "name price");
 
     res.json({ success: true, data: recipe });
   } catch (error) {

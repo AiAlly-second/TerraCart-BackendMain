@@ -71,6 +71,12 @@ const recipeSchema = new mongoose.Schema(
         uom: { type: String, required: true },
       },
     ],
+    addonId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Addon",
+      default: null,
+      index: true,
+    },
     totalCostCached: {
       type: Number,
       required: true,
@@ -113,6 +119,7 @@ const recipeSchema = new mongoose.Schema(
 // Indexes
 recipeSchema.index({ name: 1 });
 recipeSchema.index({ isActive: 1 });
+recipeSchema.index({ addonId: 1, cartId: 1, franchiseId: 1 });
 // Unique index: prevent duplicate BOM names for the same outlet (case-insensitive via nameNormalized)
 recipeSchema.index({ nameNormalized: 1, cartId: 1 }, { unique: true });
 

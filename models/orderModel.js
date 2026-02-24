@@ -88,6 +88,14 @@ const orderSchema = new mongoose.Schema(
       deliveryCharge: { type: Number, default: 0 }, // Delivery charge in rupees
       estimatedTime: { type: Number }, // Estimated delivery time in minutes
     },
+    // QR source context (TABLE default, OFFICE for fixed office QR orders)
+    sourceQrType: {
+      type: String,
+      enum: ["TABLE", "OFFICE"],
+      default: "TABLE",
+    },
+    // Extra fixed delivery charge configured on OFFICE QR (if any)
+    officeDeliveryCharge: { type: Number, default: 0, min: 0 },
     // Special instructions/notes from customer
     specialInstructions: { type: String },
     kotLines: { type: [kotLineSchema], default: [] },

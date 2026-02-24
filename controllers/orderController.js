@@ -256,6 +256,121 @@ const resolveMobileCartId = async (user) => {
   return employee?.cartId || employee?.cafeId || null;
 };
 
+const hasPrivilegedOrderAccess = async (user, order) => {
+  if (!user || !order) return false;
+
+  const role = String(user.role || "").toLowerCase();
+  if (role === "super_admin") return true;
+
+  if (role === "admin" && user._id && order.cartId) {
+    return order.cartId.toString() === user._id.toString();
+  }
+
+  if (role === "franchise_admin" && user._id && order.franchiseId) {
+    return order.franchiseId.toString() === user._id.toString();
+  }
+
+  if (MOBILE_ORDER_ROLES.has(role)) {
+    const mobileCartId = await resolveMobileCartId(user);
+    if (!mobileCartId || !order.cartId) return false;
+    return order.cartId.toString() === mobileCartId.toString();
+  }
+
+  return false;
+};
+
+const TAKEAWAY_LIKE_SERVICE_TYPES = new Set(["TAKEAWAY", "PICKUP", "DELIVERY"]);
+
+const extractSessionTokenFromRequest = (req) => {
+  const bodyToken =
+    req?.body && typeof req.body.sessionToken === "string"
+      ? req.body.sessionToken.trim()
+      : "";
+  if (bodyToken) return bodyToken;
+
+  const queryToken =
+    req?.query && typeof req.query.sessionToken === "string"
+      ? req.query.sessionToken.trim()
+      : "";
+  if (queryToken) return queryToken;
+
+  const rawHeaderToken =
+    req?.headers?.["x-session-token"] || req?.headers?.["x-order-session-token"];
+  if (typeof rawHeaderToken === "string" && rawHeaderToken.trim()) {
+    return rawHeaderToken.trim();
+  }
+  if (Array.isArray(rawHeaderToken) && rawHeaderToken.length > 0) {
+    const first = String(rawHeaderToken[0] || "").trim();
+    if (first) return first;
+  }
+
+  return "";
+};
+
+const isTakeawayLikeOrder = (order) => {
+  const serviceType = String(order?.serviceType || "")
+    .trim()
+    .toUpperCase();
+  const orderType = String(order?.orderType || "")
+    .trim()
+    .toUpperCase();
+  return TAKEAWAY_LIKE_SERVICE_TYPES.has(serviceType) || TAKEAWAY_LIKE_SERVICE_TYPES.has(orderType);
+};
+
+const verifyPublicOrderSessionAccess = async (
+  order,
+  sessionToken,
+  { allowPendingTakeawayWithoutToken = false } = {},
+) => {
+  if (!order) {
+    return { ok: false, status: 404, message: "Order not found" };
+  }
+
+  const token = String(sessionToken || "").trim();
+  const serviceType = String(order.serviceType || "")
+    .trim()
+    .toUpperCase();
+
+  if (serviceType === "DINE_IN") {
+    if (!token) {
+      return { ok: false, status: 401, message: "Not authorized, no token" };
+    }
+
+    let tokenMatches = order.sessionToken === token;
+    if (!tokenMatches && order.table) {
+      const table = await Table.findById(order.table).select("sessionToken").lean();
+      if (table && table.sessionToken === token) {
+        tokenMatches = true;
+      }
+    }
+
+    if (!tokenMatches) {
+      return { ok: false, status: 403, message: "Not authorized, invalid token" };
+    }
+    return { ok: true };
+  }
+
+  if (isTakeawayLikeOrder(order)) {
+    const isPendingTakeaway =
+      serviceType === "TAKEAWAY" && String(order.status || "").trim() === "Pending";
+
+    if (allowPendingTakeawayWithoutToken && isPendingTakeaway) {
+      return { ok: true };
+    }
+
+    if (order.sessionToken) {
+      if (!token) {
+        return { ok: false, status: 401, message: "Not authorized, no token" };
+      }
+      if (order.sessionToken !== token) {
+        return { ok: false, status: 403, message: "Not authorized, invalid token" };
+      }
+    }
+  }
+
+  return { ok: true };
+};
+
 const buildAutoPrintKey = ({
   order,
   docType,
@@ -1113,8 +1228,13 @@ function getOrderBillAmount(order) {
       return sum + price * quantity;
     }, 0)
     : 0;
+  const officeChargeRaw = Number(order?.officeDeliveryCharge);
+  const officeDeliveryCharge =
+    Number.isFinite(officeChargeRaw) && officeChargeRaw > 0
+      ? officeChargeRaw
+      : 0;
 
-  const amount = kotAmount + addonsAmount;
+  const amount = kotAmount + addonsAmount + officeDeliveryCharge;
   return amount > 0 ? Number(amount.toFixed(2)) : 0;
 }
 
@@ -1381,6 +1501,8 @@ const createOrder = async (req, res) => {
       customerLocation, // { latitude, longitude, address }
       selectedAddons, // Add-ons selected by customer
       takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
+      sourceQrType,
+      officeDeliveryCharge,
       idempotencyKey,
     } = req.body;
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
@@ -1410,6 +1532,23 @@ const createOrder = async (req, res) => {
       .toUpperCase();
     const normalizedOrderType =
       typeof orderType === "string" ? orderType.trim().toUpperCase() : undefined;
+    let normalizedSourceQrType =
+      sourceQrType === "OFFICE" ? "OFFICE" : "TABLE";
+    const normalizedOfficeDeliveryCharge = Number(officeDeliveryCharge);
+    let officeTableContext = null;
+
+    // Fallback inference: if frontend misses sourceQrType but provides tableId,
+    // read table QR context and treat OFFICE tables as office QR orders.
+    if (tableId && mongoose.Types.ObjectId.isValid(tableId)) {
+      officeTableContext = await Table.findById(tableId)
+        .select(
+          "qrContextType officeName officeAddress officePhone officeDeliveryCharge cartId",
+        )
+        .lean();
+      if (officeTableContext?.qrContextType === "OFFICE") {
+        normalizedSourceQrType = "OFFICE";
+      }
+    }
 
     // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
     const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
@@ -1449,6 +1588,8 @@ const createOrder = async (req, res) => {
       normalizedServiceType === "PICKUP" || effectiveOrderType === "PICKUP";
     const isDelivery =
       normalizedServiceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
+    const isOfficeQrOrder = normalizedSourceQrType === "OFFICE";
+    const isOfficeDeliveryOrder = isOfficeQrOrder && !isPickup;
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -1915,6 +2056,16 @@ const createOrder = async (req, res) => {
       pickupCartData = cart;
     }
 
+    // OFFICE QR fallback: if cart couldn't be resolved from request flow,
+    // use cartId attached to the office table context.
+    if (!cartId && isOfficeDeliveryOrder && officeTableContext?.cartId) {
+      cartId = officeTableContext.cartId;
+      console.log(
+        "[ORDER] Using cartId from office table context:",
+        cartId.toString ? cartId.toString() : cartId,
+      );
+    }
+
     // Fallback: For takeaway orders without cartId, get the first active cafe admin
     if (isTakeaway && !cartId && !isPickup && !isDelivery) {
       const User = require("../models/userModel");
@@ -1960,16 +2111,18 @@ const createOrder = async (req, res) => {
     }
 
     const shouldStartPendingForPayment = isPickup || isDelivery;
+    const effectiveDeliveryOrder = isDelivery || isOfficeDeliveryOrder;
 
     const orderData = {
       _id: orderId,
       tableNumber: String(tableNumber),
       table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/pickup/delivery
       serviceType: isPickup || isDelivery ? "TAKEAWAY" : normalizedServiceType, // Store as TAKEAWAY for backward compatibility
-      orderType: isPickup ? "PICKUP" : isDelivery ? "DELIVERY" : undefined,
+      orderType: isPickup ? "PICKUP" : effectiveDeliveryOrder ? "DELIVERY" : undefined,
       // For takeaway/pickup/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
+      sourceQrType: normalizedSourceQrType,
       selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
       // UNIFIED STATUS FLOW:
@@ -1982,6 +2135,25 @@ const createOrder = async (req, res) => {
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
     };
+
+    const fallbackOfficeCharge = Number(officeTableContext?.officeDeliveryCharge || 0);
+    const resolvedOfficeDeliveryCharge =
+      Number.isFinite(normalizedOfficeDeliveryCharge) &&
+      normalizedOfficeDeliveryCharge > 0
+        ? Number(normalizedOfficeDeliveryCharge.toFixed(2))
+        : Number.isFinite(fallbackOfficeCharge) && fallbackOfficeCharge > 0
+          ? Number(fallbackOfficeCharge.toFixed(2))
+          : 0;
+
+    if (normalizedSourceQrType === "OFFICE" && resolvedOfficeDeliveryCharge > 0) {
+      orderData.officeDeliveryCharge = resolvedOfficeDeliveryCharge;
+    }
+
+    if (isOfficeDeliveryOrder && resolvedOfficeDeliveryCharge > 0 && !orderData.deliveryInfo) {
+      orderData.deliveryInfo = {
+        deliveryCharge: resolvedOfficeDeliveryCharge,
+      };
+    }
 
     if (requestIdempotencyKey) {
       orderData.idempotencyKey = requestIdempotencyKey;
@@ -2054,6 +2226,36 @@ const createOrder = async (req, res) => {
         };
       }
 
+      // OFFICE QR fallback data hydration from table context
+      // (covers legacy frontend paths where office metadata is partially missing)
+      if (isOfficeDeliveryOrder && officeTableContext) {
+        const fallbackOfficeName = String(officeTableContext.officeName || "").trim();
+        const fallbackOfficePhone = String(officeTableContext.officePhone || "").trim();
+        const fallbackOfficeAddress = String(
+          officeTableContext.officeAddress || "",
+        ).trim();
+
+        if (!orderData.customerName && fallbackOfficeName) {
+          orderData.customerName = fallbackOfficeName;
+        }
+        if (!orderData.customerMobile && fallbackOfficePhone) {
+          orderData.customerMobile = fallbackOfficePhone;
+        }
+
+        const existingAddress = String(orderData.customerLocation?.address || "").trim();
+        if (!existingAddress && fallbackOfficeAddress) {
+          orderData.customerLocation = {
+            latitude:
+              orderData.customerLocation?.latitude ?? customerLocation?.latitude ?? null,
+            longitude:
+              orderData.customerLocation?.longitude ??
+              customerLocation?.longitude ??
+              null,
+            address: fallbackOfficeAddress,
+          };
+        }
+      }
+
       // Store delivery info for delivery orders
       if (isDelivery && deliveryInfo) {
         orderData.deliveryInfo = deliveryInfo;
@@ -2075,7 +2277,7 @@ const createOrder = async (req, res) => {
       // Generate simple takeaway token (1, 2, 3, etc.) per cart.
       // Do not assign takeaway token for DELIVERY orders.
       // REUSABLE: when orders are Paid/Cancelled/Returned, their tokens become free again.
-      if (cartId && !isDelivery) {
+      if (cartId && !isDelivery && !isOfficeDeliveryOrder) {
         const tokenScopeCartId = normalizeObjectId(cartId);
         if (!tokenScopeCartId) {
           console.warn(
@@ -2575,7 +2777,7 @@ const createOrder = async (req, res) => {
 
 // ---------------- ADD KOT ----------------
 const addKot = async (req, res) => {
-  console.log("[ORDER] addKot called - no auth required");
+  console.log("[ORDER] addKot called");
   console.log("[ORDER] addKot - Order ID:", req.params.id);
   console.log(
     "[ORDER] addKot - Request body:",
@@ -2617,6 +2819,17 @@ const addKot = async (req, res) => {
     if (!order) {
       console.error("[ORDER] addKot - Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
+    }
+
+    const hasPrivilegedAccess = await hasPrivilegedOrderAccess(req.user, order);
+    if (!hasPrivilegedAccess) {
+      const sessionToken = extractSessionTokenFromRequest(req);
+      const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken);
+      if (!sessionAccess.ok) {
+        return res
+          .status(sessionAccess.status)
+          .json({ message: sessionAccess.message });
+      }
     }
 
     if (
@@ -2818,6 +3031,31 @@ const addKot = async (req, res) => {
         message: `Failed to save order: ${saveError.message}`,
         error: saveError.message,
       });
+    }
+
+    // If inventory was already deducted earlier, consume only incremental KOT/add-on deltas now.
+    if (order.inventoryDeducted) {
+      const userId = req.user
+        ? req.user._id
+        : order.cartId && (order.cartId._id || order.cartId);
+      if (userId) {
+        consumeIngredientsForOrder(order, userId)
+          .then((consumptionResult) => {
+            if (consumptionResult?.success || consumptionResult?.alreadyProcessed) {
+              return;
+            }
+            console.warn(
+              `[COSTING] Incremental consumption after addKot had issues for order ${order._id}:`,
+              consumptionResult?.message || consumptionResult?.error || "Unknown error",
+            );
+          })
+          .catch((consumptionError) => {
+            console.warn(
+              `[COSTING] Incremental consumption failed after addKot for order ${order._id}:`,
+              consumptionError?.message || consumptionError,
+            );
+          });
+      }
     }
 
     // Update customer record for takeaway orders (non-blocking)
@@ -3248,6 +3486,19 @@ const getOrderById = async (req, res) => {
     }
     // For super_admin, no restriction (they can see all orders)
 
+    // Public reads are allowed for customer screens, but avoid exposing
+    // session token unless request is authenticated for this order/session.
+    const hasPrivilegedAccess = await hasPrivilegedOrderAccess(req.user, order);
+    if (!hasPrivilegedAccess) {
+      const sessionToken = extractSessionTokenFromRequest(req);
+      const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken, {
+        allowPendingTakeawayWithoutToken: true,
+      });
+      if (!sessionAccess.ok) {
+        delete order.sessionToken;
+      }
+    }
+
     // Populate franchise GST number if franchiseId exists and not already populated
     if (order.franchiseId && !order.franchise) {
       const User = require("../models/userModel");
@@ -3577,6 +3828,21 @@ const updateOrderAddons = async (req, res) => {
     order.selectedAddons = normalizeSelectedAddons(selectedAddons);
     order.markModified("selectedAddons");
     await order.save();
+
+    // If inventory was already deducted, consume only new add-on quantity delta now.
+    if (order.inventoryDeducted) {
+      const userId = req.user
+        ? req.user._id
+        : order.cartId && (order.cartId._id || order.cartId);
+      if (userId) {
+        consumeIngredientsForOrder(order, userId).catch((consumptionError) => {
+          console.warn(
+            `[COSTING] Incremental add-on consumption failed for order ${order._id}:`,
+            consumptionError?.message || consumptionError,
+          );
+        });
+      }
+    }
 
     // Emit socket event to cafe room
     const io = req.app.get("io");
@@ -4223,7 +4489,7 @@ const updateOrderStatus = async (req, res) => {
 // ---------------- CUSTOMER CANCEL/RETURN ORDER ----------------
 const cancelOrderByCustomer = async (req, res) => {
   try {
-    const { status, sessionToken, reason } = req.body;
+    const { status, reason } = req.body;
     const orderId = req.params.id;
 
     if (!status) return res.status(400).json({ message: "Status required" });
@@ -4236,53 +4502,14 @@ const cancelOrderByCustomer = async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Verify sessionToken for dine-in orders
-    if (order.serviceType === "DINE_IN") {
-      if (!sessionToken) {
-        return res.status(401).json({ message: "Not authorized, no token" });
-      }
-
-      // Check sessionToken matches order's sessionToken or table's sessionToken
-      let tokenMatches = false;
-      if (order.sessionToken === sessionToken) {
-        tokenMatches = true;
-      } else if (order.table) {
-        const table = await Table.findById(order.table);
-        if (table && table.sessionToken === sessionToken) {
-          tokenMatches = true;
-        }
-      }
-
-      if (!tokenMatches) {
-        return res
-          .status(403)
-          .json({ message: "Not authorized, invalid token" });
-      }
-    } else if (order.serviceType === "TAKEAWAY") {
-      // Verify sessionToken for takeaway orders when possible.
-      // For Pending takeaway orders (customer backed out from payment): always allow cancel
-      // so the order is removed from cart admin view without requiring sessionToken match.
-      const isPendingTakeaway =
-        order.status === "Pending" && order.serviceType === "TAKEAWAY";
-      if (isPendingTakeaway) {
-        // Allow cancel without sessionToken so "back without payment" always succeeds
-        console.log(
-          `[ORDER] Takeaway Pending order ${orderId} - allowing cancellation (customer left payment)`,
-        );
-      } else if (order.sessionToken) {
-        if (!sessionToken) {
-          return res.status(401).json({ message: "Not authorized, no token" });
-        }
-        if (order.sessionToken !== sessionToken) {
-          return res
-            .status(403)
-            .json({ message: "Not authorized, invalid token" });
-        }
-      } else {
-        console.log(
-          `[ORDER] Takeaway order ${orderId} has no sessionToken - allowing cancellation`,
-        );
-      }
+    const sessionToken = extractSessionTokenFromRequest(req);
+    const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken, {
+      allowPendingTakeawayWithoutToken: status === "Cancelled",
+    });
+    if (!sessionAccess.ok) {
+      return res
+        .status(sessionAccess.status)
+        .json({ message: sessionAccess.message });
     }
 
     // Check if status transition is allowed
@@ -4377,34 +4604,18 @@ const cancelOrderByCustomer = async (req, res) => {
 // ---------------- CUSTOMER CONFIRM PAYMENT ----------------
 const confirmPaymentByCustomer = async (req, res) => {
   try {
-    const { sessionToken, paymentMethod } = req.body;
+    const { paymentMethod } = req.body;
     const orderId = req.params.id;
 
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Verify sessionToken for dine-in orders
-    if (order.serviceType === "DINE_IN") {
-      if (!sessionToken) {
-        return res.status(401).json({ message: "Not authorized, no token" });
-      }
-
-      // Check sessionToken matches order's sessionToken or table's sessionToken
-      let tokenMatches = false;
-      if (order.sessionToken === sessionToken) {
-        tokenMatches = true;
-      } else if (order.table) {
-        const table = await Table.findById(order.table);
-        if (table && table.sessionToken === sessionToken) {
-          tokenMatches = true;
-        }
-      }
-
-      if (!tokenMatches) {
-        return res
-          .status(403)
-          .json({ message: "Not authorized, invalid token" });
-      }
+    const sessionToken = extractSessionTokenFromRequest(req);
+    const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken);
+    if (!sessionAccess.ok) {
+      return res
+        .status(sessionAccess.status)
+        .json({ message: sessionAccess.message });
     }
 
     // Check if order can be confirmed as paid (must be Finalized or Completed)

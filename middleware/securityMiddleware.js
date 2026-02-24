@@ -7,13 +7,38 @@
  * - XSS protection
  */
 
-const crypto = require('crypto');
+const User = require("../models/userModel");
 
 // ============= RATE LIMITING =============
 // Simple in-memory rate limiter (for single instance)
 // For production with multiple instances, use Redis
 
 const rateLimitStore = new Map();
+const apiKeyBypassCache = new Map();
+const API_KEY_CACHE_TTL_MS = Number.parseInt(
+  process.env.API_KEY_BYPASS_CACHE_TTL_MS || "60000",
+  10,
+);
+
+const isTrustedApiKey = async (rawApiKey) => {
+  const apiKey = String(rawApiKey || "").trim();
+  if (!apiKey || !apiKey.startsWith("tc_live_")) return false;
+
+  const now = Date.now();
+  const cached = apiKeyBypassCache.get(apiKey);
+  if (cached && now < cached.expiresAt) {
+    return cached.allowed;
+  }
+
+  const exists = await User.exists({ "apiKeys.key": apiKey });
+  const allowed = Boolean(exists);
+  apiKeyBypassCache.set(apiKey, {
+    allowed,
+    expiresAt: now + (Number.isFinite(API_KEY_CACHE_TTL_MS) ? API_KEY_CACHE_TTL_MS : 60000),
+  });
+
+  return allowed;
+};
 
 // Clean up expired entries every 5 minutes
 setInterval(() => {
@@ -21,6 +46,11 @@ setInterval(() => {
   for (const [key, data] of rateLimitStore.entries()) {
     if (now > data.resetTime) {
       rateLimitStore.delete(key);
+    }
+  }
+  for (const [key, data] of apiKeyBypassCache.entries()) {
+    if (!data || now > data.expiresAt) {
+      apiKeyBypassCache.delete(key);
     }
   }
 }, 5 * 60 * 1000);
@@ -53,18 +83,22 @@ const createRateLimiter = (options = {}) => {
   const effectiveMax = isDevelopment ? (max * 50) : max;
   const effectiveWindowMs = isDevelopment ? (windowMs / 2) : windowMs; // Shorter window in dev
 
-  return (req, res, next) => {
+  return async (req, res, next) => {
     // Skip rate limiting in development if explicitly disabled
     if (isDevelopment && process.env.DISABLE_RATE_LIMIT === 'true') {
       return next();
     }
 
-    // SPECIAL: Exempt API Key requests (Fabric Team / Analytics Integration)
-    // This allows the analytics dashboard to pull data without running into rate limits.
-    // We strictly check for the 'tc_live_' prefix to prevent random headers from bypassing limits.
-    const apiKey = req.headers['x-api-key'];
-    if (apiKey && apiKey.startsWith('tc_live_')) {
-      return next();
+    // SPECIAL: Exempt trusted API key requests (Fabric Team / Analytics Integration).
+    // Do not bypass based on prefix alone.
+    const apiKey = req.headers["x-api-key"];
+    if (apiKey) {
+      try {
+        const trusted = await isTrustedApiKey(apiKey);
+        if (trusted) return next();
+      } catch (error) {
+        // Continue with normal rate limiting if API key lookup fails.
+      }
     }
     
     // In development, be very lenient - allow almost unlimited requests
@@ -137,12 +171,13 @@ const rateLimiters = {
     message: 'Too many API requests'
   }),
 
-  // Login attempts - effectively disabled (very high limit)
-  // In dev: Disabled by default, in prod: configurable via RATE_LIMIT_LOGIN env var (default: 10000 = effectively disabled)
+  // Login attempts - secure default in production
+  // In dev: Disabled by default unless ENABLE_RATE_LIMIT=true.
+  // In prod: configurable via RATE_LIMIT_LOGIN env var, with secure default.
   login: createRateLimiter({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: parseInt(process.env.RATE_LIMIT_LOGIN) || 10000, // Configurable via env var, default 10000 (effectively disabled)
-    message: 'Too many login attempts. Please try again laterr.',
+    max: Number.parseInt(process.env.RATE_LIMIT_LOGIN || "10", 10) || 10,
+    message: 'Too many login attempts. Please try again later.',
     skipSuccessfulRequests: true // Don't count successful logins
   }),
 
