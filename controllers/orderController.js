@@ -592,12 +592,32 @@ function escapePrintHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+/** Safely convert value to string for KOT display. Avoids "[object Object]" when value is an object. */
+function toKotSafeString(value) {
+  let result = "";
+  if (value == null) result = "";
+  else if (typeof value === "string") result = value;
+  else if (typeof value === "number" || typeof value === "boolean") result = String(value);
+  else if (typeof value === "object") {
+    const str =
+      value.text ??
+      value.message ??
+      value.value ??
+      value.label ??
+      value.name ??
+      "";
+    result = typeof str === "string" ? str : "";
+  }
+  // Filter out "[object Object]" (from DB or prior bugs) - treat as empty
+  return result === "[object Object]" ? "" : result;
+}
+
 function sanitizeKotText(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim();
+  return toKotSafeString(value).replace(/\s+/g, " ").trim();
 }
 
 function normalizeKotMultilineNote(value) {
-  return String(value ?? "")
+  return toKotSafeString(value)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n");
 }
@@ -779,7 +799,7 @@ function getOrderRefForKot(order = {}) {
 
 function buildLine(text, options = {}) {
   const sanitized =
-    options.raw === true ? String(text ?? "") : sanitizeKotText(text);
+    options.raw === true ? toKotSafeString(text) : sanitizeKotText(text);
   return {
     text: sanitized,
     align: options.align || "left",
@@ -1210,7 +1230,13 @@ const buildEscPosPayloadFromKotLines = ({ lines = [], centerAlign = true }) => {
   payload += `\x1Ba${alignByte}`; // Text alignment
 
   safeLines.forEach((line) => {
-    payload += `${String(line ?? "")}\n`;
+    // Lines from buildKotPrintTemplate are objects { text, separator, align, bold, indent }
+    const text =
+      line && typeof line === "object" && line.text != null
+        ? toKotSafeString(line.text)
+        : toKotSafeString(line);
+    const safeText = text === "[object Object]" ? "" : text;
+    payload += `${safeText || " "}\n`;
   });
 
   payload += "\n\n\n\x1DV\x00"; // Feed + cut
