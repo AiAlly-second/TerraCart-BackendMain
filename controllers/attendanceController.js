@@ -5,6 +5,9 @@ const LeaveRequest = require("../models/leaveRequestModel");
 
 // IST offset constant (UTC+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+const ATTENDANCE_IDEMPOTENCY_WINDOW_MS = 5 * 1000;
+const ATTENDANCE_REQUEST_CACHE_TTL_MS = 60 * 1000;
+const recentAttendanceRequestMap = new Map();
 
 // Helper function to get current IST time
 const getISTNow = () => {
@@ -216,6 +219,157 @@ const hasApprovedLeaveForToday = async (employeeId, today) => {
     .select("_id")
     .lean();
   return Boolean(existing);
+};
+
+const parseRequestTimestampMs = (value) => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    const ts = value.getTime();
+    return Number.isNaN(ts) ? null : ts;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? Math.trunc(value) : Math.trunc(value * 1000);
+  }
+
+  const asString = String(value).trim();
+  if (!asString) return null;
+
+  if (/^\d+$/.test(asString)) {
+    const numeric = Number(asString);
+    if (Number.isFinite(numeric)) {
+      return numeric > 1e12 ? Math.trunc(numeric) : Math.trunc(numeric * 1000);
+    }
+  }
+
+  const parsed = new Date(asString);
+  const ts = parsed.getTime();
+  return Number.isNaN(ts) ? null : ts;
+};
+
+const getAttendanceRequestMeta = (req) => {
+  const requestTimestampRaw =
+    req.body?.requestTimestamp ??
+    req.headers["x-request-timestamp"] ??
+    req.headers["x-request-time"] ??
+    null;
+  const requestTimestampMs = parseRequestTimestampMs(requestTimestampRaw);
+  const rawDeviceId =
+    req.body?.deviceId ??
+    req.headers["x-device-id"] ??
+    req.headers["x-deviceid"] ??
+    "unknown";
+  const deviceId = String(rawDeviceId || "unknown").trim() || "unknown";
+
+  return {
+    deviceId,
+    requestTimestampRaw,
+    requestTimestampMs,
+  };
+};
+
+const purgeExpiredAttendanceRequestCache = (nowMs = Date.now()) => {
+  for (const [key, value] of recentAttendanceRequestMap.entries()) {
+    if (!value || nowMs - value.receivedAtMs > ATTENDANCE_REQUEST_CACHE_TTL_MS) {
+      recentAttendanceRequestMap.delete(key);
+    }
+  }
+};
+
+const isDuplicateAttendanceRequest = ({
+  action,
+  employeeId,
+  userId,
+  deviceId,
+  requestTimestampMs,
+}) => {
+  if (!requestTimestampMs || !employeeId) {
+    return false;
+  }
+
+  const nowMs = Date.now();
+  purgeExpiredAttendanceRequestCache(nowMs);
+
+  const key = [
+    action,
+    employeeId.toString(),
+    userId?.toString() || "anonymous",
+    deviceId || "unknown",
+  ].join(":");
+
+  const previous = recentAttendanceRequestMap.get(key);
+  if (
+    previous &&
+    Math.abs(previous.requestTimestampMs - requestTimestampMs) <=
+      ATTENDANCE_IDEMPOTENCY_WINDOW_MS &&
+    nowMs - previous.receivedAtMs <= ATTENDANCE_IDEMPOTENCY_WINDOW_MS
+  ) {
+    return true;
+  }
+
+  recentAttendanceRequestMap.set(key, {
+    requestTimestampMs,
+    receivedAtMs: nowMs,
+  });
+
+  return false;
+};
+
+const buildCartMatchClause = (cartId) => {
+  if (!cartId) return null;
+  return {
+    $or: [{ cartId }, { cartId: null }, { cartId: { $exists: false } }],
+  };
+};
+
+const buildActiveSessionQuery = ({ employeeId, today, tomorrow, cartId }) => {
+  const query = {
+    employeeId,
+    "checkIn.time": { $ne: null },
+    isCheckedOut: { $ne: true },
+    $and: [{ $or: [{ "checkOut.time": null }, { "checkOut.time": { $exists: false } }] }],
+  };
+
+  if (today && tomorrow) {
+    query.date = { $gte: today, $lt: tomorrow };
+  }
+
+  const cartClause = buildCartMatchClause(cartId);
+  if (cartClause) {
+    query.$and.push(cartClause);
+  }
+
+  return query;
+};
+
+const logAttendanceEvent = ({
+  action,
+  outcome,
+  employeeId,
+  attendanceId = null,
+  userId = null,
+  role = null,
+  deviceId = "unknown",
+  requestTimestampMs = null,
+  message = "",
+}) => {
+  const payload = {
+    action,
+    outcome,
+    employeeId: employeeId ? employeeId.toString() : null,
+    attendanceId: attendanceId ? attendanceId.toString() : null,
+    userId: userId ? userId.toString() : null,
+    role: role || null,
+    deviceId: deviceId || "unknown",
+    requestTimestamp: requestTimestampMs ? new Date(requestTimestampMs).toISOString() : null,
+    timestamp: new Date().toISOString(),
+    message,
+  };
+
+  console.log(`[ATTENDANCE_EVENT] ${JSON.stringify(payload)}`);
 };
 
 // Helper function to build query based on user role
@@ -745,6 +899,7 @@ exports.checkIn = async (req, res) => {
   try {
     const { employeeId, location, notes } = req.body;
     const user = req.user;
+    const requestMeta = getAttendanceRequestMeta(req);
 
     // Determine employeeId - for mobile users, use their own employeeId
     let targetEmployeeId = employeeId;
@@ -762,6 +917,17 @@ exports.checkIn = async (req, res) => {
     if (!targetEmployeeId) {
       return res.status(400).json({ message: "Employee ID is required" });
     }
+
+    logAttendanceEvent({
+      action: "checkin",
+      outcome: "attempt",
+      employeeId: targetEmployeeId,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: "Check-in request received",
+    });
 
     // Verify employee exists and check hierarchy access
     const employee = await Employee.findById(targetEmployeeId);
@@ -796,6 +962,75 @@ exports.checkIn = async (req, res) => {
     // Get today's date in IST (using helper function)
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
+
+    if (
+      isDuplicateAttendanceRequest({
+        action: "checkin",
+        employeeId: targetEmployeeId,
+        userId: user._id,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+      })
+    ) {
+      const duplicateQuery = {
+        employeeId: targetEmployeeId,
+        date: { $gte: today, $lt: tomorrow },
+      };
+      const cartClause = buildCartMatchClause(employee.cartId);
+      if (cartClause) {
+        duplicateQuery.$and = [cartClause];
+      }
+      const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
+        .sort({ updatedAt: -1, createdAt: -1 });
+      const normalizedDuplicateAttendance = duplicateAttendance
+        ? normalizeAttendanceRecord(duplicateAttendance)
+        : {};
+
+      logAttendanceEvent({
+        action: "checkin",
+        outcome: "duplicate_ignored",
+        employeeId: targetEmployeeId,
+        attendanceId: duplicateAttendance?._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Duplicate check-in request ignored within idempotency window",
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Duplicate request ignored",
+        ignored: true,
+        data: normalizedDuplicateAttendance,
+        attendance: normalizedDuplicateAttendance,
+      });
+    }
+
+    const activeSessionQuery = buildActiveSessionQuery({
+      employeeId: targetEmployeeId,
+    });
+    const existingActiveSession = await EmployeeAttendance.findOne(activeSessionQuery)
+      .sort({ date: -1, updatedAt: -1, createdAt: -1 });
+
+    if (existingActiveSession) {
+      logAttendanceEvent({
+        action: "checkin",
+        outcome: "rejected_already_checked_in",
+        employeeId: targetEmployeeId,
+        attendanceId: existingActiveSession._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Active check-in session already exists",
+      });
+
+      return res.status(409).json({
+        message: "Already checked in",
+        code: "ALREADY_CHECKED_IN",
+      });
+    }
 
     // Build query with cartId to ensure consistency with getTodayAttendance
     // This ensures we only find attendance records that match both employeeId AND cartId
@@ -876,24 +1111,57 @@ exports.checkIn = async (req, res) => {
     }
 
     if (attendance && (attendance.isCheckedOut || attendance.checkOut?.time)) {
+      logAttendanceEvent({
+        action: "checkin",
+        outcome: "rejected_already_checked_out",
+        employeeId: targetEmployeeId,
+        attendanceId: attendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Employee has already checked out today",
+      });
+
       return res.status(400).json({
         message: "You have already checked out for today. Check-in is locked.",
         code: "ALREADY_CHECKED_OUT",
       });
     }
 
-    if (attendance && attendance.checkIn && attendance.checkIn.time) {
-      console.log('[ATTENDANCE] checkIn - Employee already checked in');
-      if (!attendance.cartId && employee.cartId) {
-        attendance.cartId = employee.cartId;
-        await attendance.save();
-        console.log('[ATTENDANCE] checkIn - Updated cartId on existing record');
-      }
-      await attendance.populate("employeeId", "name mobile employeeRole");
-      return res.json({
-        message: "Already checked in today",
-        attendance: normalizeAttendanceRecord(attendance),
-        isLate: false,
+    const checkedInTodayQuery = {
+      employeeId: targetEmployeeId,
+      date: { $gte: today, $lt: tomorrow },
+      "checkIn.time": { $ne: null },
+    };
+
+    const checkedInToday = await EmployeeAttendance.findOne(checkedInTodayQuery)
+      .sort({ updatedAt: -1, createdAt: -1 });
+
+    if (checkedInToday) {
+      const alreadyCheckedOut = checkedInToday.isCheckedOut || checkedInToday.checkOut?.time;
+      const message = alreadyCheckedOut
+        ? "You have already checked out for today. Check-in is locked."
+        : "Already checked in";
+      const code = alreadyCheckedOut ? "ALREADY_CHECKED_OUT" : "ALREADY_CHECKED_IN";
+
+      logAttendanceEvent({
+        action: "checkin",
+        outcome: alreadyCheckedOut
+          ? "rejected_already_checked_out"
+          : "rejected_already_checked_in",
+        employeeId: targetEmployeeId,
+        attendanceId: checkedInToday._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Check-in blocked by one-check-in-per-day validation",
+      });
+
+      return res.status(alreadyCheckedOut ? 400 : 409).json({
+        message,
+        code,
       });
     }
 
@@ -921,57 +1189,90 @@ exports.checkIn = async (req, res) => {
         }
     }
 
-    if (attendance) {
-      // Update existing record - ensure date is set to today's IST date
-      attendance.date = today;
-      attendance.checkIn = {
-        time: checkInTime,
-        location: location || "",
-        notes: notes || "",
-      };
-      attendance.status = status;
-      attendance.attendanceStatus = "checked_in";
-      attendance.checkInStatus = "checked_in";
-      attendance.canTakeBreak = true;
-      attendance.isCheckedOut = false;
-      attendance.isOnBreak = false;
-      attendance.breakStart = null;
-      attendance.breaks = [];
-      attendance.breakDuration = 0;
-      attendance.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
-      attendance.franchiseId = employee.franchiseId;
-      await attendance.save();
-    } else {
-      // Create new record
-      attendance = await EmployeeAttendance.create({
-        employeeId: targetEmployeeId,
-        date: today,
-        checkIn: {
+    try {
+      if (attendance) {
+        // Update existing record - ensure date is set to today's IST date
+        attendance.date = today;
+        attendance.checkIn = {
           time: checkInTime,
           location: location || "",
           notes: notes || "",
-        },
-        status: status,
-        attendanceStatus: "checked_in",
-        checkInStatus: "checked_in",
-        canTakeBreak: true,
-        isCheckedOut: false,
-        isOnBreak: false,
-        breakDuration: 0,
-        breaks: [],
-        cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
-        franchiseId: employee.franchiseId,
-      });
+        };
+        attendance.status = status;
+        attendance.attendanceStatus = "checked_in";
+        attendance.checkInStatus = "checked_in";
+        attendance.canTakeBreak = true;
+        attendance.isCheckedOut = false;
+        attendance.isOnBreak = false;
+        attendance.breakStart = null;
+        attendance.breaks = [];
+        attendance.breakDuration = 0;
+        attendance.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
+        attendance.franchiseId = employee.franchiseId;
+        await attendance.save();
+      } else {
+        // Create new record
+        attendance = await EmployeeAttendance.create({
+          employeeId: targetEmployeeId,
+          date: today,
+          checkIn: {
+            time: checkInTime,
+            location: location || "",
+            notes: notes || "",
+          },
+          status: status,
+          attendanceStatus: "checked_in",
+          checkInStatus: "checked_in",
+          canTakeBreak: true,
+          isCheckedOut: false,
+          isOnBreak: false,
+          breakDuration: 0,
+          breaks: [],
+          cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
+          franchiseId: employee.franchiseId,
+        });
+      }
+    } catch (saveErr) {
+      if (saveErr?.code === 11000) {
+        logAttendanceEvent({
+          action: "checkin",
+          outcome: "rejected_duplicate_day_record",
+          employeeId: targetEmployeeId,
+          userId: user._id,
+          role: user.role,
+          deviceId: requestMeta.deviceId,
+          requestTimestampMs: requestMeta.requestTimestampMs,
+          message: "Duplicate day attendance record blocked by unique validation",
+        });
+
+        return res.status(409).json({
+          message: "Already checked in",
+          code: "ALREADY_CHECKED_IN",
+        });
+      }
+      throw saveErr;
     }
 
     await attendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedAttendance = normalizeAttendanceRecord(attendance);
+
+    logAttendanceEvent({
+      action: "checkin",
+      outcome: "success",
+      employeeId: targetEmployeeId,
+      attendanceId: attendance._id,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: "Check-in recorded successfully",
+    });
 
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
     if (io && emitToCafe && attendanceCartId) {
-      const normalizedAttendance = normalizeAttendanceRecord(attendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:checked_in", normalizedAttendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:updated", normalizedAttendance);
     }
@@ -982,6 +1283,17 @@ exports.checkIn = async (req, res) => {
       isLate,
     });
   } catch (err) {
+    const requestMeta = getAttendanceRequestMeta(req);
+    logAttendanceEvent({
+      action: "checkin",
+      outcome: "error",
+      employeeId: req.body?.employeeId,
+      userId: req.user?._id,
+      role: req.user?.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: err.message,
+    });
     return res.status(500).json({ message: err.message });
   }
 };
@@ -991,6 +1303,7 @@ exports.checkOut = async (req, res) => {
   try {
     const { employeeId, location, notes } = req.body;
     const user = req.user;
+    const requestMeta = getAttendanceRequestMeta(req);
 
     // Determine employeeId - for mobile users, use their own employeeId
     let targetEmployeeId = employeeId;
@@ -1008,6 +1321,17 @@ exports.checkOut = async (req, res) => {
     if (!targetEmployeeId) {
       return res.status(400).json({ message: "Employee ID is required" });
     }
+
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "attempt",
+      employeeId: targetEmployeeId,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: "Check-out request received",
+    });
 
     // Verify employee exists and check hierarchy access
     const employee = await Employee.findById(targetEmployeeId);
@@ -1045,30 +1369,89 @@ exports.checkOut = async (req, res) => {
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
 
-    // Build query with cartId to ensure consistency with getTodayAttendance
-    const attendanceQuery = {
+    if (
+      isDuplicateAttendanceRequest({
+        action: "checkout",
+        employeeId: targetEmployeeId,
+        userId: user._id,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+      })
+    ) {
+      const duplicateQuery = {
+        employeeId: targetEmployeeId,
+        date: { $gte: today, $lt: tomorrow },
+      };
+      const cartClause = buildCartMatchClause(employee.cartId);
+      if (cartClause) {
+        duplicateQuery.$and = [cartClause];
+      }
+      const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
+        .sort({ updatedAt: -1, createdAt: -1 });
+      const normalizedDuplicateAttendance = duplicateAttendance
+        ? normalizeAttendanceRecord(duplicateAttendance)
+        : {};
+
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "duplicate_ignored",
+        employeeId: targetEmployeeId,
+        attendanceId: duplicateAttendance?._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Duplicate check-out request ignored within idempotency window",
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Duplicate request ignored",
+        ignored: true,
+        data: normalizedDuplicateAttendance,
+        attendance: normalizedDuplicateAttendance,
+      });
+    }
+
+    const activeSessionQuery = buildActiveSessionQuery({
       employeeId: targetEmployeeId,
-      date: { $gte: today, $lt: tomorrow },
-    };
-    
-    // Add cartId filter if employee has cartId
-    if (employee.cartId) {
-      attendanceQuery.cartId = employee.cartId;
-    }
-    
-    console.log('[ATTENDANCE] checkOut query:', JSON.stringify(attendanceQuery, null, 2));
-    const attendance = await EmployeeAttendance.findOne(attendanceQuery);
-    console.log('[ATTENDANCE] checkOut found record:', attendance ? 'YES' : 'NO');
+      today,
+      tomorrow,
+    });
+    console.log('[ATTENDANCE] checkOut query:', JSON.stringify(activeSessionQuery, null, 2));
 
-    if (!attendance || !attendance.checkIn || !attendance.checkIn.time) {
-      return res.status(400).json({ message: "Employee has not checked in today" });
-    }
+    const attendance = await EmployeeAttendance.findOne(activeSessionQuery)
+      .sort({ updatedAt: -1, createdAt: -1 });
+    console.log('[ATTENDANCE] checkOut found active session:', attendance ? 'YES' : 'NO');
 
-    if (attendance.isCheckedOut || attendance.checkOut?.time) {
-      return res.status(400).json({ message: "Employee already checked out today" });
+    if (!attendance) {
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "rejected_no_active_session",
+        employeeId: targetEmployeeId,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "No active check-in session found for checkout",
+      });
+
+      return res.status(400).json({ message: "No active session found" });
     }
 
     if (attendance.isOnBreak || attendance.breakStart) {
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "rejected_on_break",
+        employeeId: targetEmployeeId,
+        attendanceId: attendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Cannot checkout while break is active",
+      });
+
       return res.status(400).json({ message: "Cannot checkout while on break. Please end break first." });
     }
 
@@ -1132,13 +1515,25 @@ exports.checkOut = async (req, res) => {
 
     await attendance.save();
     await attendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedAttendance = normalizeAttendanceRecord(attendance);
+
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "success",
+      employeeId: targetEmployeeId,
+      attendanceId: attendance._id,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: "Check-out recorded successfully",
+    });
 
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
     if (io && emitToCafe && attendanceCartId) {
-      const normalizedAttendance = normalizeAttendanceRecord(attendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:checked_out", normalizedAttendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:updated", normalizedAttendance);
     }
@@ -1149,6 +1544,17 @@ exports.checkOut = async (req, res) => {
       totalWorkingMinutes,
     });
   } catch (err) {
+    const requestMeta = getAttendanceRequestMeta(req);
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "error",
+      employeeId: req.body?.employeeId,
+      userId: req.user?._id,
+      role: req.user?.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: err.message,
+    });
     return res.status(500).json({ message: err.message });
   }
 };
@@ -1159,12 +1565,25 @@ exports.checkOutById = async (req, res) => {
     const { id } = req.params;
     const { location, notes } = req.body;
     const user = req.user;
+    const requestMeta = getAttendanceRequestMeta(req);
 
     // Find attendance record
     const attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ success: false, message: "Attendance record not found" });
     }
+
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "attempt",
+      employeeId: attendance.employeeId,
+      attendanceId: attendance._id,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: "Check-out-by-id request received",
+    });
 
     // Mobile role access checks
     if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
@@ -1196,16 +1615,90 @@ exports.checkOutById = async (req, res) => {
       }
     }
 
-    if (!attendance.checkIn.time) {
-      return res.status(400).json({ success: false, message: "Employee has not checked in" });
+    const { today, tomorrow } = getISTDateRange();
+
+    if (
+      isDuplicateAttendanceRequest({
+        action: "checkout",
+        employeeId: attendance.employeeId,
+        userId: user._id,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+      })
+    ) {
+      const duplicateQuery = {
+        employeeId: attendance.employeeId,
+        date: { $gte: today, $lt: tomorrow },
+      };
+      const cartClause = buildCartMatchClause(attendance.cartId || attendance.cafeId);
+      if (cartClause) {
+        duplicateQuery.$and = [cartClause];
+      }
+      const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
+        .sort({ updatedAt: -1, createdAt: -1 });
+      const normalizedDuplicateAttendance = duplicateAttendance
+        ? normalizeAttendanceRecord(duplicateAttendance)
+        : {};
+
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "duplicate_ignored",
+        employeeId: attendance.employeeId,
+        attendanceId: duplicateAttendance?._id || attendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Duplicate checkout-by-id request ignored within idempotency window",
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Duplicate request ignored",
+        ignored: true,
+        data: normalizedDuplicateAttendance,
+        attendance: normalizedDuplicateAttendance,
+      });
     }
 
-    if (attendance.isCheckedOut || attendance.checkOut?.time) {
-      return res.status(400).json({ success: false, message: "Employee already checked out" });
+    const activeSessionQuery = buildActiveSessionQuery({
+      employeeId: attendance.employeeId,
+      today,
+      tomorrow,
+    });
+    const activeAttendance = await EmployeeAttendance.findOne(activeSessionQuery)
+      .sort({ updatedAt: -1, createdAt: -1 });
+
+    if (!activeAttendance) {
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "rejected_no_active_session",
+        employeeId: attendance.employeeId,
+        attendanceId: attendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "No active check-in session found for checkout-by-id",
+      });
+
+      return res.status(400).json({ success: false, message: "No active session found" });
     }
 
     // Check if on break - must end break before checkout
-    if (attendance.isOnBreak || (attendance.breakStart && !attendance.checkOut?.time)) {
+    if (activeAttendance.isOnBreak || (activeAttendance.breakStart && !activeAttendance.checkOut?.time)) {
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "rejected_on_break",
+        employeeId: activeAttendance.employeeId,
+        attendanceId: activeAttendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: "Cannot checkout while break is active",
+      });
+
       return res.status(400).json({ success: false, message: "Cannot checkout while on break. Please end break first." });
     }
 
@@ -1214,14 +1707,14 @@ exports.checkOutById = async (req, res) => {
     const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
 
     // Calculate working hours (convert stored UTC times to IST for calculation)
-    const checkInTimeUTC = new Date(attendance.checkIn.time);
+    const checkInTimeUTC = new Date(activeAttendance.checkIn.time);
     const checkInTimeIST = utcToIST(checkInTimeUTC);
     const totalDurationMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
-    const breakMinutes = attendance.breakDuration || 0;
+    const breakMinutes = activeAttendance.breakDuration || 0;
     const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
 
     // Get schedule to calculate overtime (all comparisons in IST)
-    const schedule = await EmployeeSchedule.findOne({ employeeId: attendance.employeeId });
+    const schedule = await EmployeeSchedule.findOne({ employeeId: activeAttendance.employeeId });
     let overtime = 0;
 
     if (schedule && schedule.weeklySchedule) {
@@ -1242,44 +1735,56 @@ exports.checkOutById = async (req, res) => {
       }
     }
 
-    // Get today's IST date to ensure date field is correct
-    const { today } = getISTDateRange();
-    
     // Ensure date field is set to today's IST date (in case it was set incorrectly)
-    attendance.date = today;
+    activeAttendance.date = today;
     
-    attendance.checkOut = {
+    activeAttendance.checkOut = {
       time: checkOutTime,
       location: location || "",
       notes: notes || "",
     };
-    attendance.totalWorkingMinutes = totalWorkingMinutes;
-    attendance.workingHours = Number((totalWorkingMinutes / 60).toFixed(2)); // Convert to hours with 2 decimal places
-    attendance.overtime = Math.max(0, overtime);
-    attendance.isOnBreak = false;
-    attendance.breakStart = null;
-    attendance.attendanceStatus = "checked_out";
-    attendance.checkInStatus = "checked_out";
-    attendance.canTakeBreak = false;
-    attendance.isCheckedOut = true;
+    activeAttendance.totalWorkingMinutes = totalWorkingMinutes;
+    activeAttendance.workingHours = Number((totalWorkingMinutes / 60).toFixed(2)); // Convert to hours with 2 decimal places
+    activeAttendance.overtime = Math.max(0, overtime);
+    activeAttendance.isOnBreak = false;
+    activeAttendance.breakStart = null;
+    activeAttendance.attendanceStatus = "checked_out";
+    activeAttendance.checkInStatus = "checked_out";
+    activeAttendance.canTakeBreak = false;
+    activeAttendance.isCheckedOut = true;
     
     // Update status - if less than 4 hours, mark as half_day, otherwise completed
     if (totalWorkingMinutes < 240) {
       // Less than 4 hours
-      attendance.status = "half_day";
+      activeAttendance.status = "half_day";
     } else {
-      attendance.status = "completed";
+      activeAttendance.status = "completed";
     }
 
-    await attendance.save();
-    await attendance.populate("employeeId", "name mobile employeeRole");
+    await activeAttendance.save();
+    await activeAttendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedAttendance = normalizeAttendanceRecord(activeAttendance);
+
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "success",
+      employeeId: activeAttendance.employeeId,
+      attendanceId: activeAttendance._id,
+      userId: user._id,
+      role: user.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message:
+        activeAttendance._id.toString() === attendance._id.toString()
+          ? "Checkout recorded successfully"
+          : `Checkout completed using active session ${activeAttendance._id.toString()} for requested record ${attendance._id.toString()}`,
+    });
 
     // Emit socket event for real-time update
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    const attendanceCartId = attendance.cartId || attendance.cafeId;
+    const attendanceCartId = activeAttendance.cartId || activeAttendance.cafeId;
     if (io && emitToCafe && attendanceCartId) {
-      const normalizedAttendance = normalizeAttendanceRecord(attendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:checked_out", normalizedAttendance);
       emitToCafe(io, attendanceCartId.toString(), "attendance:updated", normalizedAttendance);
     }
@@ -1287,13 +1792,24 @@ exports.checkOutById = async (req, res) => {
     return res.json({
       success: true,
       message: "Checked out successfully",
-      data: normalizeAttendanceRecord(attendance),
+      data: normalizedAttendance,
       totalWorkingMinutes: totalWorkingMinutes,
-      workingHours: attendance.workingHours,
-      overtime: attendance.overtime,
+      workingHours: activeAttendance.workingHours,
+      overtime: activeAttendance.overtime,
     });
   } catch (err) {
     console.error('[ATTENDANCE] Checkout by ID error:', err);
+    const requestMeta = getAttendanceRequestMeta(req);
+    logAttendanceEvent({
+      action: "checkout",
+      outcome: "error",
+      employeeId: req.body?.employeeId,
+      userId: req.user?._id,
+      role: req.user?.role,
+      deviceId: requestMeta.deviceId,
+      requestTimestampMs: requestMeta.requestTimestampMs,
+      message: err.message,
+    });
     return res.status(500).json({ success: false, message: err.message });
   }
 };

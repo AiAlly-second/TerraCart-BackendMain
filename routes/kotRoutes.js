@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const { protect, authorize } = require("../middleware/authMiddleware");
-const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
 const Order = require("../models/orderModel");
 const Employee = require("../models/employeeModel");
 
@@ -277,7 +276,7 @@ router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter
 
 // Update KOT status (updates the order status)
 // Accepts both orderId and orderId-kot-index formats
-router.patch("/:id/status", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, async (req, res) => {
+router.patch("/:id/status", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), async (req, res) => {
   try {
     const { status } = req.body;
     if (!status) {

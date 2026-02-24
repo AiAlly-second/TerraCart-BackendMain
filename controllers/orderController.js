@@ -7,6 +7,7 @@ const { Table } = require("../models/tableModel");
 const { Payment } = require("../models/paymentModel");
 const Customer = require("../models/customerModel");
 const Employee = require("../models/employeeModel");
+const { triggerKotPrintJob } = require("./networkPrinterController");
 
 const Cart = require("../models/cartModel");
 const {
@@ -1198,6 +1199,167 @@ function formatPaymentPayload(payment) {
   };
 }
 
+const printerIpRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+
+const buildEscPosPayloadFromKotLines = ({ lines = [], centerAlign = true }) => {
+  const safeLines = Array.isArray(lines) ? lines : [];
+  if (!safeLines.length) return "";
+
+  const alignByte = centerAlign ? "\x01" : "\x00";
+  let payload = "\x1B@"; // Initialize printer
+  payload += `\x1Ba${alignByte}`; // Text alignment
+
+  safeLines.forEach((line) => {
+    payload += `${String(line ?? "")}\n`;
+  });
+
+  payload += "\n\n\n\x1DV\x00"; // Feed + cut
+  return payload;
+};
+
+const resolveSenderRoleForPrint = (req) => {
+  const roleFromUser = String(req?.user?.role || "").trim().toLowerCase();
+  if (roleFromUser) return roleFromUser;
+
+  const roleFromBody = String(req?.body?.senderRole || "").trim().toLowerCase();
+  if (roleFromBody) return roleFromBody;
+
+  return "public";
+};
+
+const resolveEmployeeIdForPrintLog = async (req, senderRole) => {
+  if (!req?.user) return null;
+
+  if (req.user.employeeId) {
+    return req.user.employeeId?.toString?.() || String(req.user.employeeId);
+  }
+
+  if (!["waiter", "cook", "captain", "manager", "employee"].includes(senderRole)) {
+    return null;
+  }
+
+  const employee =
+    (await Employee.findOne({ userId: req.user._id }).select("_id").lean()) ||
+    (req.user?.email
+      ? await Employee.findOne({ email: String(req.user.email).toLowerCase() })
+          .select("_id")
+          .lean()
+      : null);
+
+  return employee?._id?.toString?.() || null;
+};
+
+const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
+  if (!order || !Array.isArray(order.kotLines)) return null;
+  if (kotIndex < 0 || kotIndex >= order.kotLines.length) return null;
+
+  const orderId = String(order._id || "").trim();
+  const kot = order.kotLines[kotIndex];
+  const kotNumber = Number(kot?.kotNumber);
+  const kotId = `${orderId}:KOT:${Number.isFinite(kotNumber) && kotNumber > 0 ? kotNumber : kotIndex + 1}`;
+  const senderRole = resolveSenderRoleForPrint(req);
+  const employeeId = await resolveEmployeeIdForPrintLog(req, senderRole);
+  const orderCartId = order.cartId || order.cafeId || null;
+
+  if (!orderCartId) {
+    console.warn(
+      `[KOT_PRINT_TRIGGER] ${JSON.stringify({
+        kotId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "missing_cart_id",
+      })}`
+    );
+    return null;
+  }
+
+  const printerConfig = await PrinterConfig.findOne({ cartId: orderCartId })
+    .select("printerIp printerPort centerAlign")
+    .lean();
+
+  const printerIp = String(printerConfig?.printerIp || "").trim();
+  const printerPort = Number(printerConfig?.printerPort || 9100);
+
+  if (!printerIp || !printerIpRegex.test(printerIp) || !Number.isFinite(printerPort)) {
+    console.warn(
+      `[KOT_PRINT_TRIGGER] ${JSON.stringify({
+        kotId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "invalid_printer_config",
+        printerIp,
+      })}`
+    );
+    return null;
+  }
+
+  const template = await buildKotPrintTemplate({
+    order,
+    kot,
+    kotIndex,
+    paperWidth: "58mm",
+  });
+
+  const payload = buildEscPosPayloadFromKotLines({
+    lines: template?.lines || [],
+    centerAlign: printerConfig?.centerAlign !== false,
+  });
+
+  if (!payload) {
+    console.warn(
+      `[KOT_PRINT_TRIGGER] ${JSON.stringify({
+        kotId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "empty_kot_template",
+      })}`
+    );
+    return null;
+  }
+
+  const printResult = await triggerKotPrintJob({
+    orderId,
+    kotIndex,
+    printerIP: printerIp,
+    printerPort,
+    data: payload,
+  });
+
+  console.log(
+    `[KOT_PRINT_TRIGGER] ${JSON.stringify({
+      kotId,
+      senderRole,
+      employeeId,
+      printTriggered: true,
+      skipped: !!printResult?.skipped,
+      queued: !!printResult?.queued,
+      success: !!printResult?.success,
+    })}`
+  );
+
+  // Emit to cart room only (printer service listeners), never employee-specific socket.
+  const io = req?.app?.get("io");
+  const emitToCafe = req?.app?.get("emitToCafe");
+  if (io && emitToCafe && orderCartId) {
+    emitToCafe(io, orderCartId.toString(), "printer:kot:triggered", {
+      orderId,
+      kotIndex,
+      kotId,
+      senderRole,
+      employeeId,
+      printTriggered: true,
+      queued: !!printResult?.queued,
+      skipped: !!printResult?.skipped,
+      success: !!printResult?.success,
+    });
+  }
+
+  return printResult;
+};
+
 // Order status transitions
 // UNIFIED flow for both DINE_IN and TAKEAWAY:
 // Pending → Confirmed → Preparing → Ready → Completed → Paid
@@ -2189,6 +2351,23 @@ const createOrder = async (req, res) => {
     // 3. Accurate food cost tracking in Finance panel
     console.log(`[ORDER] Order ${order._id} created. Inventory will be deducted when status changes to Preparing.`);
 
+    // Centralized KOT print trigger: DB save is complete, now trigger print.
+    // Printing is intentionally decoupled from employee check-in/checkout state.
+    try {
+      if (Array.isArray(order.kotLines) && order.kotLines.length > 0) {
+        await triggerKotPrintAfterSave({
+          req,
+          order,
+          kotIndex: order.kotLines.length - 1,
+        });
+      }
+    } catch (printTriggerError) {
+      console.error(
+        `[ORDER] KOT print trigger failed for order ${order._id}:`,
+        printTriggerError.message
+      );
+    }
+
     // Only update table status for dine-in orders
     if (!isTakeaway && tableDoc) {
       // Mark table as OCCUPIED when order is created
@@ -2823,6 +3002,21 @@ const addKot = async (req, res) => {
         message: `Failed to save order: ${saveError.message}`,
         error: saveError.message,
       });
+    }
+
+    // Centralized KOT print trigger after KOT record is persisted.
+    // Decoupled from attendance/session state.
+    try {
+      await triggerKotPrintAfterSave({
+        req,
+        order,
+        kotIndex: order.kotLines.length - 1,
+      });
+    } catch (printTriggerError) {
+      console.error(
+        `[ORDER] addKot - KOT print trigger failed for order ${order._id}:`,
+        printTriggerError.message
+      );
     }
 
     // Update customer record for takeaway orders (non-blocking)
@@ -3488,6 +3682,20 @@ const addItemsToOrder = async (req, res) => {
         message: `Failed to save order: ${saveError.message}`,
         error: saveError.message,
       });
+    }
+
+    // Centralized KOT print trigger after KOT line is persisted.
+    try {
+      await triggerKotPrintAfterSave({
+        req,
+        order,
+        kotIndex: order.kotLines.length - 1,
+      });
+    } catch (printTriggerError) {
+      console.error(
+        `[ORDER] addItemsToOrder - KOT print trigger failed for order ${order._id}:`,
+        printTriggerError.message
+      );
     }
 
     // Emit socket event for real-time update
