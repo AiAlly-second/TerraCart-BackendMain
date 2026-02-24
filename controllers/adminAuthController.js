@@ -3,11 +3,14 @@ const jwt = require("jsonwebtoken");
 
 // Generate JWT Token
 const generateToken = (id, tokenVersion = 0) => {
-  const secret = process.env.JWT_SECRET;
-  if (!secret || secret === 'your-secret-key' || secret === 'sarva-cafe-secret-key-2025') {
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured");
+  }
+  if (secret === 'your-secret-key' || secret === 'sarva-cafe-secret-key-2025') {
     console.warn('[SECURITY] ⚠️ Using default JWT secret. Set JWT_SECRET in production!');
   }
-  return jwt.sign({ id, tokenVersion }, secret || 'your-secret-key', {
+  return jwt.sign({ id, tokenVersion }, secret, {
     expiresIn: "30d",
   });
 };

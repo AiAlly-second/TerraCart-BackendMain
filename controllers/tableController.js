@@ -122,6 +122,48 @@ const getWaitlistPosition = async (entry) => {
   return 0;
 };
 
+const sanitizeTextField = (value) => {
+  if (value === undefined || value === null) return null;
+  const normalized = String(value).trim();
+  return normalized.length ? normalized : null;
+};
+
+const sanitizePhoneField = (value) => {
+  const normalized = sanitizeTextField(value);
+  if (!normalized) return null;
+  const compact = normalized.replace(/\s+/g, "");
+  return compact.length ? compact : null;
+};
+
+const parseNonNegativeNumber = (value, fallback = 0) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Number(parsed.toFixed(2));
+};
+
+const normalizeQrContextPayload = (input = {}) => {
+  const qrContextTypeRaw =
+    input.qrContextType === "OFFICE" ? "OFFICE" : "TABLE";
+
+  const officeName = sanitizeTextField(input.officeName);
+  const officeAddress = sanitizeTextField(input.officeAddress);
+  const officePhone = sanitizePhoneField(input.officePhone);
+  const officeDeliveryCharge = parseNonNegativeNumber(
+    input.officeDeliveryCharge,
+    0
+  );
+
+  return {
+    qrContextType: qrContextTypeRaw,
+    officeName: qrContextTypeRaw === "OFFICE" ? officeName : null,
+    officeAddress: qrContextTypeRaw === "OFFICE" ? officeAddress : null,
+    officePhone: qrContextTypeRaw === "OFFICE" ? officePhone : null,
+    officeDeliveryCharge:
+      qrContextTypeRaw === "OFFICE" ? officeDeliveryCharge : 0,
+  };
+};
+
 const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
   // CRITICAL: Validate table parameter to prevent "Cannot access 'table' before initialization" errors
   if (!table) {
@@ -142,6 +184,11 @@ const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
     // CRITICAL: Include cartId so frontend can filter menu by cart
     cartId: table.cartId || null,
     cafeId: table.cartId || null, // Alias for compatibility
+    qrContextType: table.qrContextType || "TABLE",
+    officeName: table.officeName || null,
+    officeAddress: table.officeAddress || null,
+    officePhone: table.officePhone || null,
+    officeDeliveryCharge: Number(table.officeDeliveryCharge || 0),
   };
 
   if (options.includeSessionToken) {
@@ -1304,16 +1351,32 @@ exports.lookupTableBySlug = async (req, res) => {
 
 exports.createTable = async (req, res) => {
   try {
-    const { number, name, capacity, notes } = req.body;
-    if (!number) {
-      return res.status(400).json({ message: "Table number is required" });
-    }
+    const {
+      number,
+      name,
+      capacity,
+      notes,
+      qrContextType,
+      officeName,
+      officeAddress,
+      officePhone,
+      officeDeliveryCharge,
+    } = req.body;
 
-    const numericNumber = Number(number);
-    if (!Number.isFinite(numericNumber) || numericNumber <= 0) {
-      return res
-        .status(400)
-        .json({ message: "Table number must be a positive number" });
+    const normalizedContext = normalizeQrContextPayload({
+      qrContextType,
+      officeName,
+      officeAddress,
+      officePhone,
+      officeDeliveryCharge,
+    });
+    if (
+      normalizedContext.qrContextType === "OFFICE" &&
+      !normalizedContext.officeName
+    ) {
+      return res.status(400).json({
+        message: "Office name is required when QR context type is OFFICE",
+      });
     }
 
     // Set cartId and franchiseId if user is cafe admin
@@ -1325,6 +1388,43 @@ exports.createTable = async (req, res) => {
       if (req.user.franchiseId) {
         franchiseId = req.user.franchiseId;
       }
+    }
+
+    let numericNumber = null;
+    const hasNumberInRequest =
+      number !== undefined &&
+      number !== null &&
+      String(number).trim().length > 0;
+
+    if (hasNumberInRequest) {
+      numericNumber = Number(number);
+      if (!Number.isFinite(numericNumber) || numericNumber <= 0) {
+        return res
+          .status(400)
+          .json({ message: "Table number must be a positive number" });
+      }
+    } else if (normalizedContext.qrContextType === "OFFICE") {
+      const scopeQuery = cartId
+        ? { cartId }
+        : { $or: [{ cartId: null }, { cartId: { $exists: false } }] };
+      const latestTable = await Table.findOne(scopeQuery)
+        .sort({ number: -1 })
+        .select("number")
+        .lean();
+      numericNumber = Math.max(1, Number(latestTable?.number || 0) + 1);
+    } else {
+      return res.status(400).json({ message: "Table number is required" });
+    }
+
+    let resolvedCapacity = Number(capacity);
+    if (normalizedContext.qrContextType === "OFFICE") {
+      if (!Number.isFinite(resolvedCapacity) || resolvedCapacity <= 0) {
+        resolvedCapacity = 1;
+      }
+    } else if (!Number.isFinite(resolvedCapacity) || resolvedCapacity <= 0) {
+      return res
+        .status(400)
+        .json({ message: "Capacity must be a positive number" });
     }
 
     // Check uniqueness per cafe (cafe admins can have same table numbers)
@@ -1369,12 +1469,17 @@ exports.createTable = async (req, res) => {
       number: numericNumber,
       tableNumber: String(numericNumber),
       name,
-      capacity,
+      capacity: resolvedCapacity,
       notes,
       qrSlug: slug,
       qrToken: slug,
       cartId: cartId || undefined, // Use undefined instead of null to avoid issues
       franchiseId: franchiseId || undefined, // Set franchiseId from cafe admin
+      qrContextType: normalizedContext.qrContextType,
+      officeName: normalizedContext.officeName,
+      officeAddress: normalizedContext.officeAddress,
+      officePhone: normalizedContext.officePhone,
+      officeDeliveryCharge: normalizedContext.officeDeliveryCharge,
     });
 
     return res.status(201).json(table);
@@ -1503,7 +1608,18 @@ exports.updateTable = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ["number", "name", "capacity", "status", "notes"];
+    const allowedFields = [
+      "number",
+      "name",
+      "capacity",
+      "status",
+      "notes",
+      "qrContextType",
+      "officeName",
+      "officeAddress",
+      "officePhone",
+      "officeDeliveryCharge",
+    ];
     for (const field of allowedFields) {
       if (field in req.body) {
         updates[field] = req.body[field];
@@ -1532,6 +1648,12 @@ exports.updateTable = async (req, res) => {
     if (updates.status && !TABLE_STATUSES.includes(updates.status)) {
       return res.status(400).json({ message: "Invalid table status" });
     }
+    if (
+      updates.qrContextType !== undefined &&
+      !["TABLE", "OFFICE"].includes(updates.qrContextType)
+    ) {
+      return res.status(400).json({ message: "Invalid QR context type" });
+    }
 
     // Save original status before any updates
     const originalStatus = table.status;
@@ -1559,6 +1681,53 @@ exports.updateTable = async (req, res) => {
       // If table has no cartId but user is cart admin, set it
       updates.cartId = req.user._id;
       console.log(`[TABLE] Setting cartId for table ${table.number} from admin user: ${req.user._id}`);
+    }
+
+    const hasQrContextField = [
+      "qrContextType",
+      "officeName",
+      "officeAddress",
+      "officePhone",
+      "officeDeliveryCharge",
+    ].some((field) => field in req.body);
+    if (hasQrContextField) {
+      const normalizedContext = normalizeQrContextPayload({
+        qrContextType:
+          updates.qrContextType !== undefined
+            ? updates.qrContextType
+            : table.qrContextType,
+        officeName:
+          updates.officeName !== undefined
+            ? updates.officeName
+            : table.officeName,
+        officeAddress:
+          updates.officeAddress !== undefined
+            ? updates.officeAddress
+            : table.officeAddress,
+        officePhone:
+          updates.officePhone !== undefined
+            ? updates.officePhone
+            : table.officePhone,
+        officeDeliveryCharge:
+          updates.officeDeliveryCharge !== undefined
+            ? updates.officeDeliveryCharge
+            : table.officeDeliveryCharge,
+      });
+
+      if (
+        normalizedContext.qrContextType === "OFFICE" &&
+        !normalizedContext.officeName
+      ) {
+        return res.status(400).json({
+          message: "Office name is required when QR context type is OFFICE",
+        });
+      }
+
+      updates.qrContextType = normalizedContext.qrContextType;
+      updates.officeName = normalizedContext.officeName;
+      updates.officeAddress = normalizedContext.officeAddress;
+      updates.officePhone = normalizedContext.officePhone;
+      updates.officeDeliveryCharge = normalizedContext.officeDeliveryCharge;
     }
 
     Object.assign(table, updates);

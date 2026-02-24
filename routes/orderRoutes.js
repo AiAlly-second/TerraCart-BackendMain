@@ -31,10 +31,10 @@ const router = express.Router();
 /* ---------- main flow (public - customer-facing) ---------- */
 router.post("/", optionalProtect, createOrder); // first Confirm - public for customers, but authenticate if token provided
 router.get("/takeaway-token/next", optionalProtect, getNextTakeawayToken);
-router.post("/:id/kot", addKot); // Order More → Confirm - public for customers
+router.post("/:id/kot", optionalProtect, addKot); // Order More → Confirm - public for customers
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);
-router.patch("/:id/customer-status", cancelOrderByCustomer); // Customer cancel/return - public with sessionToken verification
-router.patch("/:id/confirm-payment", confirmPaymentByCustomer); // Customer confirm payment - public with sessionToken verification
+router.patch("/:id/customer-status", optionalProtect, cancelOrderByCustomer); // Customer cancel/return - public with sessionToken verification
+router.patch("/:id/confirm-payment", optionalProtect, confirmPaymentByCustomer); // Customer confirm payment - public with sessionToken verification
 
 /* ---------- optional helpers (admin only) ---------- */
 router.get(
@@ -57,7 +57,7 @@ router.get(
   authorize(["admin", "manager", "waiter", "captain"]),
   getKotPrintTemplate,
 );
-router.get("/:id", getOrderById); // Public for customers to view their order
+router.get("/:id", optionalProtect, getOrderById); // Public for customers to view their order
 router.patch(
   "/:id/status",
   protect,
@@ -128,3 +128,4 @@ router.delete(
 );
 
 module.exports = router;
+

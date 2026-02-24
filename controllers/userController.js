@@ -102,13 +102,16 @@ exports.uploadCafeAdminDocs = (req, res, next) => {
 };
 
 const generateToken = (id) => {
-  const secret = process.env.JWT_SECRET;
-  if (!secret || secret === "sarva-cafe-secret-key-2025") {
+  const secret = String(process.env.JWT_SECRET || "").trim();
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured");
+  }
+  if (secret === "sarva-cafe-secret-key-2025") {
     console.warn(
       "[SECURITY] ⚠️ Using default JWT secret. Set JWT_SECRET in production!"
     );
   }
-  return jwt.sign({ id }, secret || "sarva-cafe-secret-key-2025", {
+  return jwt.sign({ id }, secret, {
     expiresIn: "30d",
   });
 };

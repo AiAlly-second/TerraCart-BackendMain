@@ -13,6 +13,9 @@ const compression = require("compression");
 const dotenv = require("dotenv");
 const { createClient } = require("redis");
 const { createAdapter } = require("@socket.io/redis-adapter");
+const jwt = require("jsonwebtoken");
+const User = require("./models/userModel");
+const Employee = require("./models/employeeModel");
 const connectDB = require("./config/db");
 const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
 const {
@@ -108,6 +111,97 @@ const io = socketIo(server, {
   cors: getCorsConfig(),
   pingTimeout: 60000,
   pingInterval: 25000,
+});
+
+const SOCKET_ROLE_ALLOWLIST = new Set([
+  "super_admin",
+  "franchise_admin",
+  "admin",
+  "waiter",
+  "cook",
+  "captain",
+  "manager",
+  "employee",
+]);
+
+const normalizeSocketRoomValue = (value) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  if (normalized.length > 64) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(normalized)) return null;
+  return normalized;
+};
+
+const normalizeSocketRole = (role) => String(role || "").trim().toLowerCase();
+
+const extractSocketBearerToken = (socket) => {
+  const authToken = socket?.handshake?.auth?.token;
+  const headerToken = socket?.handshake?.headers?.authorization;
+  const queryToken = socket?.handshake?.query?.token;
+  const raw =
+    (typeof authToken === "string" && authToken) ||
+    (typeof headerToken === "string" && headerToken) ||
+    (typeof queryToken === "string" && queryToken) ||
+    "";
+  if (!raw) return "";
+  return raw.startsWith("Bearer ") ? raw.slice(7).trim() : raw.trim();
+};
+
+const resolveSocketCartIds = async (user) => {
+  const cartIds = new Set();
+  if (!user) return cartIds;
+
+  if (user._id) cartIds.add(String(user._id));
+  if (user.cartId) cartIds.add(String(user.cartId));
+  if (user.cafeId) cartIds.add(String(user.cafeId));
+
+  if ((user.employeeId || user._id) && !user.cartId && !user.cafeId) {
+    try {
+      const employeeQuery = user.employeeId
+        ? { _id: user.employeeId }
+        : { userId: user._id };
+      const employee = await Employee.findOne(employeeQuery)
+        .select("cartId cafeId")
+        .lean();
+      if (employee?.cartId) cartIds.add(String(employee.cartId));
+      if (employee?.cafeId) cartIds.add(String(employee.cafeId));
+    } catch (_error) {
+      // Ignore lookup errors; caller will enforce currently available IDs.
+    }
+  }
+
+  return cartIds;
+};
+
+io.use(async (socket, next) => {
+  try {
+    socket.data.user = null;
+    const token = extractSocketBearerToken(socket);
+    if (!token) return next();
+
+    const secret = String(process.env.JWT_SECRET || "").trim();
+    if (!secret) return next();
+
+    const decoded = jwt.verify(token, secret);
+    if (!decoded?.id) return next();
+
+    const user = await User.findById(decoded.id)
+      .select("_id role cartId cafeId franchiseId employeeId tokenVersion")
+      .lean();
+    if (!user) return next();
+
+    const tokenVersion =
+      decoded.tokenVersion !== undefined ? Number(decoded.tokenVersion) : 0;
+    const userTokenVersion =
+      user.tokenVersion !== undefined ? Number(user.tokenVersion) : 0;
+    if (tokenVersion !== userTokenVersion) return next();
+
+    socket.data.user = user;
+    return next();
+  } catch (_error) {
+    socket.data.user = null;
+    return next();
+  }
 });
 
 const setupSocketRedisAdapter = async () => {
@@ -240,45 +334,89 @@ io.on("connection", (socket) => {
   // Client connected - removed verbose logging
 
   // Join cafe room
-  socket.on("join:cafe", (cafeId) => {
-    if (cafeId) {
-      const room = `cafe:${cafeId}`;
-      socket.join(room);
+  socket.on("join:cafe", async (cafeId) => {
+    const normalizedCafeId = normalizeSocketRoomValue(cafeId);
+    if (!normalizedCafeId) return;
+
+    const user = socket.data?.user || null;
+    if (user && normalizeSocketRole(user.role) !== "super_admin") {
+      const allowedCartIds = await resolveSocketCartIds(user);
+      if (!allowedCartIds.has(normalizedCafeId)) return;
     }
+
+    const room = `cafe:${normalizedCafeId}`;
+    socket.join(room);
   });
 
   // Join franchise room
   socket.on("join:franchise", (franchiseId) => {
-    if (franchiseId) {
-      const room = `franchise:${franchiseId}`;
-      socket.join(room);
+    const normalizedFranchiseId = normalizeSocketRoomValue(franchiseId);
+    if (!normalizedFranchiseId) return;
+
+    const user = socket.data?.user || null;
+    if (!user) return;
+
+    const role = normalizeSocketRole(user.role);
+    if (role === "super_admin") {
+      socket.join(`franchise:${normalizedFranchiseId}`);
+      return;
+    }
+
+    const sameFranchiseId =
+      user._id && String(user._id) === normalizedFranchiseId;
+    const adminFranchiseId =
+      user.franchiseId && String(user.franchiseId) === normalizedFranchiseId;
+
+    if ((role === "franchise_admin" && sameFranchiseId) || (role === "admin" && adminFranchiseId)) {
+      socket.join(`franchise:${normalizedFranchiseId}`);
     }
   });
 
   // Join role-based room
   socket.on("join:role", (role) => {
-    if (role) {
-      const room = `role:${role}`;
-      socket.join(room);
+    const normalizedRequestedRole = normalizeSocketRole(role);
+    if (!normalizedRequestedRole || !SOCKET_ROLE_ALLOWLIST.has(normalizedRequestedRole)) {
+      return;
+    }
+
+    const user = socket.data?.user || null;
+    if (!user) return;
+
+    const normalizedUserRole = normalizeSocketRole(user.role);
+    if (
+      normalizedUserRole === "super_admin" ||
+      normalizedUserRole === normalizedRequestedRole
+    ) {
+      socket.join(`role:${normalizedRequestedRole}`);
     }
   });
 
   // Join cart room (for mobile app users)
-  socket.on("join:cart", (cartId) => {
-    if (cartId) {
-      const cartRoom = `cart:${cartId}`;
-      const cafeRoom = `cafe:${cartId}`;
-      socket.join(cartRoom);
-      socket.join(cafeRoom);
+  socket.on("join:cart", async (cartId) => {
+    const normalizedCartId = normalizeSocketRoomValue(cartId);
+    if (!normalizedCartId) return;
+
+    const user = socket.data?.user || null;
+    if (user && normalizeSocketRole(user.role) !== "super_admin") {
+      const allowedCartIds = await resolveSocketCartIds(user);
+      if (!allowedCartIds.has(normalizedCartId)) return;
     }
+
+    const cartRoom = `cart:${normalizedCartId}`;
+    const cafeRoom = `cafe:${normalizedCartId}`;
+    socket.join(cartRoom);
+    socket.join(cafeRoom);
   });
 
   // Join kiosk room (for mobile app users)
   socket.on("join:kiosk", (kioskId) => {
-    if (kioskId) {
-      const room = `kiosk:${kioskId}`;
-      socket.join(room);
-    }
+    const normalizedKioskId = normalizeSocketRoomValue(kioskId);
+    if (!normalizedKioskId) return;
+
+    const user = socket.data?.user || null;
+    if (!user) return;
+
+    socket.join(`kiosk:${normalizedKioskId}`);
   });
 
   socket.on("disconnect", (reason) => {

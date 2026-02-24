@@ -17,6 +17,65 @@ const { MenuItem } = require("../../models/menuItemModel");
 const MenuCategory = require("../../models/menuCategoryModel");
 const User = require("../../models/userModel");
 
+const escapeRegex = (value) =>
+  String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const sanitizeAddonName = (value) => {
+  const normalized = String(value || "")
+    .replace(/^\(\s*\+\s*\)\s*/u, "")
+    .trim();
+  return normalized || "Add-on";
+};
+
+const normalizeAddonForConsumption = (addon) => {
+  if (!addon || typeof addon !== "object") return null;
+
+  const name = sanitizeAddonName(addon.name);
+  const priceValue = Number(addon.price);
+  const price =
+    Number.isFinite(priceValue) && priceValue >= 0 ? priceValue : 0;
+  const qtyValue = Number(addon.quantity);
+  const quantity =
+    Number.isFinite(qtyValue) && qtyValue > 0 ? Math.floor(qtyValue) : 0;
+  if (!name || quantity <= 0) return null;
+
+  const rawAddonId = addon.addonId || addon._id || addon.id;
+  const addonId =
+    rawAddonId && typeof rawAddonId.toString === "function"
+      ? rawAddonId.toString()
+      : rawAddonId
+        ? String(rawAddonId)
+        : "";
+
+  return {
+    addonId: addonId && mongoose.Types.ObjectId.isValid(addonId) ? addonId : "",
+    name,
+    price,
+    quantity,
+  };
+};
+
+const buildAddonConsumptionKey = (addon) => {
+  if (!addon) return "";
+  if (addon.addonId) return `id:${addon.addonId}`;
+  return `name:${sanitizeAddonName(addon.name).toLowerCase()}:${Number(addon.price) || 0}`;
+};
+
+const buildRecipeScopeClauses = (cartIdObj, cartId, franchiseId) => {
+  const clauses = [];
+  if (cartIdObj || cartId) clauses.push({ cartId: cartIdObj || cartId });
+  if (franchiseId) {
+    clauses.push({ cartId: null, franchiseId });
+    clauses.push({ franchiseId });
+  }
+  clauses.push({ cartId: null, franchiseId: null });
+  clauses.push({
+    cartId: { $exists: false },
+    franchiseId: { $exists: false },
+  });
+  return clauses;
+};
+
 /**
  * Consume ingredients for an order when it's marked as Preparing, Ready, Paid, Finalized, or Completed
  * Processes all items in the order (dine-in, takeaway, and converted-to-takeaway items)
@@ -83,15 +142,44 @@ async function consumeIngredientsForOrder(order, userId) {
     }).select('notes').lean();
 
     const processedKotIds = new Set();
+    const consumedAddonQtyByKey = new Map();
+    const processedAddonEvents = new Set();
     let hasLegacyTransactions = false;
 
-    existingTransactions.forEach(t => {
-      if (t.notes && t.notes.startsWith("KOT:")) {
-        const id = t.notes.split(":")[1];
+    existingTransactions.forEach((t) => {
+      const note =
+        t && typeof t.notes === "string" ? String(t.notes).trim() : "";
+
+      if (note.startsWith("KOT:")) {
+        const id = note.split(":")[1];
         if (id) processedKotIds.add(id);
-      } else {
-        hasLegacyTransactions = true;
+        return;
       }
+
+      if (note.startsWith("ADDON:")) {
+        const match = note.match(/^ADDON:([^:]+):QTY:(\d+):EVENT:([^:]+)$/);
+        if (!match) return;
+        const [, encodedKey, qtyRaw, eventId] = match;
+        if (!eventId || processedAddonEvents.has(eventId)) return;
+        processedAddonEvents.add(eventId);
+
+        let addonKey = "";
+        try {
+          addonKey = decodeURIComponent(encodedKey);
+        } catch (_) {
+          addonKey = encodedKey;
+        }
+
+        const qty = Number(qtyRaw) || 0;
+        if (!addonKey || qty <= 0) return;
+        consumedAddonQtyByKey.set(
+          addonKey,
+          (consumedAddonQtyByKey.get(addonKey) || 0) + qty
+        );
+        return;
+      }
+
+      hasLegacyTransactions = true;
     });
 
     // Handle legacy transactions (assume KOT 0 is processed if legacy transaction exists)
@@ -108,20 +196,14 @@ async function consumeIngredientsForOrder(order, userId) {
       errors: [],
     };
 
-    // Process each KOT line
-    if (!order.kotLines || order.kotLines.length === 0) {
-      return {
-        success: true,
-        message: "Order has no items",
-        summary: consumptionSummary,
-      };
-    }
-
     let anythingProcessed = false;
+    let addonsProcessed = false;
     const orderFranchiseId = order.franchiseId || null;
+    const hasKotLines =
+      Array.isArray(order.kotLines) && order.kotLines.length > 0;
 
     // Iterate through KOTs using index as stable ID (since KOTs are append-only)
-    for (let i = 0; i < order.kotLines.length; i++) {
+    for (let i = 0; i < (hasKotLines ? order.kotLines.length : 0); i++) {
       const kotLine = order.kotLines[i];
       const kotId = i.toString();
 
@@ -549,14 +631,184 @@ async function consumeIngredientsForOrder(order, userId) {
       }
     }
 
-    if (!anythingProcessed) {
-        console.log(`[COSTING] Order ${order._id} - No new KOTs to process`);
-        return {
-            success: true,
-            alreadyProcessed: true,
-            message: "No new items to process",
-            summary: consumptionSummary
-        };
+    // Process selected add-ons for inventory consumption.
+    // Add-ons are order-level, so consume only the quantity delta not already consumed.
+    const normalizedSelectedAddons = Array.isArray(order.selectedAddons)
+      ? order.selectedAddons
+          .map(normalizeAddonForConsumption)
+          .filter(Boolean)
+      : [];
+
+    if (normalizedSelectedAddons.length > 0) {
+      const recipeScopeClauses = buildRecipeScopeClauses(
+        cartIdObj,
+        cartId,
+        orderFranchiseId
+      );
+
+      for (const addon of normalizedSelectedAddons) {
+        const addonKey = buildAddonConsumptionKey(addon);
+        if (!addonKey) continue;
+
+        const alreadyConsumedQty = consumedAddonQtyByKey.get(addonKey) || 0;
+        const currentOrderQty = Number(addon.quantity) || 0;
+        const qtyToConsume = currentOrderQty - alreadyConsumedQty;
+        if (qtyToConsume <= 0) continue;
+
+        const addonLabel = `Add-on: ${addon.name}`;
+        try {
+          let addonRecipe = null;
+
+          if (addon.addonId && mongoose.Types.ObjectId.isValid(addon.addonId)) {
+            addonRecipe = await RecipeV2.findOne({
+              addonId: new mongoose.Types.ObjectId(addon.addonId),
+              isActive: true,
+              $or: recipeScopeClauses,
+            });
+          }
+
+          if (!addonRecipe) {
+            const addonNameNorm = addon.name
+              .replace(/\s+/g, " ")
+              .toLowerCase();
+            const addonNameRegex = new RegExp(
+              `^${escapeRegex(addon.name)}$`,
+              "i"
+            );
+            addonRecipe = await RecipeV2.findOne({
+              isActive: true,
+              $and: [
+                {
+                  $or: [
+                    { nameNormalized: addonNameNorm },
+                    { name: { $regex: addonNameRegex } },
+                  ],
+                },
+                { $or: recipeScopeClauses },
+              ],
+            });
+          }
+
+          if (
+            !addonRecipe ||
+            !Array.isArray(addonRecipe.ingredients) ||
+            addonRecipe.ingredients.length === 0
+          ) {
+            consumptionSummary.errors.push({
+              item: addonLabel,
+              error:
+                "No BOM linked for this add-on. Create an add-on BOM in Finances -> BOM.",
+            });
+            continue;
+          }
+
+          const scaleFactor = qtyToConsume / (addonRecipe.portions || 1);
+          const addonEventId = `${Date.now()}-${Math.random()
+            .toString(36)
+            .slice(2, 10)}`;
+          const addonNote = `ADDON:${encodeURIComponent(
+            addonKey
+          )}:QTY:${qtyToConsume}:EVENT:${addonEventId}`;
+
+          for (const recipeIngredient of addonRecipe.ingredients) {
+            try {
+              const ingredient = await IngredientV2.findById(
+                recipeIngredient.ingredientId
+              );
+              if (!ingredient) continue;
+
+              const qtyPerPortion = recipeIngredient.qty;
+              const totalQtyToConsume = qtyPerPortion * scaleFactor;
+
+              let qtyInBaseUnit;
+              try {
+                qtyInBaseUnit = ingredient.convertToBaseUnit(
+                  totalQtyToConsume,
+                  recipeIngredient.uom
+                );
+              } catch (conversionError) {
+                if (!ingredient.conversionFactors.has(recipeIngredient.uom)) {
+                  if (recipeIngredient.uom === ingredient.baseUnit) {
+                    ingredient.conversionFactors.set(recipeIngredient.uom, 1);
+                    await ingredient.save();
+                    qtyInBaseUnit = totalQtyToConsume;
+                  } else {
+                    throw conversionError;
+                  }
+                } else {
+                  throw conversionError;
+                }
+              }
+
+              const consumeResult = await WeightedAverageService.consume(
+                recipeIngredient.ingredientId,
+                qtyInBaseUnit,
+                "order",
+                order._id,
+                recordedById,
+                cartId,
+                true
+              );
+
+              const transaction = new InventoryTransactionV2({
+                ingredientId: recipeIngredient.ingredientId,
+                type: "OUT",
+                qty: totalQtyToConsume,
+                uom: recipeIngredient.uom,
+                qtyInBaseUnit,
+                refType: "order",
+                refId: order._id,
+                date: new Date(),
+                costAllocated: consumeResult.costAllocated,
+                recordedBy: recordedById,
+                cartId: cartIdObj || null,
+                notes: addonNote,
+              });
+              await transaction.save();
+
+              consumptionSummary.ingredientsConsumed.push({
+                ingredient: ingredient.name,
+                quantity: qtyInBaseUnit,
+                unit: ingredient.baseUnit,
+                cost: consumeResult.costAllocated,
+              });
+
+              consumptionSummary.totalCost += consumeResult.costAllocated;
+            } catch (ingredientError) {
+              consumptionSummary.errors.push({
+                item: addonLabel,
+                ingredient: recipeIngredient.ingredientId,
+                error: ingredientError.message,
+              });
+            }
+          }
+
+          consumedAddonQtyByKey.set(addonKey, currentOrderQty);
+          consumptionSummary.itemsProcessed++;
+          anythingProcessed = true;
+          addonsProcessed = true;
+          console.log(
+            `[COSTING] Consumed add-on "${addon.name}" x${qtyToConsume} for order ${order._id}`
+          );
+        } catch (addonError) {
+          consumptionSummary.errors.push({
+            item: addonLabel,
+            error: addonError.message,
+          });
+        }
+      }
+    }
+
+    if (!anythingProcessed && !addonsProcessed) {
+      console.log(
+        `[COSTING] Order ${order._id} - No new KOT/add-on consumption needed`
+      );
+      return {
+        success: true,
+        alreadyProcessed: true,
+        message: "No new items to process",
+        summary: consumptionSummary,
+      };
     }
 
     console.log(`[COSTING] Order ${order._id} consumption complete:`, {
