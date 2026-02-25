@@ -497,6 +497,14 @@ const buildNewOrderAvailablePayload = (order) => {
   };
 };
 
+/** Convert order to plain object for socket emit (cartId and kotLines predictable for local agent / clients). */
+const orderToPlainPayload = (order) => {
+  if (!order) return null;
+  if (typeof order.toObject === "function") return order.toObject();
+  if (typeof order.toJSON === "function") return order.toJSON();
+  return order;
+};
+
 const ACCEPTABLE_ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Served"];
 const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
 const AUTO_ASSIGN_CREATOR_ROLES = new Set([
@@ -1395,6 +1403,41 @@ const resolveEmployeeIdForPrintLog = async (req, senderRole) => {
   return employee?._id?.toString?.() || null;
 };
 
+/** Set printKey and printStatus=pending on a KOT line and emit printer:kot:pending for on-site agent. */
+const setKotPrintKeyAndEmitPending = async ({ req, order, kotIndex }) => {
+  if (!order || !Array.isArray(order.kotLines) || kotIndex < 0 || kotIndex >= order.kotLines.length) {
+    return;
+  }
+  const orderId = String(order._id || "").trim();
+  const kotLine = order.kotLines[kotIndex];
+  const cartId = order.cartId || order.cafeId || null;
+  if (!cartId) return;
+
+  const ts = kotLine.createdAt || kotLine.updatedAt || new Date();
+  const printKey = `${orderId}:${kotIndex}:${ts instanceof Date ? ts.toISOString() : String(ts)}`;
+
+  await Order.findByIdAndUpdate(orderId, {
+    $set: {
+      [`kotLines.${kotIndex}.printKey`]: printKey,
+      [`kotLines.${kotIndex}.printStatus`]: "pending",
+    },
+  });
+
+  const io = req?.app?.get("io");
+  const emitToCafe = req?.app?.get("emitToCafe");
+  if (io && emitToCafe) {
+    emitToCafe(io, cartId.toString(), "printer:kot:pending", {
+      orderId,
+      kotIndex,
+      cartId: cartId.toString(),
+      printKey,
+    });
+  }
+};
+
+const PRINT_MODE = String(process.env.PRINT_MODE || "AGENT_ONLY").toUpperCase();
+const isAgentOnlyPrint = PRINT_MODE === "AGENT_ONLY";
+
 const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
   if (!order || !Array.isArray(order.kotLines)) return null;
   if (kotIndex < 0 || kotIndex >= order.kotLines.length) return null;
@@ -1418,6 +1461,25 @@ const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
       })}`
     );
     return null;
+  }
+
+  if (isAgentOnlyPrint) {
+    const io = req?.app?.get("io");
+    const emitToCafe = req?.app?.get("emitToCafe");
+    if (io && emitToCafe) {
+      emitToCafe(io, orderCartId.toString(), "printer:kot:triggered", {
+        orderId,
+        kotIndex,
+        kotId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        queued: false,
+        skipped: true,
+        success: false,
+      });
+    }
+    return { success: false, skipped: true };
   }
 
   const printerConfig = await PrinterConfig.findOne({ cartId: orderCartId })
@@ -2500,6 +2562,7 @@ const createOrder = async (req, res) => {
 
     // Auto-assign orders created from authenticated staff/admin sessions.
     // Customer/public orders remain unassigned and continue through accept flow.
+    /*
     const creatorAssignment = await buildCreatorAcceptedBy({
       req,
       cartId: orderData.cartId || cartId || null,
@@ -2510,6 +2573,7 @@ const createOrder = async (req, res) => {
         orderData.status = "Confirmed";
       }
     }
+    */
 
     // Order data prepared
 
@@ -2579,14 +2643,15 @@ const createOrder = async (req, res) => {
     // 3. Accurate food cost tracking in Finance panel
     console.log(`[ORDER] Order ${order._id} created. Inventory will be deducted when status changes to Preparing.`);
 
-    // Centralized KOT print trigger: DB save is complete, now trigger print.
-    // Printing is intentionally decoupled from employee check-in/checkout state.
+    // Set per-KOT printKey and emit printer:kot:pending so on-site agent can claim/print.
     try {
       if (Array.isArray(order.kotLines) && order.kotLines.length > 0) {
+        const kotIndex = order.kotLines.length - 1;
+        await setKotPrintKeyAndEmitPending({ req, order, kotIndex });
         await triggerKotPrintAfterSave({
           req,
           order,
-          kotIndex: order.kotLines.length - 1,
+          kotIndex,
         });
       }
     } catch (printTriggerError) {
@@ -2939,7 +3004,8 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
-    // PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
+    // PICKUP/DELIVERY: do NOT notify admin list until payment is complete (order will appear when status becomes Paid)
+    /*
     const isPickupOrDeliveryOrder =
       order.orderType === "PICKUP" ||
       order.orderType === "DELIVERY" ||
@@ -2947,21 +3013,26 @@ const createOrder = async (req, res) => {
       order.serviceType === "DELIVERY";
     const isTakeawayAwaitingPayment =
       isPickupOrDeliveryOrder && order.status === "Pending";
+    */
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe && !isTakeawayAwaitingPayment) {
-      // Only emit to admin panel - customer frontend uses polling
-      emitToCafe(io, order.cartId.toString(), "order:created", order);
-      emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
-      emitToCafe(io, order.cartId.toString(), "kot:created", order); // KOT created
+    if (order.cartId && io && emitToCafe) {
+      const payload = orderToPlainPayload(order);
+      const cartIdStr = (payload?.cartId || order.cartId).toString();
+      // Always emit kot:created so KOT prints (app PrintService / local agent) even for web customer PICKUP/DELIVERY Pending orders
+      emitToCafe(io, cartIdStr, "kot:created", payload || order);
+      // Always emit order:created/newOrder for immediate realtime visibility
+      // across waiter/captain/manager dashboards in both local and production.
+      emitToCafe(io, cartIdStr, "order:created", payload || order);
+      emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
 
-      // Explicit new-order availability event for waiter/captain/manager claim flow.
+      // Keep legacy explicit availability event for compatibility.
       const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
       const isActiveStatus = !FINAL_ORDER_STATUSES.includes(order.status);
       if (isUnassigned && isActiveStatus) {
         emitToCafe(
           io,
-          order.cartId.toString(),
+          cartIdStr,
           "NEW_ORDER_AVAILABLE",
           buildNewOrderAvailablePayload(order),
         );
@@ -3243,6 +3314,16 @@ const addKot = async (req, res) => {
       });
     }
 
+    const newKotIndex = order.kotLines.length - 1;
+    try {
+      await setKotPrintKeyAndEmitPending({ req, order, kotIndex: newKotIndex });
+      await triggerKotPrintAfterSave({ req, order, kotIndex: newKotIndex });
+    } catch (printTriggerError) {
+      console.error(
+        `[ORDER] addKot - KOT print trigger failed for order ${order._id}:`,
+        printTriggerError.message
+      );
+    }
 
     // If inventory was already deducted earlier, consume only incremental KOT/add-on deltas now.
     if (order.inventoryDeducted) {
@@ -3364,26 +3445,32 @@ const addKot = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId) {
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      const payload = orderToPlainPayload(order);
+      const cartIdStr = (payload?.cartId || order.cartId).toString();
+      emitToCafe(io, cartIdStr, "order:status:updated", payload || order);
+      emitToCafe(io, cartIdStr, "orderUpdated", payload || order); // Legacy support
+      emitToCafe(io, cartIdStr, "kot:status:updated", payload || order); // KOT updated
+      // Emit kot:created so app PrintService / local agent can print the new KOT (same as createOrder)
+      emitToCafe(io, cartIdStr, "kot:created", payload || order);
+      /*
       if (order.acceptedBy && order.acceptedBy.employeeId) {
         const assignmentDisplayType = resolveAssignmentDisplayType(
           order.acceptedBy?.employeeRole || null,
         );
         emitToCafe(
           io,
-          order.cartId.toString(),
+          cartIdStr,
           "ORDER_ACCEPTED",
           {
             orderId: order._id,
             status: order.status,
             assignedStaff: mapAcceptedByToAssignedStaff(order.acceptedBy),
             assignmentDisplayType,
-            order,
+            order: payload || order,
           },
         );
       }
+      */
     }
 
     return res.json(order);
@@ -3807,10 +3894,27 @@ const getOrderById = async (req, res) => {
       console.warn(`[INVOICE] Order ${order._id} has no cartId`);
     }
 
+    /*
     order.assignedStaff = mapAcceptedByToAssignedStaff(
       order.acceptedBy,
       order.acceptedBy?.employeeRole || null,
     );
+    */
+    if (hasPrivilegedAccess) {
+      order.assignedStaff = mapAcceptedByToAssignedStaff(
+        order.acceptedBy,
+        order.acceptedBy?.employeeRole || null,
+      );
+    } else if (order.acceptedBy && typeof order.acceptedBy === "object") {
+      // Customer/public response: do not expose staff identity or disability details.
+      const sanitizedAcceptedBy = { ...order.acceptedBy };
+      delete sanitizedAcceptedBy.employeeName;
+      if (sanitizedAcceptedBy.disability) {
+        delete sanitizedAcceptedBy.disability;
+      }
+      order.acceptedBy = sanitizedAcceptedBy;
+      delete order.assignedStaff;
+    }
     return res.json(order);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -3947,12 +4051,13 @@ const addItemsToOrder = async (req, res) => {
       });
     }
 
-    // Centralized KOT print trigger after KOT line is persisted.
+    const newKotIndex = order.kotLines.length - 1;
     try {
+      await setKotPrintKeyAndEmitPending({ req, order, kotIndex: newKotIndex });
       await triggerKotPrintAfterSave({
         req,
         order,
-        kotIndex: order.kotLines.length - 1,
+        kotIndex: newKotIndex,
       });
     } catch (printTriggerError) {
       console.error(
@@ -4942,10 +5047,12 @@ const confirmPaymentByCustomer = async (req, res) => {
     // Release table
     await releaseTableForOrder(order, io, emitToCafe);
     if (order.cartId && emitToCafe) {
-      emitToCafe(io, order.cartId.toString(), "order:created", order);
-      emitToCafe(io, order.cartId.toString(), "newOrder", order);
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      const payload = orderToPlainPayload(order);
+      const cartIdStr = (payload?.cartId || order.cartId).toString();
+      emitToCafe(io, cartIdStr, "order:created", payload || order);
+      emitToCafe(io, cartIdStr, "newOrder", payload || order);
+      emitToCafe(io, cartIdStr, "order:status:updated", payload || order);
+      emitToCafe(io, cartIdStr, "orderUpdated", payload || order);
     }
 
     console.log("Payment confirmed by customer:", order._id);
@@ -5499,19 +5606,16 @@ const getKotPrintTemplate = async (req, res) => {
 const claimPrintJob = async (req, res) => {
   try {
     const {
+      type,
       docType,
       printerId,
       kotIndex,
       kotNumber,
       orderVersion,
       printKey,
+      deviceId,
       metadata,
     } = req.body || {};
-
-    const normalizedDocType = normalizeDocType(docType);
-    if (!normalizedDocType) {
-      return res.status(400).json({ message: "docType must be KOT or BILL" });
-    }
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
@@ -5519,6 +5623,114 @@ const claimPrintJob = async (req, res) => {
     const accessError = resolvePrintAccessError(req.user, order);
     if (accessError) {
       return res.status(403).json({ message: accessError });
+    }
+
+    // KOT: per-KOT claim (idempotent, no arrayFilters)
+    if ((type || docType) === "kot" || (type || docType) === "KOT") {
+      const kIdx = typeof kotIndex === "number" ? kotIndex : parseInt(kotIndex, 10);
+      const pk = String(printKey || "").trim();
+      const devId = String(deviceId || "").trim();
+      const orderId = req.params.id;
+
+      if (
+        !Number.isInteger(kIdx) ||
+        kIdx < 0 ||
+        !pk ||
+        !devId
+      ) {
+        console.error("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "validation_error" });
+        return res.status(400).json({
+          claimed: false,
+          reason: "validation_error",
+          message: "KOT claim requires type=kot, kotIndex, printKey, and deviceId; kotLine must exist",
+        });
+      }
+
+      const orderDoc = await Order.findById(orderId).lean();
+      if (!orderDoc) return res.status(404).json({ message: "Order not found" });
+      if (!Array.isArray(orderDoc.kotLines) || !orderDoc.kotLines[kIdx]) {
+        console.error("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "validation_error" });
+        return res.status(400).json({
+          claimed: false,
+          reason: "validation_error",
+          message: "KOT claim requires kotLine to exist",
+        });
+      }
+
+      const kotLine = orderDoc.kotLines[kIdx];
+      const linePrintKey = (kotLine.printKey || "").toString().trim();
+      if (linePrintKey !== pk) {
+        console.error("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "validation_error" });
+        return res.status(400).json({
+          claimed: false,
+          reason: "validation_error",
+          message: "printKey does not match kotLine",
+        });
+      }
+
+      const status = (kotLine.printStatus || "").toString().toLowerCase();
+      const claimedBy = (kotLine.claimedBy || "").toString().trim();
+
+      if (status === "printed") {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "already_printed" });
+        return res.status(200).json({ claimed: false, printKey: pk, reason: "already_printed" });
+      }
+      if (claimedBy === devId) {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "idempotent_claimed" });
+        return res.status(200).json({ claimed: true, printKey: pk });
+      }
+      if (claimedBy && claimedBy.length > 0) {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "claimed_by_other" });
+        return res.status(409).json({ claimed: false, printKey: pk, reason: "claimed_by_other" });
+      }
+
+      const now = new Date();
+      const claimFilter = {
+        _id: orderId,
+        [`kotLines.${kIdx}.printKey`]: pk,
+        [`kotLines.${kIdx}.printStatus`]: { $in: ["pending", "failed"] },
+        $or: [
+          { [`kotLines.${kIdx}.claimedBy`]: { $exists: false } },
+          { [`kotLines.${kIdx}.claimedBy`]: null },
+          { [`kotLines.${kIdx}.claimedBy`]: "" },
+        ],
+      };
+      const result = await Order.findOneAndUpdate(
+        claimFilter,
+        {
+          $set: {
+            [`kotLines.${kIdx}.printStatus`]: "claimed",
+            [`kotLines.${kIdx}.claimedBy`]: devId,
+            [`kotLines.${kIdx}.claimedAt`]: now,
+          },
+        },
+        { new: true }
+      );
+
+      if (result) {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "claimed" });
+        return res.json({ claimed: true, printKey: pk });
+      }
+
+      const recheck = await Order.findById(orderId).lean();
+      const recheckLine = recheck?.kotLines?.[kIdx];
+      const recheckStatus = (recheckLine?.printStatus || "").toString().toLowerCase();
+      const recheckClaimedBy = (recheckLine?.claimedBy || "").toString().trim();
+      if (recheckStatus === "printed") {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "already_printed" });
+        return res.status(200).json({ claimed: false, printKey: pk, reason: "already_printed" });
+      }
+      if (recheckClaimedBy && recheckClaimedBy !== devId) {
+        console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "claimed_by_other" });
+        return res.status(409).json({ claimed: false, printKey: pk, reason: "claimed_by_other" });
+      }
+      console.log("[PRINT_CLAIM]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, outcome: "no_match" });
+      return res.status(409).json({ claimed: false, printKey: pk, reason: "no_match" });
+    }
+
+    const normalizedDocType = normalizeDocType(docType);
+    if (!normalizedDocType) {
+      return res.status(400).json({ message: "docType must be KOT or BILL" });
     }
 
     const normalizedPrinterId = normalizePrinterId(printerId);
@@ -5566,6 +5778,7 @@ const claimPrintJob = async (req, res) => {
       throw createError;
     }
   } catch (err) {
+    console.error("[PRINT_CLAIM]", err?.message, err?.stack);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -5573,11 +5786,16 @@ const claimPrintJob = async (req, res) => {
 // ---------------- COMPLETE AUTO-PRINT JOB ----------------
 const completePrintJob = async (req, res) => {
   try {
-    const { printKey, docType, success = true, errorMessage } = req.body || {};
-    const resolvedPrintKey = String(printKey || "").trim();
-    if (!resolvedPrintKey) {
-      return res.status(400).json({ message: "printKey is required" });
-    }
+    const {
+      type,
+      docType,
+      printKey,
+      kotIndex,
+      deviceId,
+      status: completeStatus,
+      success = true,
+      errorMessage,
+    } = req.body || {};
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
@@ -5585,6 +5803,92 @@ const completePrintJob = async (req, res) => {
     const accessError = resolvePrintAccessError(req.user, order);
     if (accessError) {
       return res.status(403).json({ message: accessError });
+    }
+
+    // KOT: per-KOT complete (no arrayFilters; only claiming device may complete)
+    if ((type || docType) === "kot" || (type || docType) === "KOT") {
+      const pk = String(printKey || "").trim();
+      const kIdx = typeof kotIndex === "number" ? kotIndex : parseInt(kotIndex, 10);
+      const devId = String(deviceId || "").trim();
+      const orderId = req.params.id;
+      const statusPrinted = completeStatus === "printed" || success === true;
+      const errMsg = String(errorMessage || "").trim();
+
+      if (!pk || !Number.isInteger(kIdx) || kIdx < 0 || !devId) {
+        return res.status(400).json({
+          message: "KOT complete requires type=kot, printKey, kotIndex, deviceId; kotLine must exist",
+        });
+      }
+      if (!Array.isArray(order.kotLines) || !order.kotLines[kIdx]) {
+        return res.status(400).json({
+          message: "KOT complete requires kotLine to exist",
+        });
+      }
+
+      const kotLine = order.kotLines[kIdx];
+      const linePrintKey = String(kotLine.printKey || "").trim();
+      if (linePrintKey !== pk) {
+        return res.status(400).json({
+          message: "printKey does not match kotLine",
+        });
+      }
+
+      const currentStatus = (kotLine.printStatus || "").toString().toLowerCase();
+      if (currentStatus === "printed") {
+        console.log("[PRINT_COMPLETE]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, success: true, reason: "already_printed" });
+        return res.status(200).json({ success: true, printKey: pk, status: "printed", reason: "already_printed" });
+      }
+
+      const claimedBy = String(kotLine.claimedBy || "").trim();
+      if (claimedBy !== devId) {
+        console.log("[PRINT_COMPLETE]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, success: false, reason: "wrong_device" });
+        return res.status(403).json({
+          message: "Only the device that claimed this KOT may complete it",
+        });
+      }
+
+      const now = new Date();
+      const completeFilter = {
+        _id: orderId,
+        [`kotLines.${kIdx}.printKey`]: pk,
+        [`kotLines.${kIdx}.claimedBy`]: devId,
+      };
+      const result = await Order.findOneAndUpdate(
+        completeFilter,
+        statusPrinted
+          ? {
+              $set: {
+                [`kotLines.${kIdx}.printStatus`]: "printed",
+                [`kotLines.${kIdx}.printedAt`]: now,
+                [`kotLines.${kIdx}.lastPrintError`]: "",
+                [`kotLines.${kIdx}.isPrinted`]: true,
+                [`kotLines.${kIdx}.lastPrintStatus`]: "success",
+                [`kotLines.${kIdx}.lastPrintedAt`]: now,
+              },
+            }
+          : {
+              $set: {
+                [`kotLines.${kIdx}.printStatus`]: "failed",
+                [`kotLines.${kIdx}.lastPrintError`]: errMsg || "Print failed",
+              },
+            },
+        { new: true }
+      );
+
+      if (result) {
+        console.log("[PRINT_COMPLETE]", { orderId, kotIndex: kIdx, printKey: pk, deviceId: devId, success: statusPrinted });
+        return res.json({
+          success: true,
+          printKey: pk,
+          status: statusPrinted ? "printed" : "failed",
+        });
+      }
+      return res.status(404).json({ message: "KOT print job not found or not claimed by this device" });
+    }
+
+    const resolvedPrintKey = String(printKey || "").trim();
+    if (!resolvedPrintKey) {
+      return res.status(400).json({ message: "printKey is required" });
     }
 
     const normalizedDocType = normalizeDocType(docType);
@@ -5612,6 +5916,62 @@ const completePrintJob = async (req, res) => {
       status: job.status,
     });
   } catch (err) {
+    console.error("[PRINT_COMPLETE]", err?.message, err?.stack);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+/** Resolve cartId for print/context: query, then user cart/cafe/admin id. */
+const resolveCartIdForPrint = (req) => {
+  const q = (req.query?.cartId || "").toString().trim();
+  if (q) return q;
+  const user = req.user || {};
+  if (user.cartId) return user.cartId;
+  if (user.cafeId) return user.cafeId;
+  if (user.role === "admin" && user._id) return user._id;
+  return null;
+};
+
+/**
+ * GET /api/print/pending-kots?cartId=...
+ * Returns KOT lines with printStatus pending or failed for recovery when socket is down.
+ */
+const getPendingKots = async (req, res) => {
+  try {
+    const cartId = resolveCartIdForPrint(req);
+    if (!cartId) {
+      return res.status(400).json({
+        message: "cartId is required (query param or user cart)",
+      });
+    }
+
+    const orders = await Order.find({
+      cartId,
+      "kotLines.printStatus": { $in: ["pending", "failed"] },
+    })
+      .select("_id cartId kotLines.printKey kotLines.printStatus")
+      .lean();
+
+    const pendingKots = [];
+    for (const order of orders) {
+      const lines = order.kotLines || [];
+      for (let i = 0; i < lines.length; i++) {
+        const status = (lines[i].printStatus || "").toString().toLowerCase();
+        if (status !== "pending" && status !== "failed") continue;
+        const printKey = (lines[i].printKey || "").toString().trim();
+        if (!printKey) continue;
+        pendingKots.push({
+          orderId: order._id.toString(),
+          kotIndex: i,
+          printKey,
+          cartId: order.cartId || cartId,
+        });
+      }
+    }
+
+    return res.json({ pendingKots });
+  } catch (err) {
+    console.error("[PRINT_PENDING_KOTS]", err?.message, err?.stack);
     return res.status(500).json({ message: err.message });
   }
 };
@@ -5637,4 +5997,5 @@ module.exports = {
   updatePrintStatus,
   claimPrintJob,
   completePrintJob,
+  getPendingKots,
 };

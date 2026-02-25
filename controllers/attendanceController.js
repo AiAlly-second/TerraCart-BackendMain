@@ -36,6 +36,15 @@ const getISTDate = () => {
   return istToUTC(istDate);
 };
 
+// IST day key for "today" lookups and unique constraint: YYYY-MM-DD
+const getISTDateString = () => {
+  const istNow = getISTNow();
+  const y = istNow.getFullYear();
+  const m = String(istNow.getMonth() + 1).padStart(2, "0");
+  const d = String(istNow.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
 // Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
 const getISTDateRange = () => {
   const today = getISTDate();
@@ -392,10 +401,13 @@ const buildHierarchyQuery = async (user) => {
       employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
     }
     if (employee) {
-      // Support both cartId (new) and cafeId (old) during migration
+      // Support both cartId (new) and cafeId (old) during migration.
+      // Include null/missing cartId so legacy attendance records still show for this employee.
       query.$or = [
         { cartId: employee.cartId },
-        { cafeId: employee.cartId } // Use cartId value for both fields
+        { cafeId: employee.cartId },
+        { cartId: null },
+        { cartId: { $exists: false } }
       ];
       // For individual mobile users, only show their own attendance
       query.employeeId = employee._id;
@@ -523,6 +535,7 @@ exports.getAllAttendance = async (req, res) => {
             await EmployeeAttendance.create({
               employeeId: employee._id,
               date: today,
+              attendanceDateIST: getISTDateString(),
               status: "on_leave",
               attendanceStatus: "absent",
               checkInStatus: "absent",
@@ -546,6 +559,7 @@ exports.getAllAttendance = async (req, res) => {
               await EmployeeAttendance.create({
                 employeeId: employee._id,
                 date: today,
+                attendanceDateIST: getISTDateString(),
                 status: todayState,
                 attendanceStatus: "absent",
                 checkInStatus: "absent",
@@ -578,6 +592,7 @@ exports.getAllAttendance = async (req, res) => {
                 await EmployeeAttendance.create({
                   employeeId: employee._id,
                   date: today,
+                  attendanceDateIST: getISTDateString(),
                   status: "absent",
                   attendanceStatus: "absent",
                   checkInStatus: "absent",
@@ -721,6 +736,7 @@ exports.getTodayAttendance = async (req, res) => {
           const leaveAttendance = await EmployeeAttendance.create({
             employeeId: employee._id,
             date: today,
+            attendanceDateIST: getISTDateString(),
             status: "on_leave",
             attendanceStatus: "absent",
             checkInStatus: "absent",
@@ -751,6 +767,7 @@ exports.getTodayAttendance = async (req, res) => {
             const leaveAttendance = await EmployeeAttendance.create({
               employeeId: employee._id,
               date: today,
+              attendanceDateIST: getISTDateString(),
               status: todayState,
               attendanceStatus: "absent",
               checkInStatus: "absent",
@@ -793,6 +810,7 @@ exports.getTodayAttendance = async (req, res) => {
               const absentAttendance = await EmployeeAttendance.create({
                 employeeId: employee._id,
                 date: today,
+                attendanceDateIST: getISTDateString(),
                 status: "absent",
                 attendanceStatus: "absent",
                 checkInStatus: "absent",
@@ -846,11 +864,18 @@ exports.getTodayAttendance = async (req, res) => {
           workingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
         }
 
-        // Add calculated fields for real-time display
+        // Live working time for UI timer (not 0:0:0)
+        const hours = Math.floor(workingMinutes / 60);
+        const mins = Math.floor(workingMinutes % 60);
+        const secs = 0; // UI can tick seconds client-side if needed
+        const liveWorkingHMS = { hours, minutes: mins, seconds: secs };
+
         return normalizeAttendanceRecord({
           ...record,
           totalWorkingMinutes: workingMinutes,
           workingHours: Number((workingMinutes / 60).toFixed(2)),
+          liveWorkingMinutes: workingMinutes,
+          liveWorkingHMS,
         });
       }
 
@@ -1009,6 +1034,9 @@ exports.checkIn = async (req, res) => {
 
     const activeSessionQuery = buildActiveSessionQuery({
       employeeId: targetEmployeeId,
+      today,
+      tomorrow,
+      cartId: employee.cartId,
     });
     const existingActiveSession = await EmployeeAttendance.findOne(activeSessionQuery)
       .sort({ date: -1, updatedAt: -1, createdAt: -1 });
@@ -1026,9 +1054,12 @@ exports.checkIn = async (req, res) => {
         message: "Active check-in session already exists",
       });
 
+      await existingActiveSession.populate("employeeId", "name mobile employeeRole");
+      const normalizedExisting = normalizeAttendanceRecord(existingActiveSession);
       return res.status(409).json({
         message: "Already checked in",
         code: "ALREADY_CHECKED_IN",
+        attendance: normalizedExisting,
       });
     }
 
@@ -1140,28 +1171,35 @@ exports.checkIn = async (req, res) => {
 
     if (checkedInToday) {
       const alreadyCheckedOut = checkedInToday.isCheckedOut || checkedInToday.checkOut?.time;
-      const message = alreadyCheckedOut
-        ? "You have already checked out for today. Check-in is locked."
-        : "Already checked in";
-      const code = alreadyCheckedOut ? "ALREADY_CHECKED_OUT" : "ALREADY_CHECKED_IN";
 
       logAttendanceEvent({
         action: "checkin",
         outcome: alreadyCheckedOut
           ? "rejected_already_checked_out"
-          : "rejected_already_checked_in",
+          : "already_checked_in_200",
         employeeId: targetEmployeeId,
         attendanceId: checkedInToday._id,
         userId: user._id,
         role: user.role,
         deviceId: requestMeta.deviceId,
         requestTimestampMs: requestMeta.requestTimestampMs,
-        message: "Check-in blocked by one-check-in-per-day validation",
+        message: alreadyCheckedOut ? "Check-in locked (already checked out)" : "Already checked in, return 200 for UI sync",
       });
 
-      return res.status(alreadyCheckedOut ? 400 : 409).json({
-        message,
-        code,
+      if (alreadyCheckedOut) {
+        return res.status(400).json({
+          message: "You have already checked out for today. Check-in is locked.",
+          code: "ALREADY_CHECKED_OUT",
+        });
+      }
+
+      await checkedInToday.populate("employeeId", "name mobile employeeRole");
+      const normalized = normalizeAttendanceRecord(checkedInToday);
+      return res.status(200).json({
+        alreadyCheckedIn: true,
+        message: "Already checked in",
+        code: "ALREADY_CHECKED_IN",
+        attendance: normalized,
       });
     }
 
@@ -1189,10 +1227,12 @@ exports.checkIn = async (req, res) => {
         }
     }
 
+    const istDateKey = getISTDateString();
     try {
       if (attendance) {
-        // Update existing record - ensure date is set to today's IST date
+        // Update existing record - ensure date and IST day key set
         attendance.date = today;
+        attendance.attendanceDateIST = istDateKey;
         attendance.checkIn = {
           time: checkInTime,
           location: location || "",
@@ -1215,6 +1255,7 @@ exports.checkIn = async (req, res) => {
         attendance = await EmployeeAttendance.create({
           employeeId: targetEmployeeId,
           date: today,
+          attendanceDateIST: istDateKey,
           checkIn: {
             time: checkInTime,
             location: location || "",
@@ -1436,7 +1477,18 @@ exports.checkOut = async (req, res) => {
         message: "No active check-in session found for checkout",
       });
 
-      return res.status(400).json({ message: "No active session found" });
+      const latestToday = await EmployeeAttendance.findOne({
+        employeeId: targetEmployeeId,
+        date: { $gte: today, $lt: tomorrow },
+      })
+        .sort({ updatedAt: -1 })
+        .populate("employeeId", "name mobile employeeRole")
+        .lean();
+      return res.status(200).json({
+        message: "No active session found",
+        reason: "No active session found",
+        attendance: latestToday ? normalizeAttendanceRecord(latestToday) : null,
+      });
     }
 
     if (attendance.isOnBreak || attendance.breakStart) {
@@ -1452,97 +1504,22 @@ exports.checkOut = async (req, res) => {
         message: "Cannot checkout while break is active",
       });
 
-      return res.status(400).json({ message: "Cannot checkout while on break. Please end break first." });
+      await attendance.populate("employeeId", "name mobile employeeRole");
+      return res.status(200).json({
+        message: "Cannot checkout while on break. Please end break first.",
+        reason: "Cannot checkout while on break. Please end break first.",
+        attendance: normalizeAttendanceRecord(attendance),
+      });
     }
 
-    // Get current time in IST, then convert to UTC for MongoDB storage
-    const checkOutTimeIST = getISTNow();
-    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
-
-    // Calculate working hours (convert stored UTC times to IST for calculation)
-    const checkInTimeUTC = new Date(attendance.checkIn.time);
-    const checkInTimeIST = utcToIST(checkInTimeUTC);
-    const workingMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
-    const totalWorkingMinutes = Math.max(0, workingMinutes - (attendance.breakDuration || 0));
-
-    // Get schedule to calculate overtime (all comparisons in IST)
-    const schedule = await EmployeeSchedule.findOne({ employeeId: targetEmployeeId });
-    let overtime = 0;
-
-    if (schedule && schedule.weeklySchedule) {
-      // Use IST date for day calculation
-      const todayDay = getISTDayName();
-      const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
-
-      if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
-        const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
-        // Create scheduled end time in IST for today
-        const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
-        
-        // Compare checkOutTime (IST) with scheduledEndTime (IST)
-        if (checkOutTimeIST > scheduledEndTimeIST) {
-          overtime = Math.floor((checkOutTimeIST - scheduledEndTimeIST) / (1000 * 60));
-        }
-      }
+    // Canonical checkout: delegate to PATCH /:id/checkout (same guards and logic)
+    const prevParams = req.params;
+    req.params = { id: attendance._id.toString() };
+    try {
+      return await exports.checkOutById(req, res);
+    } finally {
+      req.params = prevParams;
     }
-
-    // Ensure date field is set to today's IST date (in case it was set incorrectly)
-    attendance.date = today;
-    
-    attendance.checkOut = {
-      time: checkOutTime,
-      location: location || "",
-      notes: notes || "",
-    };
-    attendance.totalWorkingMinutes = totalWorkingMinutes;
-    attendance.workingHours = Number((totalWorkingMinutes / 60).toFixed(2));
-    attendance.overtime = Math.max(0, overtime);
-    attendance.isOnBreak = false;
-    attendance.breakStart = null;
-    attendance.attendanceStatus = "checked_out";
-    attendance.checkInStatus = "checked_out";
-    attendance.canTakeBreak = false;
-    attendance.isCheckedOut = true;
-
-    // Update status if half day
-    if (totalWorkingMinutes < 240) {
-      // Less than 4 hours
-      attendance.status = "half_day";
-    } else {
-      attendance.status = "completed";
-    }
-
-    await attendance.save();
-    await attendance.populate("employeeId", "name mobile employeeRole");
-    const normalizedAttendance = normalizeAttendanceRecord(attendance);
-
-    logAttendanceEvent({
-      action: "checkout",
-      outcome: "success",
-      employeeId: targetEmployeeId,
-      attendanceId: attendance._id,
-      userId: user._id,
-      role: user.role,
-      deviceId: requestMeta.deviceId,
-      requestTimestampMs: requestMeta.requestTimestampMs,
-      message: "Check-out recorded successfully",
-    });
-
-    // Emit socket event for real-time update
-    const io = req.app.get("io");
-    const emitToCafe = req.app.get("emitToCafe");
-    const attendanceCartId = attendance.cartId || attendance.cafeId; // Support both for backward compatibility
-    if (io && emitToCafe && attendanceCartId) {
-      emitToCafe(io, attendanceCartId.toString(), "attendance:checked_out", normalizedAttendance);
-      emitToCafe(io, attendanceCartId.toString(), "attendance:updated", normalizedAttendance);
-    }
-
-    return res.json({
-      message: "Checked out successfully",
-      attendance: normalizeAttendanceRecord(attendance),
-      totalWorkingMinutes,
-    });
   } catch (err) {
     const requestMeta = getAttendanceRequestMeta(req);
     logAttendanceEvent({
@@ -1559,7 +1536,7 @@ exports.checkOut = async (req, res) => {
   }
 };
 
-// Check-out by attendance ID (for mobile app)
+// Check-out by attendance ID (for mobile app) - canonical checkout
 exports.checkOutById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1682,7 +1659,13 @@ exports.checkOutById = async (req, res) => {
         message: "No active check-in session found for checkout-by-id",
       });
 
-      return res.status(400).json({ success: false, message: "No active session found" });
+      await attendance.populate("employeeId", "name mobile employeeRole");
+      return res.status(200).json({
+        success: false,
+        message: "No active session found",
+        reason: "No active session found",
+        attendance: normalizeAttendanceRecord(attendance),
+      });
     }
 
     // Check if on break - must end break before checkout
@@ -1699,7 +1682,13 @@ exports.checkOutById = async (req, res) => {
         message: "Cannot checkout while break is active",
       });
 
-      return res.status(400).json({ success: false, message: "Cannot checkout while on break. Please end break first." });
+      await activeAttendance.populate("employeeId", "name mobile employeeRole");
+      return res.status(200).json({
+        success: false,
+        message: "Cannot checkout while on break. Please end break first.",
+        reason: "Cannot checkout while on break. Please end break first.",
+        attendance: normalizeAttendanceRecord(activeAttendance),
+      });
     }
 
     // Get current time in IST, then convert to UTC for MongoDB storage
@@ -1793,6 +1782,7 @@ exports.checkOutById = async (req, res) => {
       success: true,
       message: "Checked out successfully",
       data: normalizedAttendance,
+      attendance: normalizedAttendance,
       totalWorkingMinutes: totalWorkingMinutes,
       workingHours: activeAttendance.workingHours,
       overtime: activeAttendance.overtime,
@@ -1846,21 +1836,40 @@ exports.startBreak = async (req, res) => {
       }
     }
 
-    if (!attendance.checkIn.time) {
-      return res.status(400).json({ success: false, message: "Employee has not checked in" });
+    await attendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedForResponse = normalizeAttendanceRecord(attendance);
+
+    if (!attendance.checkIn?.time) {
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Employee has not checked in",
+      });
     }
 
     if (attendance.isCheckedOut || attendance.checkOut?.time) {
-      return res.status(400).json({ success: false, message: "Employee has already checked out" });
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Employee has already checked out",
+      });
     }
 
     if (attendance.canTakeBreak === false) {
-      return res.status(400).json({ success: false, message: "Break not allowed before check-in" });
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Break not allowed before check-in",
+      });
     }
 
     // Check if already on break (using isOnBreak field or breakStart)
     if (attendance.isOnBreak || attendance.breakStart) {
-      return res.status(400).json({ success: false, message: "Break already started" });
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Break already started",
+      });
     }
 
     attendance.breakStart = new Date();
@@ -1924,13 +1933,24 @@ exports.endBreak = async (req, res) => {
       }
     }
 
+    await attendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedForResponse = normalizeAttendanceRecord(attendance);
+
     // Check if on break (using isOnBreak field or breakStart)
     if (!attendance.isOnBreak && !attendance.breakStart) {
-      return res.status(400).json({ success: false, message: "Break has not been started" });
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Break has not been started",
+      });
     }
 
     if (attendance.isCheckedOut || attendance.checkOut?.time) {
-      return res.status(400).json({ success: false, message: "Employee has already checked out" });
+      return res.status(200).json({
+        success: false,
+        attendance: normalizedForResponse,
+        reason: "Employee has already checked out",
+      });
     }
 
     const breakEnd = new Date();

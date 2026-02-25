@@ -68,16 +68,18 @@ router.get("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", 
     })
       .sort({ createdAt: -1 })
       .lean();
-    const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
+    // const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
 
     // Extract KOTs from orders (includes both TAKEAWAY and DINE_IN orders)
     const kots = [];
     orders.forEach((order) => {
       const isAssigned = hasAssignedStaff(order);
+      /*
       if (enforceAcceptedKotFlow) {
         if (!isAssigned) return;
         if (KOT_TERMINAL_STATUSES.has(normalizeStatusKey(order.status))) return;
       }
+      */
 
       if (order.kotLines && order.kotLines.length > 0) {
         order.kotLines.forEach((kot, index) => {
@@ -117,7 +119,7 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
       return res.status(403).json({ message: "No cafe associated with this user" });
     }
 
-    const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
+    // const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
     const orderQuery = {
       cartId: cafeId,
       status: {
@@ -137,12 +139,14 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
       },
       kotLines: { $exists: true, $ne: [] },
     };
+    /*
     if (enforceAcceptedKotFlow) {
       orderQuery.$or = [
         { "acceptedBy.employeeId": { $exists: true, $ne: null } },
         { "acceptedBy.employeeName": { $exists: true, $nin: ["", null] } },
       ];
     }
+    */
 
     const orders = await Order.find(orderQuery)
       .sort({ createdAt: -1 })
@@ -150,12 +154,14 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
 
     const kots = [];
     orders.forEach((order) => {
+      /*
       if (
         enforceAcceptedKotFlow &&
         KOT_TERMINAL_STATUSES.has(normalizeStatusKey(order.status))
       ) {
         return;
       }
+      */
 
       const isAssigned = hasAssignedStaff(order);
       if (order.kotLines && order.kotLines.length > 0) {

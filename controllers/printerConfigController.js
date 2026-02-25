@@ -40,17 +40,24 @@ const getPrinterConfig = async (req, res) => {
     }
 
     const config = await PrinterConfig.findOne({ cartId }).lean();
+    const envAuthority = (process.env.PRINT_AUTHORITY || "").trim().toUpperCase();
+    const defaultPayload = {
+      printerIp: "",
+      printerPort: 9100,
+      businessName: DEFAULT_BUSINESS_NAME,
+      kotHeaderText: "",
+      billHeaderText: "",
+      centerAlign: true,
+      printAuthority: envAuthority === "AGENT" ? "AGENT" : "APP",
+    };
     if (!config) {
-      return res.json({
-        printerIp: "",
-        printerPort: 9100,
-        businessName: DEFAULT_BUSINESS_NAME,
-        kotHeaderText: "",
-        billHeaderText: "",
-        centerAlign: true,
-      });
+      return res.json(defaultPayload);
     }
 
+    const printAuthority =
+      envAuthority === "APP" || envAuthority === "AGENT"
+        ? envAuthority
+        : (config.printAuthority || "APP");
     return res.json({
       printerIp: config.printerIp,
       printerPort: config.printerPort ?? 9100,
@@ -58,6 +65,7 @@ const getPrinterConfig = async (req, res) => {
       kotHeaderText: config.kotHeaderText || "",
       billHeaderText: config.billHeaderText || "",
       centerAlign: config.centerAlign !== false,
+      printAuthority,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -85,6 +93,7 @@ const savePrinterConfig = async (req, res) => {
       kotHeaderText,
       billHeaderText,
       centerAlign,
+      printAuthority: bodyPrintAuthority,
     } = req.body;
     if (!printerIp || typeof printerIp !== "string" || printerIp.trim() === "") {
       return res.status(400).json({ message: "printerIp is required" });
@@ -102,20 +111,32 @@ const savePrinterConfig = async (req, res) => {
       return res.status(400).json({ message: "printerPort must be between 1 and 65535" });
     }
 
+    const authority =
+      bodyPrintAuthority === "APP" || bodyPrintAuthority === "AGENT"
+        ? bodyPrintAuthority
+        : undefined;
+    const update = {
+      printerIp: printerIp.trim(),
+      printerPort: port,
+      businessName: normalizeText(businessName, DEFAULT_BUSINESS_NAME),
+      kotHeaderText: normalizeText(kotHeaderText),
+      billHeaderText: normalizeText(billHeaderText),
+      centerAlign: normalizeBool(centerAlign, true),
+      updatedAt: new Date(),
+    };
+    if (authority) update.printAuthority = authority;
+
     const config = await PrinterConfig.findOneAndUpdate(
       { cartId },
-      {
-        printerIp: printerIp.trim(),
-        printerPort: port,
-        businessName: normalizeText(businessName, DEFAULT_BUSINESS_NAME),
-        kotHeaderText: normalizeText(kotHeaderText),
-        billHeaderText: normalizeText(billHeaderText),
-        centerAlign: normalizeBool(centerAlign, true),
-        updatedAt: new Date(),
-      },
+      update,
       { new: true, upsert: true }
     ).lean();
 
+    const envAuthority = (process.env.PRINT_AUTHORITY || "").trim().toUpperCase();
+    const printAuthority =
+      envAuthority === "APP" || envAuthority === "AGENT"
+        ? envAuthority
+        : (config.printAuthority || "APP");
     return res.json({
       printerIp: config.printerIp,
       printerPort: config.printerPort ?? 9100,
@@ -123,6 +144,7 @@ const savePrinterConfig = async (req, res) => {
       kotHeaderText: config.kotHeaderText || "",
       billHeaderText: config.billHeaderText || "",
       centerAlign: config.centerAlign !== false,
+      printAuthority,
     });
   } catch (err) {
     return res.status(500).json({ message: err.message });

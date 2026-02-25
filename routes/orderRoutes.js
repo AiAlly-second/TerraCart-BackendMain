@@ -72,12 +72,14 @@ router.patch(
   ]),
   updateOrderStatus,
 );
+/*
 router.patch(
   "/:id/accept",
   protect,
   authorize(["waiter", "captain", "manager", "admin"]),
   acceptOrder,
 );
+*/
 router.patch(
   "/:id/print-status",
   protect,

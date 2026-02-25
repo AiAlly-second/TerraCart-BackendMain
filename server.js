@@ -155,14 +155,33 @@ const resolveSocketCartIds = async (user) => {
   if (user.cartId) cartIds.add(String(user.cartId));
   if (user.cafeId) cartIds.add(String(user.cafeId));
 
-  if ((user.employeeId || user._id) && !user.cartId && !user.cafeId) {
+  if ((user.employeeId || user._id || user.email) && !user.cartId && !user.cafeId) {
     try {
-      const employeeQuery = user.employeeId
-        ? { _id: user.employeeId }
-        : { userId: user._id };
-      const employee = await Employee.findOne(employeeQuery)
-        .select("cartId cafeId")
-        .lean();
+      let employee = null;
+
+      // Preferred lookup when JWT includes linked employeeId.
+      if (user.employeeId) {
+        employee = await Employee.findById(user.employeeId)
+          .select("cartId cafeId")
+          .lean();
+      }
+
+      // Backward compatibility: many staff records are linked by userId only.
+      if (!employee && user._id) {
+        employee = await Employee.findOne({ userId: user._id })
+          .select("cartId cafeId")
+          .lean();
+      }
+
+      // Safety fallback: legacy records where userId link is missing but email matches.
+      if (!employee && user.email) {
+        employee = await Employee.findOne({
+          email: String(user.email).toLowerCase(),
+        })
+          .select("cartId cafeId")
+          .lean();
+      }
+
       if (employee?.cartId) cartIds.add(String(employee.cartId));
       if (employee?.cafeId) cartIds.add(String(employee.cafeId));
     } catch (_error) {
@@ -186,7 +205,7 @@ io.use(async (socket, next) => {
     if (!decoded?.id) return next();
 
     const user = await User.findById(decoded.id)
-      .select("_id role cartId cafeId franchiseId employeeId tokenVersion")
+      .select("_id role email cartId cafeId franchiseId employeeId tokenVersion")
       .lean();
     if (!user) return next();
 

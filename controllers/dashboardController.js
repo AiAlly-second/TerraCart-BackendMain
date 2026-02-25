@@ -71,6 +71,7 @@ exports.getDashboardStats = async (req, res) => {
         { cafeId: cafeId }, // Backward compatibility for old records
       ],
     };
+    /*
     const normalizedRole = String(req.user?.role || "").toLowerCase();
     const requireAcceptedKotAssignment =
       normalizedRole === "cook" || normalizedRole === "manager";
@@ -83,6 +84,9 @@ exports.getDashboardStats = async (req, res) => {
         ],
       }
       : null;
+    */
+    const requireAcceptedKotAssignment = false;
+    const acceptedKotScope = null;
 
     const buildKotStatusQuery = (statusMatchers) => {
       const clauses = [

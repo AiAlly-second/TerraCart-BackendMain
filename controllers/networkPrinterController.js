@@ -88,8 +88,13 @@ const persistKotPrintResult = async ({
   if (success) {
     kotLine.isPrinted = true;
     kotLine.lastPrintedAt = now;
+    kotLine.printStatus = "printed";
+    kotLine.printedAt = now;
+    kotLine.lastPrintError = "";
   } else {
     kotLine.isPrinted = false;
+    kotLine.printStatus = "failed";
+    kotLine.lastPrintError = String(message || "").trim();
   }
 
   order.markModified("kotLines");
