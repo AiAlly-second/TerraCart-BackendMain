@@ -351,6 +351,32 @@ if (
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
   // Client connected - removed verbose logging
+  // Auto-join authenticated staff to their cart/cafe rooms so realtime
+  // order/KOT updates work even if explicit join events are delayed or missing.
+  (async () => {
+    try {
+      const user = socket.data?.user || null;
+      if (!user) return;
+
+      const role = normalizeSocketRole(user.role);
+      if (role && SOCKET_ROLE_ALLOWLIST.has(role)) {
+        socket.join(`role:${role}`);
+      }
+
+      // Keep super_admin explicit-join only to avoid joining many rooms.
+      if (role === "super_admin") return;
+
+      const allowedCartIds = await resolveSocketCartIds(user);
+      for (const cartId of allowedCartIds) {
+        const normalizedCartId = normalizeSocketRoomValue(cartId);
+        if (!normalizedCartId) continue;
+        socket.join(`cart:${normalizedCartId}`);
+        socket.join(`cafe:${normalizedCartId}`);
+      }
+    } catch (_error) {
+      // Best-effort auto-join; explicit join events still work as fallback.
+    }
+  })();
 
   // Join cafe room
   socket.on("join:cafe", async (cafeId) => {

@@ -505,6 +505,89 @@ const orderToPlainPayload = (order) => {
   return order;
 };
 
+const SOCKET_EMIT_DEBUG_ENABLED =
+  String(process.env.BACKEND_ENABLE_SOCKET_DEBUG || "").toLowerCase() ===
+  "true";
+
+const writeSocketEmitDebugLog = (message) => {
+  if (!SOCKET_EMIT_DEBUG_ENABLED) return;
+  try {
+    process.stdout.write(`${message}\n`);
+  } catch (_error) {
+    // Ignore debug log write errors.
+  }
+};
+
+const toSocketIdString = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    const nested =
+      value._id || value.id || value.cartId || value.cafeId || null;
+    if (nested && nested !== value) {
+      return toSocketIdString(nested);
+    }
+  }
+  if (typeof value?.toString === "function") {
+    return value.toString().trim();
+  }
+  return "";
+};
+
+const normalizeOrderUpsertTimestamp = (value) => {
+  if (!value) return new Date().toISOString();
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value?.toISOString === "function") {
+    try {
+      return value.toISOString();
+    } catch (_error) {
+      return new Date().toISOString();
+    }
+  }
+  return new Date().toISOString();
+};
+
+const buildOrderUpsertPayload = (order) => {
+  const source = orderToPlainPayload(order) || {};
+  const orderId = toSocketIdString(source._id || source.id || source.orderId);
+  const cartId = toSocketIdString(source.cartId || source.cafeId);
+  const statusRaw = String(source.status || "").trim();
+  const orderTypeRaw = String(
+    source.orderType || source.serviceType || "",
+  ).trim();
+
+  return {
+    orderId: orderId || null,
+    cartId: cartId || null,
+    updatedAt: normalizeOrderUpsertTimestamp(
+      source.updatedAt || source.createdAt,
+    ),
+    status: statusRaw || null,
+    orderType: orderTypeRaw || null,
+  };
+};
+
+const emitOrderUpsert = ({
+  io,
+  emitToCafe,
+  order,
+  cartId = null,
+  sourceEvent = "unknown",
+}) => {
+  if (!io || !emitToCafe || !order) return;
+
+  const payload = buildOrderUpsertPayload(order);
+  const resolvedCartId = toSocketIdString(cartId || payload.cartId);
+  if (!resolvedCartId || !payload.orderId) return;
+
+  emitToCafe(io, resolvedCartId, "order:upsert", payload);
+  writeSocketEmitDebugLog(
+    `[SOCKET_DEBUG] emit order:upsert room=cart:${resolvedCartId} orderId=${payload.orderId} cartId=${payload.cartId || resolvedCartId} status=${payload.status || "unknown"} source=${sourceEvent}`,
+  );
+};
+
 const ACCEPTABLE_ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Served"];
 const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
 const AUTO_ASSIGN_CREATOR_ROLES = new Set([
@@ -3025,6 +3108,13 @@ const createOrder = async (req, res) => {
       // across waiter/captain/manager dashboards in both local and production.
       emitToCafe(io, cartIdStr, "order:created", payload || order);
       emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: cartIdStr,
+        sourceEvent: "createOrder",
+      });
 
       // Keep legacy explicit availability event for compatibility.
       const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
@@ -3452,6 +3542,13 @@ const addKot = async (req, res) => {
       emitToCafe(io, cartIdStr, "kot:status:updated", payload || order); // KOT updated
       // Emit kot:created so app PrintService / local agent can print the new KOT (same as createOrder)
       emitToCafe(io, cartIdStr, "kot:created", payload || order);
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: cartIdStr,
+        sourceEvent: "addKot",
+      });
       /*
       if (order.acceptedBy && order.acceptedBy.employeeId) {
         const assignmentDisplayType = resolveAssignmentDisplayType(
@@ -3565,6 +3662,13 @@ const finalizeOrder = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "finalizeOrder",
+      });
     }
 
     return res.json(order);
@@ -4074,6 +4178,13 @@ const addItemsToOrder = async (req, res) => {
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
       emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "addItemsToOrder",
+      });
     }
 
     return res.json(order);
@@ -4180,6 +4291,13 @@ const updateOrderAddons = async (req, res) => {
     if (order.cartId && emitToCafe) {
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "updateOrderAddons",
+      });
     }
 
     return res.json(order);
@@ -4329,6 +4447,13 @@ const acceptOrder = async (req, res) => {
         "orderUpdated",
         updatedOrder,
       );
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: updatedOrder,
+        cartId: updatedOrder.cartId.toString(),
+        sourceEvent: "acceptOrder",
+      });
       emitToCafe(
         io,
         updatedOrder.cartId.toString(),
@@ -4745,6 +4870,13 @@ const updateOrderStatus = async (req, res) => {
         updatedOrder,
       );
       emitToCafe(io, order.cartId.toString(), "orderUpdated", updatedOrder); // Legacy support
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: updatedOrder,
+        cartId: order.cartId.toString(),
+        sourceEvent: "updateOrderStatus",
+      });
     }
 
     // Handle payment and table release in background (non-blocking)
@@ -4922,6 +5054,13 @@ const cancelOrderByCustomer = async (req, res) => {
       // Only emit to admin panel - customer frontend uses polling to avoid loops
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "cancelOrderByCustomer",
+      });
     }
 
     return res.json(order);
@@ -5053,6 +5192,13 @@ const confirmPaymentByCustomer = async (req, res) => {
       emitToCafe(io, cartIdStr, "newOrder", payload || order);
       emitToCafe(io, cartIdStr, "order:status:updated", payload || order);
       emitToCafe(io, cartIdStr, "orderUpdated", payload || order);
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: cartIdStr,
+        sourceEvent: "confirmPaymentByCustomer",
+      });
     }
 
     console.log("Payment confirmed by customer:", order._id);
@@ -5269,6 +5415,13 @@ const returnItems = async (req, res) => {
       // Only emit to admin panel - customer frontend uses polling to avoid loops
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "returnItems",
+      });
     }
 
     res.json({
@@ -5427,6 +5580,13 @@ const convertToTakeaway = async (req, res) => {
         // Only emit to admin panel - customer frontend uses polling to avoid loops
         emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
         emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+        emitOrderUpsert({
+          io,
+          emitToCafe,
+          order,
+          cartId: order.cartId.toString(),
+          sourceEvent: "convertToTakeaway",
+        });
       }
 
       return res.json({
