@@ -74,6 +74,7 @@ const Waste = require("../../models/costing-v2/wasteModel");
 const LabourCost = require("../../models/costing-v2/labourCostModel");
 const Overhead = require("../../models/costing-v2/overheadModel");
 const User = require("../../models/userModel");
+const Employee = require("../../models/employeeModel");
 const Cart = require("../../models/cartModel");
 const CartMenuItem = require("../../models/cartMenuModel");
 const CostingExpense = require("../../models/costing-v2/expenseModel");
@@ -226,6 +227,30 @@ const decodeHtmlEntities = (str) => {
     .replace(/&#x2F;/g, "/");
 };
 
+const resolveUserCartId = async (user) => {
+  if (!user) return null;
+
+  if (user.cartId) return user.cartId;
+  if (user.cafeId) return user.cafeId;
+
+  if (user.employeeId) {
+    const employee = await Employee.findById(user.employeeId)
+      .select("cartId cafeId")
+      .lean();
+    if (employee?.cartId || employee?.cafeId) {
+      return employee.cartId || employee.cafeId;
+    }
+  }
+
+  const employee = await Employee.findOne({
+    $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
+  })
+    .select("cartId cafeId")
+    .lean();
+
+  return employee?.cartId || employee?.cafeId || null;
+};
+
 // ==================== SUPPLIERS ====================
 
 /**
@@ -315,6 +340,16 @@ exports.updateSupplier = async (req, res) => {
             "Access denied: You can only update suppliers belonging to your cart",
         });
       }
+    } else if (req.user.role === "manager") {
+      // Manager can only update suppliers for their own cart
+      const managerCartId = await resolveUserCartId(req.user);
+      if (!managerCartId || supplier.cartId?.toString() !== managerCartId.toString()) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Access denied: You can only update suppliers belonging to your cart",
+        });
+      }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin can update suppliers from their franchise carts
       const outlet = await User.findById(supplier.cartId);
@@ -363,6 +398,16 @@ exports.deleteSupplier = async (req, res) => {
     // Check access: cart admin can only delete their own suppliers
     if (req.user.role === "admin") {
       if (supplier.cartId?.toString() !== req.user._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Access denied: You can only delete suppliers belonging to your cart",
+        });
+      }
+    } else if (req.user.role === "manager") {
+      // Manager can only delete suppliers for their own cart
+      const managerCartId = await resolveUserCartId(req.user);
+      if (!managerCartId || supplier.cartId?.toString() !== managerCartId.toString()) {
         return res.status(403).json({
           success: false,
           message:
@@ -1790,6 +1835,16 @@ exports.createIngredient = async (req, res) => {
           existingIngredient = await Ingredient.findOne(findQuery)
             .populate("cartId", "name cafeName")
             .populate("preferredSupplierId", "name");
+
+          // Fallback for legacy unique index on `name` only:
+          // duplicate can come from a different cart/shared scope.
+          if (!existingIngredient) {
+            existingIngredient = await Ingredient.findOne({
+              name: { $regex: new RegExp(`^${data.name.trim()}$`, "i") },
+            })
+              .populate("cartId", "name cafeName")
+              .populate("preferredSupplierId", "name");
+          }
         } catch (findError) {
           console.error('[CREATE_INGREDIENT] Error finding existing ingredient:', findError);
         }
@@ -2734,18 +2789,9 @@ exports.directPurchase = async (req, res) => {
     if (req.user.role === "admin") {
       finalOutletId = req.user._id;
     } else if (req.user.role === "manager") {
-      if (req.user.cartId) {
-        finalOutletId = req.user.cartId;
-      } else if (req.user.cafeId) {
-        finalOutletId = req.user.cafeId;
-      } else if (req.user.employeeId) {
-        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
-      } else {
-        const employee = await require("../../models/employeeModel").findOne({
-          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
-        }).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
+      finalOutletId = await resolveUserCartId(req.user);
+      if (!finalOutletId && cartId) {
+        finalOutletId = cartId;
       }
       if (!finalOutletId) {
         return res.status(400).json({ success: false, message: "No cart associated with manager" });
@@ -2788,7 +2834,8 @@ exports.directPurchase = async (req, res) => {
       qtyInBaseUnit,
       unitPrice, // Store the price per UOM
       costAllocated,
-      refType: "direct_purchase", // New ref type
+      // Keep consistent with schema enum and weighted-average lookups.
+      refType: "purchase",
       date: new Date(),
       notes: notes ? `${notes} (Supplier: ${supplier || 'N/A'})` : `Direct Purchase from ${supplier || 'N/A'}`,
       recordedBy: req.user._id,
@@ -2849,34 +2896,8 @@ exports.getInventoryTransactions = async (req, res) => {
         }).select("_id");
         filter.cartId = { $in: outlets.map((o) => o._id) };
       }
-    } else if (req.user.role === "super_admin") {
-      // Super admin - can filter by outlet or see all
-      if (cartId) {
-        filter.cartId = cartId;
-      }
-      // If no cartId specified, show all transactions
     } else if (req.user.role === "manager") {
-      // Manager - only see their own cart's transactions
-      let managerCartId = req.user.cartId || req.user.cafeId;
-      if (!managerCartId && req.user.employeeId) {
-        const employee =
-          await require("../../models/employeeModel")
-            .findById(req.user.employeeId)
-            .lean();
-        managerCartId = employee?.cartId || employee?.cafeId;
-      }
-      if (!managerCartId) {
-        const employee =
-          await require("../../models/employeeModel")
-            .findOne({
-              $or: [
-                { email: req.user.email?.toLowerCase() },
-                { userId: req.user._id },
-              ],
-            })
-            .lean();
-        managerCartId = employee?.cartId || employee?.cafeId;
-      }
+      const managerCartId = await resolveUserCartId(req.user);
       if (!managerCartId) {
         return res.status(403).json({
           success: false,
@@ -2884,6 +2905,12 @@ exports.getInventoryTransactions = async (req, res) => {
         });
       }
       filter.cartId = managerCartId;
+    } else if (req.user.role === "super_admin") {
+      // Super admin - can filter by outlet or see all
+      if (cartId) {
+        filter.cartId = cartId;
+      }
+      // If no cartId specified, show all transactions
     }
 
     const transactions = await InventoryTransaction.find(filter)
@@ -3037,8 +3064,6 @@ exports.diagnoseConsumption = async (req, res) => {
  */
 exports.getCostingInventory = async (req, res) => {
   try {
-    const Employee = require("../../models/employeeModel");
-
     // Get cartId - match inventory controller logic for consistency
     let cartId = null;
     if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
@@ -3352,6 +3377,15 @@ exports.recordWaste = async (req, res) => {
     if (req.user.role === "admin") {
       // Cart admin - always use their own kiosk
       finalOutletId = req.user._id;
+    } else if (req.user.role === "manager") {
+      // Manager - use their own cart
+      finalOutletId = await resolveUserCartId(req.user);
+      if (!finalOutletId) {
+        return res.status(400).json({
+          success: false,
+          message: "No cart associated with manager",
+        });
+      }
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - must provide cartId
       if (!cartId) {
@@ -3466,6 +3500,16 @@ exports.getWaste = async (req, res) => {
     if (req.user.role === "admin") {
       // Cart admin - only see their own kiosk's waste records
       filter.cartId = req.user._id;
+    } else if (req.user.role === "manager") {
+      // Manager - only see their own kiosk's waste records
+      const managerCartId = await resolveUserCartId(req.user);
+      if (!managerCartId) {
+        return res.status(403).json({
+          success: false,
+          message: "No cart associated with manager",
+        });
+      }
+      filter.cartId = managerCartId;
     } else if (req.user.role === "franchise_admin") {
       // Franchise admin - can filter by specific outlet or see all their franchise outlets
       if (cartId) {

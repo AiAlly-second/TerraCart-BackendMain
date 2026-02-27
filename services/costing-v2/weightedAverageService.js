@@ -1,6 +1,42 @@
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 
+const getSafeConversionFactor = (ingredient, fromUom) => {
+  const normalizedFrom = (fromUom || ingredient?.uom || ingredient?.baseUnit || "")
+    .toString()
+    .trim()
+    .toLowerCase();
+  const baseUnit = (ingredient?.baseUnit || "")
+    .toString()
+    .trim()
+    .toLowerCase();
+
+  try {
+    if (ingredient && typeof ingredient.convertToBaseUnit === "function") {
+      const factor = Number(ingredient.convertToBaseUnit(1, normalizedFrom));
+      if (Number.isFinite(factor) && factor > 0) {
+        return factor;
+      }
+    }
+  } catch (error) {
+    // Fallback below handles legacy/unknown unit values.
+  }
+
+  if (!normalizedFrom || !baseUnit || normalizedFrom === baseUnit) return 1;
+  if (baseUnit === "g") {
+    if (normalizedFrom === "kg") return 1000;
+    if (normalizedFrom === "g") return 1;
+  } else if (baseUnit === "ml") {
+    if (normalizedFrom === "l") return 1000;
+    if (normalizedFrom === "ml") return 1;
+  } else if (baseUnit === "pcs") {
+    if (["pcs", "pack", "box", "bottle"].includes(normalizedFrom)) return 1;
+    if (normalizedFrom === "dozen") return 12;
+  }
+
+  return 1;
+};
+
 /**
  * Inventory Costing Service
  * WEIGHTED AVERAGE LOGIC: Calculates weighted average cost when new purchases are received
@@ -101,7 +137,10 @@ class WeightedAverageService {
             let txnCostPerBaseUnit = 0;
             if (txn.unitPrice != null && txn.unitPrice > 0) {
               // Use exact purchase price - convert to base unit
-              const conversionFactor = ingredient.convertToBaseUnit(1, txn.uom || ingredient.uom);
+              const conversionFactor = getSafeConversionFactor(
+                ingredient,
+                txn.uom || ingredient.uom
+              );
               txnCostPerBaseUnit = txn.unitPrice / conversionFactor;
             } else if (txn.costAllocated > 0 && txnQty > 0) {
               // Fallback: calculate from costAllocated
@@ -318,7 +357,10 @@ class WeightedAverageService {
       
       if (lastPurchaseTxn && lastPurchaseTxn.unitPrice != null && lastPurchaseTxn.unitPrice > 0) {
         // Use exact purchase price - convert to base unit
-        const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchaseTxn.uom || ingredient.uom);
+        const conversionFactor = getSafeConversionFactor(
+          ingredient,
+          lastPurchaseTxn.uom || ingredient.uom
+        );
         avgCost = lastPurchaseTxn.unitPrice / conversionFactor;
       } else {
         // Fallback to ingredient's stored cost

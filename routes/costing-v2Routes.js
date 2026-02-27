@@ -78,34 +78,34 @@ router.use(protect);
 // ==================== SUPPLIERS ====================
 router.get(
   "/suppliers",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getSuppliers
 );
 router.post(
   "/suppliers",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   createSupplier
 );
 router.put(
   "/suppliers/:id",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   updateSupplier
 );
 router.delete(
   "/suppliers/:id",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   deleteSupplier
 );
 
 // ==================== INGREDIENTS ====================
 router.get(
   "/ingredients",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getIngredients
 );
 router.post(
   "/ingredients",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   createIngredient
 );
 router.put(
@@ -132,17 +132,17 @@ router.get(
 // ==================== PURCHASES ====================
 router.get(
   "/purchases",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getPurchases
 );
 router.post(
   "/purchases",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   createPurchase
 );
 router.post(
   "/purchases/:id/receive",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   receivePurchase
 );
 
@@ -186,19 +186,19 @@ router.get(
 );
 router.get(
   "/low-stock",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getLowStock
 );
 
 // ==================== WASTE ====================
 router.post(
   "/waste",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   recordWaste
 );
 router.get(
   "/waste",
-  authorize(["super_admin", "franchise_admin", "admin"]),
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   getWaste
 );
 

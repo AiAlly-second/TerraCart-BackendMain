@@ -5,6 +5,31 @@
 
 const mongoose = require("mongoose");
 const User = require("../../models/userModel");
+const Employee = require("../../models/employeeModel");
+
+const resolveManagerCartId = async (user) => {
+  if (!user) return null;
+
+  if (user.cartId) return user.cartId;
+  if (user.cafeId) return user.cafeId;
+
+  if (user.employeeId) {
+    const employee = await Employee.findById(user.employeeId)
+      .select("cartId cafeId")
+      .lean();
+    if (employee?.cartId || employee?.cafeId) {
+      return employee.cartId || employee.cafeId;
+    }
+  }
+
+  const employee = await Employee.findOne({
+    $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
+  })
+    .select("cartId cafeId")
+    .lean();
+
+  return employee?.cartId || employee?.cafeId || null;
+};
 
 /**
  * Build query filter based on user role for costing data
@@ -27,17 +52,29 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
   const skipOutletFilter = options.skipOutletFilter || false;
   const includeShared = options.includeShared || false;
 
-  if (user.role === "admin") {
-    // Cart/Kiosk admin
+  if (user.role === "admin" || user.role === "manager") {
+    // Cart/Kiosk admin and manager (manager is scoped to one cart)
+    const userCartId =
+      user.role === "admin" ? user._id : await resolveManagerCartId(user);
+
+    if (!userCartId) {
+      throw new Error("No cart associated with manager");
+    }
+
+    // Normalize cartId for strict comparisons
+    const normalizedUserCartId = mongoose.Types.ObjectId.isValid(userCartId)
+      ? new mongoose.Types.ObjectId(userCartId)
+      : userCartId;
+
     // When includeShared is true (for global masters like Ingredients / BOM),
     // show ingredients with cartId = their cart OR cartId = null (shared)
     // Otherwise, only see their own kiosk's data
     if (includeShared) {
-      // For cart admins with includeShared, show:
+      // For cart-level users with includeShared, show:
       // 1. Ingredients with cartId = their cart (pushed ingredients)
       // 2. Ingredients with cartId = null (shared ingredients)
       if (!skipOutletFilter) {
-        // For cart admins, always include shared ingredients regardless of filter.cartId
+        // For cart-level users, always include shared ingredients regardless of filter.cartId
         // Extract other filters (isActive, category, etc.) to combine with cartId filter
         const otherFilters = {};
         Object.keys(filter).forEach(key => {
@@ -46,13 +83,8 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
           }
         });
         
-        // Build cartId conditions - ensure user._id is converted to ObjectId for proper matching
-        const userCartId = mongoose.Types.ObjectId.isValid(user._id) 
-          ? new mongoose.Types.ObjectId(user._id) 
-          : user._id;
-        
         const cartIdConditions = [
-          { cartId: userCartId }, // Their own cart's ingredients
+          { cartId: normalizedUserCartId }, // Their own cart's ingredients
           { cartId: null }, // Shared ingredients
           { cartId: { $exists: false } }, // Legacy: ingredients without cartId field
         ];
@@ -116,19 +148,19 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
       if (!skipOutletFilter) {
         if (!filter.cartId) {
           // No cartId specified - auto-set to their own cart
-          filter.cartId = user._id;
+          filter.cartId = normalizedUserCartId;
         } else {
           // cartId is specified - validate it's their own
           const providedCartId = filter.cartId.toString();
-          const userCartId = user._id.toString();
-          if (providedCartId !== userCartId) {
+          const currentUserCartId = normalizedUserCartId.toString();
+          if (providedCartId !== currentUserCartId) {
             // If cartId is specified and it's not their own, deny access
             throw new Error(
               "Access denied: You can only access your own cart's data"
             );
           }
           // It's their own, so keep it
-          filter.cartId = user._id;
+          filter.cartId = normalizedUserCartId;
         }
       }
       // Also filter by franchiseId for safety (for models that have it)
@@ -174,6 +206,9 @@ const getAllowedOutlets = async (user) => {
   if (user.role === "admin") {
     // Cart admin - only their own kiosk
     return [user._id];
+  } else if (user.role === "manager") {
+    const managerCartId = await resolveManagerCartId(user);
+    return managerCartId ? [managerCartId] : [];
   } else if (user.role === "franchise_admin") {
     // Franchise admin - all kiosks under their franchise
     const outlets = await User.find({
@@ -204,6 +239,12 @@ const validateOutletAccess = async (user, cartId) => {
 
   if (user.role === "admin") {
     return user._id.toString() === cartId.toString();
+  } else if (user.role === "manager") {
+    const managerCartId = await resolveManagerCartId(user);
+    return (
+      managerCartId != null &&
+      managerCartId.toString() === cartId.toString()
+    );
   } else if (user.role === "franchise_admin") {
     const cart = await User.findById(cartId);
     return cart && cart.franchiseId?.toString() === user._id.toString();
@@ -226,6 +267,27 @@ const setOutletContext = async (user, data = {}, outletRequired = true) => {
     data.cartId = user._id;
     if (user.franchiseId) {
       data.franchiseId = user.franchiseId;
+    }
+  } else if (user.role === "manager") {
+    // Manager - always scoped to their assigned cart
+    let managerCartId = await resolveManagerCartId(user);
+    if (!managerCartId && data.cartId) {
+      managerCartId = data.cartId;
+    }
+    if (!managerCartId) {
+      throw new Error("No cart associated with manager");
+    }
+    data.cartId = managerCartId;
+
+    if (!data.franchiseId) {
+      if (user.franchiseId) {
+        data.franchiseId = user.franchiseId;
+      } else {
+        const cart = await User.findById(managerCartId).select("franchiseId");
+        if (cart?.franchiseId) {
+          data.franchiseId = cart.franchiseId;
+        }
+      }
     }
   } else if (user.role === "franchise_admin") {
     // Franchise admin - must specify cartId (unless outletRequired is false)
