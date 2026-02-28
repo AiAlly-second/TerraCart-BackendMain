@@ -505,6 +505,47 @@ const AUTO_ASSIGN_CREATOR_ROLES = new Set([
   "manager",
   "admin",
 ]);
+const normalizeUpper = (value) => String(value || "").trim().toUpperCase();
+const normalizeOfficePaymentMode = (value, fallback = "ONLINE") => {
+  const normalized = normalizeUpper(value);
+  if (normalized === "ONLINE" || normalized === "COD" || normalized === "BOTH") {
+    return normalized;
+  }
+  return fallback;
+};
+const isPickupOrDeliveryServiceOrder = (order) => {
+  const orderType = normalizeUpper(order?.orderType);
+  const serviceType = normalizeUpper(order?.serviceType);
+  return (
+    orderType === "PICKUP" ||
+    orderType === "DELIVERY" ||
+    serviceType === "PICKUP" ||
+    serviceType === "DELIVERY"
+  );
+};
+const requiresPaymentBeforeProceeding = (order) => {
+  if (Boolean(order?.paymentRequiredBeforeProceeding)) {
+    return true;
+  }
+  const isOfficeOrder = normalizeUpper(order?.sourceQrType) === "OFFICE";
+  if (isOfficeOrder) {
+    return normalizeUpper(order?.officePaymentMode || "ONLINE") === "ONLINE";
+  }
+  return isPickupOrDeliveryServiceOrder(order);
+};
+const isOrderPaymentComplete = async (order) => {
+  if (!order?._id) return false;
+  if (order.status === "Paid" || order.paymentStatus === "PAID") {
+    return true;
+  }
+  const paidPayment = await Payment.findOne({
+    orderId: order._id,
+    status: "PAID",
+  })
+    .limit(1)
+    .lean();
+  return !!paidPayment;
+};
 
 const buildCreatorAcceptedBy = async ({ req, cartId }) => {
   if (!req?.user) return null;
@@ -1502,8 +1543,11 @@ const createOrder = async (req, res) => {
       selectedAddons, // Add-ons selected by customer
       takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
       sourceQrType,
+      officeName,
       officeDeliveryCharge,
+      officePaymentMode,
       idempotencyKey,
+      paymentRequiredBeforeProceeding: requestedPaymentRequiredBeforeProceeding,
     } = req.body;
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
     let { tableNumber } = req.body;
@@ -1527,7 +1571,7 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const normalizedServiceType = String(serviceType || "DINE_IN")
+    let normalizedServiceType = String(serviceType || "DINE_IN")
       .trim()
       .toUpperCase();
     const normalizedOrderType =
@@ -1535,6 +1579,11 @@ const createOrder = async (req, res) => {
     let normalizedSourceQrType =
       sourceQrType === "OFFICE" ? "OFFICE" : "TABLE";
     const normalizedOfficeDeliveryCharge = Number(officeDeliveryCharge);
+    const requestedOfficeName =
+      typeof officeName === "string" ? officeName.trim() : "";
+    const requestedOfficePaymentMode = String(officePaymentMode || "")
+      .trim()
+      .toUpperCase();
     let officeTableContext = null;
 
     // Fallback inference: if frontend misses sourceQrType but provides tableId,
@@ -1542,13 +1591,34 @@ const createOrder = async (req, res) => {
     if (tableId && mongoose.Types.ObjectId.isValid(tableId)) {
       officeTableContext = await Table.findById(tableId)
         .select(
-          "qrContextType officeName officeAddress officePhone officeDeliveryCharge cartId",
+          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode cartId",
         )
         .lean();
       if (officeTableContext?.qrContextType === "OFFICE") {
         normalizedSourceQrType = "OFFICE";
       }
     }
+
+    // OFFICE QR must stay takeaway-like even if stale frontend state sends DINE_IN.
+    if (
+      normalizedSourceQrType === "OFFICE" &&
+      normalizedServiceType === "DINE_IN"
+    ) {
+      normalizedServiceType = "TAKEAWAY";
+      console.log(
+        "[ORDER] OFFICE QR request tried DINE_IN serviceType. Forced to TAKEAWAY.",
+      );
+    }
+
+    const normalizedOfficePaymentMode = normalizeOfficePaymentMode(
+      requestedOfficePaymentMode,
+      normalizeOfficePaymentMode(officeTableContext?.officePaymentMode, "ONLINE"),
+    );
+    const resolvedOfficeName =
+      normalizedSourceQrType === "OFFICE"
+        ? requestedOfficeName ||
+          String(officeTableContext?.officeName || "").trim()
+        : "";
 
     // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
     const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
@@ -1590,6 +1660,12 @@ const createOrder = async (req, res) => {
       normalizedServiceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
     const isOfficeQrOrder = normalizedSourceQrType === "OFFICE";
     const isOfficeDeliveryOrder = isOfficeQrOrder && !isPickup;
+    const isCustomerSelectedOnlineFirst =
+      Boolean(requestedPaymentRequiredBeforeProceeding) &&
+      !isPickup &&
+      !isDelivery &&
+      (normalizedServiceType === "DINE_IN" ||
+        normalizedServiceType === "TAKEAWAY");
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -2110,7 +2186,13 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const shouldStartPendingForPayment = isPickup || isDelivery;
+    const officeRequiresOnlinePayment =
+      isOfficeQrOrder && normalizedOfficePaymentMode === "ONLINE";
+    const shouldStartPendingForPayment =
+      isPickup ||
+      isDelivery ||
+      officeRequiresOnlinePayment ||
+      isCustomerSelectedOnlineFirst;
     const effectiveDeliveryOrder = isDelivery || isOfficeDeliveryOrder;
 
     const orderData = {
@@ -2123,15 +2205,24 @@ const createOrder = async (req, res) => {
       // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
       sourceQrType: normalizedSourceQrType,
+      officeName:
+        normalizedSourceQrType === "OFFICE" && resolvedOfficeName
+          ? resolvedOfficeName
+          : undefined,
+      officePaymentMode:
+        normalizedSourceQrType === "OFFICE"
+          ? normalizedOfficePaymentMode
+          : null,
       selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
       // UNIFIED STATUS FLOW:
-      // - PICKUP/DELIVERY: Start as 'Pending' (awaiting payment confirmation)
-      // - DINE_IN and regular TAKEAWAY: Start as 'Confirmed'
+      // - PICKUP/DELIVERY + OFFICE QR (ONLINE): Start as 'Pending' (awaiting payment confirmation)
+      // - OFFICE QR (COD), DINE_IN and regular TAKEAWAY: Start as 'Confirmed'
       status: shouldStartPendingForPayment ? "Pending" : "Confirmed",
       // Payment tracking: All orders start as UNPAID
       paymentStatus: "UNPAID",
       paymentMode: null,
+      paymentRequiredBeforeProceeding: isCustomerSelectedOnlineFirst,
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
     };
@@ -2238,6 +2329,9 @@ const createOrder = async (req, res) => {
         if (!orderData.customerName && fallbackOfficeName) {
           orderData.customerName = fallbackOfficeName;
         }
+        if (!orderData.officeName && fallbackOfficeName) {
+          orderData.officeName = fallbackOfficeName;
+        }
         if (!orderData.customerMobile && fallbackOfficePhone) {
           orderData.customerMobile = fallbackOfficePhone;
         }
@@ -2306,7 +2400,11 @@ const createOrder = async (req, res) => {
     });
     if (creatorAssignment) {
       orderData.acceptedBy = creatorAssignment;
-      if (orderData.serviceType !== "DINE_IN" && orderData.status === "Pending") {
+      if (
+        orderData.serviceType !== "DINE_IN" &&
+        orderData.status === "Pending" &&
+        !requiresPaymentBeforeProceeding(orderData)
+      ) {
         orderData.status = "Confirmed";
       }
     }
@@ -2722,17 +2820,12 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
-    // PICKUP/DELIVERY: do NOT notify admin until payment is complete (order will appear when status becomes Paid)
-    const isPickupOrDeliveryOrder =
-      order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY" ||
-      order.serviceType === "PICKUP" ||
-      order.serviceType === "DELIVERY";
-    const isTakeawayAwaitingPayment =
-      isPickupOrDeliveryOrder && order.status === "Pending";
+    // Orders awaiting mandatory payment should stay hidden until payment is complete.
+    const isOrderAwaitingPayment =
+      requiresPaymentBeforeProceeding(order) && order.status === "Pending";
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe && !isTakeawayAwaitingPayment) {
+    if (order.cartId && io && emitToCafe && !isOrderAwaitingPayment) {
       // Only emit to admin panel - customer frontend uses polling
       emitToCafe(io, order.cartId.toString(), "order:created", order);
       emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
@@ -2752,7 +2845,7 @@ const createOrder = async (req, res) => {
     }
 
     // Print KOT to printer (non-blocking). Skip for takeaway awaiting payment – print when payment is done.
-    if (!isTakeawayAwaitingPayment) {
+    if (!isOrderAwaitingPayment) {
       printKOT(order, kot, 0).catch((err) => {
         console.error("[ORDER] Failed to print KOT:", err);
       });
@@ -3324,15 +3417,21 @@ const getOrders = async (req, res) => {
     }
     // For super_admin, no query-level restriction (see all orders)
 
-    // PICKUP/DELIVERY: hide unpaid Pending orders from cart admin until payment is done.
-    // Regular TAKEAWAY should follow dine-in visibility.
+    // Hide unpaid pending orders from admin/staff when payment is mandatory:
+    // - PICKUP/DELIVERY pending orders
+    // - OFFICE QR + ONLINE pending orders
     query.$and = query.$and || [];
     query.$and.push({
       $or: [
         { status: { $ne: "Pending" } },
         {
+          paymentRequiredBeforeProceeding: { $ne: true },
           orderType: { $nin: ["PICKUP", "DELIVERY"] },
           serviceType: { $nin: ["PICKUP", "DELIVERY"] },
+          $or: [
+            { sourceQrType: { $ne: "OFFICE" } },
+            { officePaymentMode: { $ne: "ONLINE" } },
+          ],
         },
       ],
     });
@@ -3949,9 +4048,14 @@ const acceptOrder = async (req, res) => {
     const assignmentDisplayType = resolveAssignmentDisplayType(accepterRole);
 
     // Atomic update: first to accept wins.
-    // For takeaway flows we normalize Pending -> Confirmed when accepted.
+    // For non-dine-in flows we normalize Pending -> Confirmed when accepted,
+    // except orders that must stay pending until payment is complete.
     const setFields = { acceptedBy };
-    if (order.serviceType !== "DINE_IN") {
+    if (
+      order.serviceType !== "DINE_IN" &&
+      order.status === "Pending" &&
+      !requiresPaymentBeforeProceeding(order)
+    ) {
       setFields.status = "Confirmed";
     }
     const updatedOrder = await Order.findOneAndUpdate(
@@ -4150,12 +4254,7 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
-    // PICKUP/DELIVERY: block order from proceeding until payment is complete.
-    const isPickupOrDeliveryOrder =
-      order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY" ||
-      order.serviceType === "PICKUP" ||
-      order.serviceType === "DELIVERY";
+    // Payment-gated orders must stay pending until payment is complete.
     const isProceedingStatus = [
       "Confirmed",
       "Preparing",
@@ -4165,19 +4264,8 @@ const updateOrderStatus = async (req, res) => {
       "Completed",
       "Served",
     ].includes(status);
-    if (isPickupOrDeliveryOrder && isProceedingStatus) {
-      const alreadyPaid =
-        order.status === "Paid" || order.paymentStatus === "PAID";
-      let paymentComplete = alreadyPaid;
-      if (!paymentComplete) {
-        const paidPayment = await Payment.findOne({
-          orderId: order._id,
-          status: "PAID",
-        })
-          .limit(1)
-          .lean();
-        paymentComplete = !!paidPayment;
-      }
+    if (requiresPaymentBeforeProceeding(order) && isProceedingStatus) {
+      const paymentComplete = await isOrderPaymentComplete(order);
       if (!paymentComplete) {
         return res.status(400).json({
           message:

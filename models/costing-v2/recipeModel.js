@@ -276,8 +276,16 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         // This ensures BOM cost matches purchase price exactly (same as inventory)
         if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
           // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          try {
+            const purchaseUom = lastPurchase.uom || ingredient.uom;
+            const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } catch (conversionError) {
+            ingredientsWithoutPurchases.push(
+              `${ingredient.name || item.ingredientId?.toString()} (invalid purchase unit conversion: ${lastPurchase.uom || ingredient.uom} to ${ingredient.baseUnit})`
+            );
+            ingredientCost = 0;
+          }
         } else {
           // Fallback: calculate from costAllocated
           const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
@@ -323,8 +331,16 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         // This ensures BOM cost matches purchase price exactly (same as inventory)
         if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
           // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          try {
+            const purchaseUom = lastPurchase.uom || ingredient.uom;
+            const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } catch (conversionError) {
+            ingredientsWithoutPurchases.push(
+              `${ingredient.name || item.ingredientId?.toString()} (invalid purchase unit conversion: ${lastPurchase.uom || ingredient.uom} to ${ingredient.baseUnit})`
+            );
+            ingredientCost = 0;
+          }
         } else {
           // Fallback: calculate from costAllocated
           const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;
@@ -378,8 +394,16 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
         // This ensures BOM cost matches purchase price exactly (same as inventory)
         if (lastPurchase.unitPrice != null && lastPurchase.unitPrice > 0) {
           // Use exact purchase price - convert to base unit
-          const conversionFactor = ingredient.convertToBaseUnit(1, lastPurchase.uom || ingredient.uom);
-          ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          try {
+            const purchaseUom = lastPurchase.uom || ingredient.uom;
+            const conversionFactor = ingredient.convertToBaseUnit(1, purchaseUom);
+            ingredientCost = lastPurchase.unitPrice / conversionFactor;
+          } catch (conversionError) {
+            ingredientsWithoutPurchases.push(
+              `${ingredient.name || item.ingredientId?.toString()} (invalid purchase unit conversion: ${lastPurchase.uom || ingredient.uom} to ${ingredient.baseUnit})`
+            );
+            ingredientCost = 0;
+          }
         } else {
           // Fallback: calculate from costAllocated
           const lastPurchaseQty = lastPurchase.qtyInBaseUnit || lastPurchase.qty;

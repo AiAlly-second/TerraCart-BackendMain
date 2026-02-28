@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const http = require("http");
 const https = require("https");
+const crypto = require("crypto");
 const { Payment, PAYMENT_METHODS, PAYMENT_STATUSES } = require("../models/paymentModel");
 const Order = require("../models/orderModel");
 const PaymentQR = require("../models/paymentQrModel");
@@ -258,6 +259,120 @@ const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
   )}&cu=INR`;
 };
 
+const isRazorpayConfigured = () =>
+  Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+
+const buildRazorpayReceipt = (orderId) => {
+  const sanitizedOrderId = String(orderId || "")
+    .replace(/[^a-zA-Z0-9._-]/g, "")
+    .slice(-24);
+  const stamp = Date.now().toString(36).slice(-8);
+  const receipt = `tc_${sanitizedOrderId || "order"}_${stamp}`;
+  return receipt.slice(0, 40);
+};
+
+const createRazorpayOrder = ({ amount, orderId }) =>
+  new Promise((resolve, reject) => {
+    if (!isRazorpayConfigured()) {
+      reject(new Error("Razorpay credentials are not configured on server."));
+      return;
+    }
+
+    const amountInPaise = Math.max(0, Math.round(Number(amount || 0) * 100));
+    if (!Number.isFinite(amountInPaise) || amountInPaise <= 0) {
+      reject(new Error("Invalid payment amount for Razorpay order."));
+      return;
+    }
+
+    const requestBody = JSON.stringify({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: buildRazorpayReceipt(orderId),
+      notes: {
+        orderId: String(orderId || ""),
+      },
+    });
+
+    const basicAuth = Buffer.from(
+      `${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`,
+    ).toString("base64");
+
+    const request = https.request(
+      {
+        hostname: "api.razorpay.com",
+        path: "/v1/orders",
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${basicAuth}`,
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(requestBody),
+        },
+      },
+      (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => {
+          const rawBody = Buffer.concat(chunks).toString("utf8");
+          let parsedBody = {};
+
+          if (rawBody) {
+            try {
+              parsedBody = JSON.parse(rawBody);
+            } catch (_error) {
+              reject(new Error("Unable to parse Razorpay order response."));
+              return;
+            }
+          }
+
+          const isSuccess = response.statusCode >= 200 && response.statusCode < 300;
+          if (isSuccess && parsedBody?.id) {
+            resolve(parsedBody);
+            return;
+          }
+
+          reject(
+            new Error(
+              parsedBody?.error?.description ||
+                parsedBody?.description ||
+                "Failed to create Razorpay order.",
+            ),
+          );
+        });
+      },
+    );
+
+    request.on("error", (error) => reject(error));
+    request.setTimeout(15000, () => {
+      request.destroy();
+      reject(new Error("Razorpay order request timed out."));
+    });
+
+    request.write(requestBody);
+    request.end();
+  });
+
+const verifyRazorpaySignature = ({
+  razorpayOrderId,
+  razorpayPaymentId,
+  razorpaySignature,
+}) => {
+  if (!isRazorpayConfigured()) return false;
+  const payload = `${razorpayOrderId}|${razorpayPaymentId}`;
+  const expectedSignature = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(payload)
+    .digest("hex");
+
+  return expectedSignature === razorpaySignature;
+};
+
+const isRazorpayPaymentRecord = (payment) => {
+  const gateway = String(payment?.metadata?.gateway || "")
+    .trim()
+    .toUpperCase();
+  return gateway === "RAZORPAY" || Boolean(payment?.metadata?.razorpayOrderId);
+};
+
 const getSelectedAddonsAmount = (order) => {
   if (!Array.isArray(order?.selectedAddons)) return 0;
   return order.selectedAddons.reduce((sum, addon) => {
@@ -301,6 +416,32 @@ const getOrderAmount = (order) => {
   const totalAmount = kotAmount + addonsAmount;
   if (!Number.isFinite(totalAmount) || totalAmount <= 0) return null;
   return Number(totalAmount.toFixed(2));
+};
+
+const normalizeOfficePaymentMode = (value, fallback = "ONLINE") => {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "ONLINE" || normalized === "COD" || normalized === "BOTH") {
+    return normalized;
+  }
+  return fallback;
+};
+
+const requiresPaymentBeforeProceeding = (order) => {
+  if (!order) return false;
+  if (Boolean(order.paymentRequiredBeforeProceeding)) return true;
+
+  const normalizedSourceQrType = String(order.sourceQrType || "")
+    .trim()
+    .toUpperCase();
+  const normalizedOfficePaymentMode = normalizeOfficePaymentMode(
+    order.officePaymentMode,
+    "ONLINE",
+  );
+
+  return (
+    normalizedSourceQrType === "OFFICE" &&
+    normalizedOfficePaymentMode === "ONLINE"
+  );
 };
 
 const formatPaymentResponse = (payment) => ({
@@ -474,6 +615,93 @@ const buildOrderScopeQuery = (scope, baseQuery = {}) => {
   return query;
 };
 
+const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
+  if (!payment || !order) return;
+
+  const isPaymentFirstOrder = requiresPaymentBeforeProceeding(order);
+  let needsFallbackConsumption = false;
+
+  order.paidAt = payment.paidAt || new Date();
+  order.paymentStatus = "PAID";
+  order.paymentMode = payment.method === "ONLINE" ? "ONLINE" : "CASH";
+
+  if (isPaymentFirstOrder) {
+    if (order.status === "Pending") {
+      order.status = "Confirmed";
+    }
+  } else {
+    order.status = "Paid";
+    needsFallbackConsumption = !order.inventoryDeducted;
+    if (needsFallbackConsumption) {
+      order.inventoryDeducted = true;
+      order.inventoryDeductedAt = new Date();
+    }
+  }
+  await order.save();
+
+  const io = req.app.get("io");
+  const emitToCafe = req.app.get("emitToCafe");
+  if (io) {
+    io.emit("paymentUpdated", formatPaymentResponse(payment));
+    io.emit("orderUpdated", order);
+  }
+  if (order.cartId && io && emitToCafe) {
+    emitToCafe(io, order.cartId.toString(), "order:created", order);
+    emitToCafe(io, order.cartId.toString(), "newOrder", order);
+    emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+    emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+  }
+
+  if (!isPaymentFirstOrder) {
+    await releaseTableForOrder(order, io, emitToCafe);
+  }
+
+  if (!isPaymentFirstOrder && needsFallbackConsumption) {
+    const userId =
+      req.user && req.user._id
+        ? req.user._id
+        : order.cartId && (order.cartId._id || order.cartId);
+
+    if (userId) {
+      console.log(
+        `[COSTING] Fallback: Order ${order._id} paid via ${source} - triggering consumption`,
+      );
+      consumeIngredientsForOrder(order, userId)
+        .then(async (consumptionResult) => {
+          if (consumptionResult.success) {
+            console.log(
+              `[COSTING] Fallback consumption success for order ${order._id}`,
+            );
+          } else {
+            const isBenign =
+              consumptionResult.alreadyProcessed ||
+              consumptionResult.message?.includes("No new items");
+            if (!isBenign && consumptionResult.summary?.errors) {
+              consumptionResult.summary.errors.forEach((e) =>
+                console.warn(`[COSTING] ${e.item}: ${e.error}`),
+              );
+            }
+            if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
+              await resetInventoryDeductionFlag(order._id);
+            }
+          }
+        })
+        .catch(async (err) => {
+          console.error(
+            `[COSTING] Fallback consumption error for order ${order._id}:`,
+            err,
+          );
+          await resetInventoryDeductionFlag(order._id);
+        });
+    } else {
+      console.warn(
+        `[COSTING] Skipping fallback consumption for order ${order._id}: no userId`,
+      );
+      await resetInventoryDeductionFlag(order._id);
+    }
+  }
+};
+
 exports.createPaymentIntent = async (req, res) => {
   try {
     const { orderId, method = "ONLINE", description } = req.body || {};
@@ -491,10 +719,40 @@ exports.createPaymentIntent = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
+    const isOfficeOrder =
+      String(order.sourceQrType || "").trim().toUpperCase() === "OFFICE";
+    const officePaymentMode = isOfficeOrder
+      ? normalizeOfficePaymentMode(order.officePaymentMode, "ONLINE")
+      : null;
+
+    if (officePaymentMode === "ONLINE" && method !== "ONLINE") {
+      return res.status(400).json({
+        message:
+          "This office QR accepts online payment only. Please choose online payment.",
+        code: "OFFICE_PAYMENT_MODE_ONLINE_ONLY",
+      });
+    }
+
+    if (officePaymentMode === "COD" && method !== "CASH") {
+      return res.status(400).json({
+        message:
+          "This office QR accepts Cash on Delivery only. Please choose cash payment.",
+        code: "OFFICE_PAYMENT_MODE_COD_ONLY",
+      });
+    }
+
     const amount = getOrderAmount(order);
     if (!amount || amount <= 0) {
       return res.status(400).json({
         message: "Order has no billable amount yet. Please add items before payment.",
+      });
+    }
+
+    if (method === "ONLINE" && !isRazorpayConfigured()) {
+      return res.status(503).json({
+        message:
+          "Online payment is temporarily unavailable. Razorpay is not configured.",
+        code: "RAZORPAY_NOT_CONFIGURED",
       });
     }
 
@@ -519,16 +777,56 @@ exports.createPaymentIntent = async (req, res) => {
     };
 
     if (method === "ONLINE") {
-      // Get cart scope from order to find cart-admin uploaded UPI QR
-      const cartScopeId = order.cartId || order.cafeId || null;
-      payload.upiPayload = await buildUpiPayload(orderId, amount, cartScopeId);
+      const razorpayOrder = await createRazorpayOrder({ amount, orderId });
+      payload.providerReference = razorpayOrder.id;
+      payload.metadata = {
+        gateway: "RAZORPAY",
+        razorpayOrderId: razorpayOrder.id,
+        razorpayReceipt: razorpayOrder.receipt || "",
+        razorpayAmount: razorpayOrder.amount || Math.round(amount * 100),
+        razorpayCurrency: razorpayOrder.currency || "INR",
+        razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+      };
+      payload.description = description || `Razorpay payment for order ${orderId}`;
     }
 
     const payment = await Payment.create(payload);
+    const normalizedOrderType = String(order.orderType || "")
+      .trim()
+      .toUpperCase();
+    const normalizedServiceType = String(order.serviceType || "")
+      .trim()
+      .toUpperCase();
+    const isPickupOrder =
+      normalizedOrderType === "PICKUP" || normalizedServiceType === "PICKUP";
+    const shouldAdvanceOrderForCashSelection =
+      method === "CASH" &&
+      (Boolean(order.paymentRequiredBeforeProceeding) ||
+        (isPickupOrder && !isOfficeOrder));
+
+    if (shouldAdvanceOrderForCashSelection) {
+      order.paymentRequiredBeforeProceeding = false;
+      if (order.status === "Pending") {
+        order.status = "Confirmed";
+      }
+      order.paymentMode = "CASH";
+      await order.save();
+    }
 
     const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
     if (io) {
       io.emit("paymentCreated", formatPaymentResponse(payment));
+      if (shouldAdvanceOrderForCashSelection) {
+        io.emit("orderUpdated", order);
+      }
+    }
+
+    if (shouldAdvanceOrderForCashSelection && order.cartId && io && emitToCafe) {
+      emitToCafe(io, order.cartId.toString(), "order:created", order);
+      emitToCafe(io, order.cartId.toString(), "newOrder", order);
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
     }
 
     return res.status(201).json(formatPaymentResponse(payment));
@@ -651,19 +949,23 @@ exports.getLatestPaymentForOrder = async (req, res) => {
           recalculatedAmount &&
           Math.abs(recalculatedAmount - currentAmount) > 0.009
         ) {
-          payment.amount = recalculatedAmount;
+          // Razorpay orders are amount-locked at gateway order creation time.
+          // Keep recorded amount unchanged for existing Razorpay intents.
+          if (!isRazorpayPaymentRecord(payment)) {
+            payment.amount = recalculatedAmount;
 
-          // Rebuild UPI payload so deep link amount matches latest bill.
-          if (payment.method === "ONLINE") {
-            const cartScopeId = order.cartId || order.cafeId || null;
-            payment.upiPayload = await buildUpiPayload(
-              orderId,
-              recalculatedAmount,
-              cartScopeId,
-            );
+            // Legacy UPI payload updates are only for non-Razorpay online records.
+            if (payment.method === "ONLINE") {
+              const cartScopeId = order.cartId || order.cafeId || null;
+              payment.upiPayload = await buildUpiPayload(
+                orderId,
+                recalculatedAmount,
+                cartScopeId,
+              );
+            }
+
+            await payment.save();
           }
-
-          await payment.save();
         }
       }
     }
@@ -748,73 +1050,116 @@ exports.markPaymentPaid = async (req, res) => {
     payment.paidAt = new Date();
     await payment.save();
 
-    if (order) {
-      order.status = "Paid";
-      order.paidAt = new Date();
-      const needsFallbackConsumption = !order.inventoryDeducted;
-      if (needsFallbackConsumption) {
-        order.inventoryDeducted = true;
-        order.inventoryDeductedAt = new Date();
-      }
-      await order.save();
+    await finalizePaidPaymentAndOrder({
+      payment,
+      order,
+      req,
+      source: "markPaymentPaid",
+    });
+
+    return res.json(formatPaymentResponse(payment));
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+exports.verifyRazorpayPayment = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      razorpay_payment_id: razorpayPaymentId,
+      razorpay_order_id: razorpayOrderId,
+      razorpay_signature: razorpaySignature,
+    } = req.body || {};
+
+    if (!razorpayPaymentId || !razorpayOrderId || !razorpaySignature) {
+      return res.status(400).json({
+        message:
+          "razorpay_payment_id, razorpay_order_id and razorpay_signature are required.",
+      });
+    }
+
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({
+        message:
+          "Online payment verification is temporarily unavailable. Razorpay is not configured.",
+        code: "RAZORPAY_NOT_CONFIGURED",
+      });
+    }
+
+    const payment = await Payment.findById(id);
+    if (!payment) {
+      return res.status(404).json({ message: "Payment not found" });
+    }
+
+    if (payment.method !== "ONLINE") {
+      return res.status(400).json({ message: "This is not an online payment." });
+    }
+
+    if (payment.status === "PAID") {
+      return res.json(formatPaymentResponse(payment));
+    }
+
+    if (["CANCELLED", "FAILED"].includes(payment.status)) {
+      return res.status(400).json({ message: "Payment is already finalised" });
+    }
+
+    const expectedOrderId =
+      payment.metadata?.razorpayOrderId || payment.providerReference || "";
+    if (!expectedOrderId || expectedOrderId !== razorpayOrderId) {
+      return res.status(400).json({ message: "Razorpay order does not match payment." });
+    }
+
+    const isSignatureValid = verifyRazorpaySignature({
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+    });
+
+    if (!isSignatureValid) {
+      payment.status = "FAILED";
+      payment.metadata = {
+        ...(payment.metadata || {}),
+        gateway: "RAZORPAY",
+        razorpayOrderId,
+        razorpayPaymentId,
+        signatureVerified: false,
+        verificationFailedAt: new Date().toISOString(),
+      };
+      await payment.save();
+
       const io = req.app.get("io");
-      const emitToCafe = req.app.get("emitToCafe");
       if (io) {
         io.emit("paymentUpdated", formatPaymentResponse(payment));
-        io.emit("orderUpdated", order);
       }
-      if (order.cartId && io && emitToCafe) {
-        emitToCafe(io, order.cartId.toString(), "order:created", order);
-        emitToCafe(io, order.cartId.toString(), "newOrder", order);
-        emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-        emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
-      }
-      await releaseTableForOrder(order, io, emitToCafe);
 
-      if (needsFallbackConsumption) {
-        const userId =
-          req.user && req.user._id
-            ? req.user._id
-            : order.cartId && (order.cartId._id || order.cartId);
-        if (userId) {
-          console.log(
-            `[COSTING] Fallback: Order ${order._id} paid via markPaymentPaid - triggering consumption`,
-          );
-          consumeIngredientsForOrder(order, userId)
-            .then(async (consumptionResult) => {
-              if (consumptionResult.success) {
-                console.log(
-                  `[COSTING] Fallback consumption success for order ${order._id}`,
-                );
-              } else {
-                const isBenign =
-                  consumptionResult.alreadyProcessed ||
-                  consumptionResult.message?.includes("No new items");
-                if (!isBenign && consumptionResult.summary?.errors) {
-                  consumptionResult.summary.errors.forEach((e) =>
-                    console.warn(`[COSTING] ${e.item}: ${e.error}`),
-                  );
-                }
-                if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
-                  await resetInventoryDeductionFlag(order._id);
-                }
-              }
-            })
-            .catch(async (err) => {
-              console.error(
-                `[COSTING] Fallback consumption error for order ${order._id}:`,
-                err,
-              );
-              await resetInventoryDeductionFlag(order._id);
-            });
-        } else {
-          console.warn(
-            `[COSTING] Skipping fallback consumption for order ${order._id}: no userId`,
-          );
-          await resetInventoryDeductionFlag(order._id);
-        }
-      }
+      return res.status(400).json({ message: "Razorpay signature verification failed." });
     }
+
+    const order = await Order.findById(payment.orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found for this payment" });
+    }
+
+    payment.status = "PAID";
+    payment.paidAt = new Date();
+    payment.providerReference = razorpayPaymentId;
+    payment.metadata = {
+      ...(payment.metadata || {}),
+      gateway: "RAZORPAY",
+      razorpayOrderId,
+      razorpayPaymentId,
+      signatureVerified: true,
+      razorpayVerifiedAt: new Date().toISOString(),
+    };
+    await payment.save();
+
+    await finalizePaidPaymentAndOrder({
+      payment,
+      order,
+      req,
+      source: "razorpayVerification",
+    });
 
     return res.json(formatPaymentResponse(payment));
   } catch (err) {

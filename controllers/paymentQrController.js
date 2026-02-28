@@ -316,14 +316,17 @@ exports.getActivePaymentQR = async (req, res) => {
 
     const scopeOrFilter = buildScopeOrFilter(scopeCartId);
     if (!scopeOrFilter.length) {
-      return res.status(404).json({ message: "No scoped QR code found" });
+      // No scoped cart is a valid state for this request context.
+      // Keep response shape consistent with public endpoint.
+      return res.json(null);
     }
     const query = { isActive: true, $or: scopeOrFilter };
 
     let qrCode = await PaymentQR.findOne(query).sort({ createdAt: -1 });
 
     if (!qrCode) {
-      return res.status(404).json({ message: "No active QR code found" });
+      // No active QR is a valid state (before first upload / after deletion).
+      return res.json(null);
     }
     qrCode = await persistDecodedQrIdentity(qrCode);
 
