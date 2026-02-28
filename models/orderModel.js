@@ -32,6 +32,28 @@ const kotLineSchema = new mongoose.Schema(
     gst: { type: Number, required: true },
     totalAmount: { type: Number, required: true },
     createdAt: { type: Date, default: Date.now },
+    isPrinted: { type: Boolean, default: false },
+    printAttemptCount: { type: Number, default: 0, min: 0 },
+    lastPrintStatus: {
+      type: String,
+      enum: ["pending", "queued", "success", "failed"],
+      default: "pending",
+    },
+    lastPrintMessage: { type: String, default: "" },
+    lastPrintRequestedAt: { type: Date, default: null },
+    lastPrintedAt: { type: Date, default: null },
+    lastPrinterResponse: { type: String, default: "" },
+    // Agent-print idempotency: per-KOT claim/complete on order
+    printKey: { type: String, default: "" },
+    printStatus: {
+      type: String,
+      enum: ["pending", "claimed", "printed", "failed"],
+      default: "pending",
+    },
+    claimedBy: { type: String, default: "" },
+    claimedAt: { type: Date, default: null },
+    printedAt: { type: Date, default: null },
+    lastPrintError: { type: String, default: "" },
   },
   { _id: false }
 );

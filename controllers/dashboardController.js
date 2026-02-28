@@ -71,12 +71,58 @@ exports.getDashboardStats = async (req, res) => {
         { cafeId: cafeId }, // Backward compatibility for old records
       ],
     };
+    /*
+    const normalizedRole = String(req.user?.role || "").toLowerCase();
+    const requireAcceptedKotAssignment =
+      normalizedRole === "cook" || normalizedRole === "manager";
+
+    const acceptedKotScope = requireAcceptedKotAssignment
+      ? {
+        $or: [
+          { "acceptedBy.employeeId": { $exists: true, $ne: null } },
+          { "acceptedBy.employeeName": { $exists: true, $nin: ["", null] } },
+        ],
+      }
+      : null;
+    */
+    const requireAcceptedKotAssignment = false;
+    const acceptedKotScope = null;
+
+    const buildKotStatusQuery = (statusMatchers) => {
+      const clauses = [
+        orderScope,
+        {
+          $or: statusMatchers.map((matcher) => ({ status: matcher })),
+        },
+      ];
+      if (acceptedKotScope) {
+        clauses.push(acceptedKotScope);
+      }
+      return { $and: clauses };
+    };
+
+    const pendingKotStatusMatchers = [
+      /^pending$/i,
+      /^confirmed$/i,
+      /^accept$/i,
+      /^accepted$/i,
+    ];
+    const preparingKotStatusMatchers = [
+      /^preparing$/i,
+      /^being prepared$/i,
+      /^beingprepared$/i,
+    ];
+    const readyKotStatusMatchers = requireAcceptedKotAssignment
+      ? [/^ready$/i, /^served$/i, /^completed$/i, /^finalized$/i]
+      : [/^ready$/i];
 
     // Run all queries in parallel for faster response
     const [
       activeOrders,
       todayOrders,
       pendingKOTs,
+      preparingKOTs,
+      readyKOTs,
       lowStockItems,
       todayAttendance,
       occupiedTables,
@@ -90,7 +136,26 @@ exports.getDashboardStats = async (req, res) => {
           { status: /^paid$/i },
           { status: /^cancelled$/i },
           { status: /^returned$/i },
+          { status: /^rejected$/i },
+          { status: /^completed$/i },
+          { status: /^finalized$/i },
+          { status: /^closed$/i },
           { status: /^exit$/i },
+          {
+            $and: [
+              { status: /^served$/i },
+              {
+                $or: [
+                  { serviceType: /^takeaway$/i },
+                  { serviceType: /^pickup$/i },
+                  { serviceType: /^delivery$/i },
+                  { orderType: /^takeaway$/i },
+                  { orderType: /^pickup$/i },
+                  { orderType: /^delivery$/i },
+                ],
+              },
+            ],
+          },
         ],
       }),
 
@@ -122,21 +187,14 @@ exports.getDashboardStats = async (req, res) => {
         },
       ]),
 
-      // Pending KOTs (orders with status pending/preparing/ready)
-      // Keep cart scope and status scope in separate clauses to avoid key collisions.
-      Order.countDocuments({
-        $and: [
-          orderScope,
-          {
-            $or: [
-              { status: /^pending$/i },
-              { status: /^confirmed$/i },
-              { status: /^preparing$/i },
-              { status: /^ready$/i },
-            ],
-          },
-        ],
-      }),
+      // Pending KOTs (orders waiting for kitchen start).
+      Order.countDocuments(buildKotStatusQuery(pendingKotStatusMatchers)),
+
+      // Preparing KOTs.
+      Order.countDocuments(buildKotStatusQuery(preparingKotStatusMatchers)),
+
+      // Ready KOTs.
+      Order.countDocuments(buildKotStatusQuery(readyKotStatusMatchers)),
 
       // Low stock items (threshold can be configured)
       // InventoryItem model uses cartId, support cafeId for backward compatibility
@@ -196,6 +254,8 @@ exports.getDashboardStats = async (req, res) => {
         todayRevenue,
         pendingTasks,
         pendingKOTs,
+        preparingKOTs,
+        readyKOTs,
         lowStockItems,
         todayAttendance,
         occupiedTables,

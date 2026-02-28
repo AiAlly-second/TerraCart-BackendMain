@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const { protect, authorize } = require("../middleware/authMiddleware");
-const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
 const Order = require("../models/orderModel");
 const Employee = require("../models/employeeModel");
 
@@ -28,6 +27,31 @@ const getCafeId = async (user) => {
   return null;
 };
 
+const KOT_TERMINAL_STATUSES = new Set([
+  "paid",
+  "cancelled",
+  "returned",
+  "rejected",
+  "closed",
+  "exit",
+]);
+
+const normalizeStatusKey = (status) =>
+  String(status || "").trim().toLowerCase().replace(/_/g, " ");
+
+const isCookOrManagerRole = (role) =>
+  ["cook", "manager"].includes(String(role || "").toLowerCase());
+
+const hasAssignedStaff = (order) => {
+  if (!order || !order.acceptedBy) return false;
+  const employeeId = order.acceptedBy.employeeId;
+  const employeeName = order.acceptedBy.employeeName;
+  return Boolean(
+    (employeeId && employeeId.toString().trim()) ||
+      (typeof employeeName === "string" && employeeName.trim())
+  );
+};
+
 router.use(protect);
 
 // Get all KOTs (KOTs are stored as kotLines in orders)
@@ -44,10 +68,19 @@ router.get("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", 
     })
       .sort({ createdAt: -1 })
       .lean();
+    // const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
 
     // Extract KOTs from orders (includes both TAKEAWAY and DINE_IN orders)
     const kots = [];
     orders.forEach((order) => {
+      const isAssigned = hasAssignedStaff(order);
+      /*
+      if (enforceAcceptedKotFlow) {
+        if (!isAssigned) return;
+        if (KOT_TERMINAL_STATUSES.has(normalizeStatusKey(order.status))) return;
+      }
+      */
+
       if (order.kotLines && order.kotLines.length > 0) {
         order.kotLines.forEach((kot, index) => {
           kots.push({
@@ -60,6 +93,8 @@ router.get("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", 
             serviceType: order.serviceType || 'DINE_IN', // Include serviceType for filtering
             status: order.status,
             orderStatus: order.status, // Alias for compatibility
+            acceptedBy: order.acceptedBy || null,
+            isAssigned,
             items: kot.items,
             subtotal: kot.subtotal,
             gst: kot.gst,
@@ -84,16 +119,51 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
       return res.status(403).json({ message: "No cafe associated with this user" });
     }
 
-    const orders = await Order.find({
+    // const enforceAcceptedKotFlow = isCookOrManagerRole(req.user?.role);
+    const orderQuery = {
       cartId: cafeId,
-      status: { $in: ["Pending", "Confirmed", "Preparing"] },
+      status: {
+        $in: [
+          "Pending",
+          "Confirmed",
+          "Accept",
+          "Accepted",
+          "Preparing",
+          "Being Prepared",
+          "BeingPrepared",
+          "Ready",
+          "Served",
+          "Completed",
+          "Finalized",
+        ],
+      },
       kotLines: { $exists: true, $ne: [] },
-    })
+    };
+    /*
+    if (enforceAcceptedKotFlow) {
+      orderQuery.$or = [
+        { "acceptedBy.employeeId": { $exists: true, $ne: null } },
+        { "acceptedBy.employeeName": { $exists: true, $nin: ["", null] } },
+      ];
+    }
+    */
+
+    const orders = await Order.find(orderQuery)
       .sort({ createdAt: -1 })
       .lean();
 
     const kots = [];
     orders.forEach((order) => {
+      /*
+      if (
+        enforceAcceptedKotFlow &&
+        KOT_TERMINAL_STATUSES.has(normalizeStatusKey(order.status))
+      ) {
+        return;
+      }
+      */
+
+      const isAssigned = hasAssignedStaff(order);
       if (order.kotLines && order.kotLines.length > 0) {
         order.kotLines.forEach((kot, index) => {
           kots.push({
@@ -106,6 +176,8 @@ router.get("/pending", authorize(["admin", "franchise_admin", "super_admin", "wa
             serviceType: order.serviceType || 'DINE_IN', // Include serviceType for filtering
             status: order.status,
             orderStatus: order.status, // Alias for compatibility
+            acceptedBy: order.acceptedBy || null,
+            isAssigned,
             items: kot.items,
             subtotal: kot.subtotal,
             gst: kot.gst,
@@ -210,7 +282,7 @@ router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter
 
 // Update KOT status (updates the order status)
 // Accepts both orderId and orderId-kot-index formats
-router.patch("/:id/status", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, async (req, res) => {
+router.patch("/:id/status", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), async (req, res) => {
   try {
     const { status } = req.body;
     if (!status) {

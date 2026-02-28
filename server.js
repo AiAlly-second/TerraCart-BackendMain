@@ -155,14 +155,33 @@ const resolveSocketCartIds = async (user) => {
   if (user.cartId) cartIds.add(String(user.cartId));
   if (user.cafeId) cartIds.add(String(user.cafeId));
 
-  if ((user.employeeId || user._id) && !user.cartId && !user.cafeId) {
+  if ((user.employeeId || user._id || user.email) && !user.cartId && !user.cafeId) {
     try {
-      const employeeQuery = user.employeeId
-        ? { _id: user.employeeId }
-        : { userId: user._id };
-      const employee = await Employee.findOne(employeeQuery)
-        .select("cartId cafeId")
-        .lean();
+      let employee = null;
+
+      // Preferred lookup when JWT includes linked employeeId.
+      if (user.employeeId) {
+        employee = await Employee.findById(user.employeeId)
+          .select("cartId cafeId")
+          .lean();
+      }
+
+      // Backward compatibility: many staff records are linked by userId only.
+      if (!employee && user._id) {
+        employee = await Employee.findOne({ userId: user._id })
+          .select("cartId cafeId")
+          .lean();
+      }
+
+      // Safety fallback: legacy records where userId link is missing but email matches.
+      if (!employee && user.email) {
+        employee = await Employee.findOne({
+          email: String(user.email).toLowerCase(),
+        })
+          .select("cartId cafeId")
+          .lean();
+      }
+
       if (employee?.cartId) cartIds.add(String(employee.cartId));
       if (employee?.cafeId) cartIds.add(String(employee.cafeId));
     } catch (_error) {
@@ -186,7 +205,7 @@ io.use(async (socket, next) => {
     if (!decoded?.id) return next();
 
     const user = await User.findById(decoded.id)
-      .select("_id role cartId cafeId franchiseId employeeId tokenVersion")
+      .select("_id role email cartId cafeId franchiseId employeeId tokenVersion")
       .lean();
     if (!user) return next();
 
@@ -280,6 +299,7 @@ app.use("/api/analytics", require("./routes/analyticsRoutes"));
 app.use("/api/print", require("./routes/printRoutes")); // Network printer routes
 app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queue for mobile agent
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
+app.use("/api/app", require("./routes/appUpdateRoutes"));
 
 
 // Health check endpoints (both /health and /api/health for compatibility)
@@ -331,6 +351,32 @@ if (
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
   // Client connected - removed verbose logging
+  // Auto-join authenticated staff to their cart/cafe rooms so realtime
+  // order/KOT updates work even if explicit join events are delayed or missing.
+  (async () => {
+    try {
+      const user = socket.data?.user || null;
+      if (!user) return;
+
+      const role = normalizeSocketRole(user.role);
+      if (role && SOCKET_ROLE_ALLOWLIST.has(role)) {
+        socket.join(`role:${role}`);
+      }
+
+      // Keep super_admin explicit-join only to avoid joining many rooms.
+      if (role === "super_admin") return;
+
+      const allowedCartIds = await resolveSocketCartIds(user);
+      for (const cartId of allowedCartIds) {
+        const normalizedCartId = normalizeSocketRoomValue(cartId);
+        if (!normalizedCartId) continue;
+        socket.join(`cart:${normalizedCartId}`);
+        socket.join(`cafe:${normalizedCartId}`);
+      }
+    } catch (_error) {
+      // Best-effort auto-join; explicit join events still work as fallback.
+    }
+  })();
 
   // Join cafe room
   socket.on("join:cafe", async (cafeId) => {

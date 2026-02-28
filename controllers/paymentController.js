@@ -20,6 +20,65 @@ const toObjectIdIfValid = (value) => {
     : value;
 };
 
+const toSocketIdString = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    const nested =
+      value._id || value.id || value.cartId || value.cafeId || null;
+    if (nested && nested !== value) return toSocketIdString(nested);
+  }
+  if (typeof value?.toString === "function") return value.toString().trim();
+  return "";
+};
+
+const normalizeOrderUpsertTimestamp = (value) => {
+  if (!value) return new Date().toISOString();
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value?.toISOString === "function") {
+    try {
+      return value.toISOString();
+    } catch (_error) {
+      return new Date().toISOString();
+    }
+  }
+  return new Date().toISOString();
+};
+
+const buildOrderUpsertPayload = (order) => {
+  const source =
+    (order && typeof order.toObject === "function" && order.toObject()) ||
+    (order && typeof order.toJSON === "function" && order.toJSON()) ||
+    order ||
+    {};
+  const orderId = toSocketIdString(source._id || source.id || source.orderId);
+  const cartId = toSocketIdString(source.cartId || source.cafeId);
+  const statusRaw = String(source.status || "").trim();
+  const orderTypeRaw = String(
+    source.orderType || source.serviceType || "",
+  ).trim();
+
+  return {
+    orderId: orderId || null,
+    cartId: cartId || null,
+    updatedAt: normalizeOrderUpsertTimestamp(
+      source.updatedAt || source.createdAt,
+    ),
+    status: statusRaw || null,
+    orderType: orderTypeRaw || null,
+  };
+};
+
+const emitOrderUpsert = ({ io, emitToCafe, order, cartId = null }) => {
+  if (!io || !emitToCafe || !order) return;
+  const payload = buildOrderUpsertPayload(order);
+  const resolvedCartId = toSocketIdString(cartId || payload.cartId);
+  if (!resolvedCartId || !payload.orderId) return;
+  emitToCafe(io, resolvedCartId, "order:upsert", payload);
+};
+
 const buildQrScopeOrFilter = (scopeId) => {
   if (!scopeId) return [];
 
@@ -1132,6 +1191,22 @@ exports.verifyRazorpayPayment = async (req, res) => {
       if (io) {
         io.emit("paymentUpdated", formatPaymentResponse(payment));
       }
+<<<<<<< HEAD
+=======
+      if (order.cartId && io && emitToCafe) {
+        emitToCafe(io, order.cartId.toString(), "order:created", order);
+        emitToCafe(io, order.cartId.toString(), "newOrder", order);
+        emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
+        emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+        emitOrderUpsert({
+          io,
+          emitToCafe,
+          order,
+          cartId: order.cartId.toString(),
+        });
+      }
+      await releaseTableForOrder(order, io, emitToCafe);
+>>>>>>> 00bc039ce86ed4f62b178adfa852c5f30ebce437
 
       return res.status(400).json({ message: "Razorpay signature verification failed." });
     }

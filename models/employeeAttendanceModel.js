@@ -82,12 +82,16 @@ const employeeAttendanceSchema = new mongoose.Schema(
     // Hierarchy relationships
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true }, // Changed from cafeId to cartId
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // IST day key (YYYY-MM-DD) for consistent "today" lookups and one-record-per-day rule
+    attendanceDateIST: { type: String, default: "", index: true },
   },
   { timestamps: true }
 );
 
-// Compound index to ensure one attendance record per employee per day
+// Compound index to ensure one attendance record per employee per day (by date)
 employeeAttendanceSchema.index({ employeeId: 1, date: 1 }, { unique: true });
+// One record per employee per IST day (canonical for "today" lookups)
+employeeAttendanceSchema.index({ employeeId: 1, attendanceDateIST: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model("EmployeeAttendance", employeeAttendanceSchema);
 

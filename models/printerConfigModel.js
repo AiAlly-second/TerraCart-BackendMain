@@ -14,6 +14,8 @@ const printerConfigSchema = new mongoose.Schema(
     kotHeaderText: { type: String, default: "" },
     billHeaderText: { type: String, default: "" },
     centerAlign: { type: Boolean, default: true },
+    /** Who prints KOTs: APP = TerraAdmin Flutter app (default); AGENT = Local Print Bridge only. */
+    printAuthority: { type: String, enum: ["AGENT", "APP"], default: "APP" },
     updatedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
