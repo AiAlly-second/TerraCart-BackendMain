@@ -145,6 +145,16 @@ const parseNonNegativeNumber = (value, fallback = 0) => {
   return Number(parsed.toFixed(2));
 };
 
+const sanitizeOfficePaymentMode = (value, fallback = "ONLINE") => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (normalized === "COD") return "COD";
+  if (normalized === "BOTH") return "BOTH";
+  if (normalized === "ONLINE") return "ONLINE";
+  return fallback;
+};
+
 const normalizeQrContextPayload = (input = {}) => {
   const qrContextTypeRaw =
     input.qrContextType === "OFFICE" ? "OFFICE" : "TABLE";
@@ -156,6 +166,10 @@ const normalizeQrContextPayload = (input = {}) => {
     input.officeDeliveryCharge,
     0
   );
+  const officePaymentMode = sanitizeOfficePaymentMode(
+    input.officePaymentMode,
+    "ONLINE"
+  );
 
   return {
     qrContextType: qrContextTypeRaw,
@@ -164,7 +178,21 @@ const normalizeQrContextPayload = (input = {}) => {
     officePhone: qrContextTypeRaw === "OFFICE" ? officePhone : null,
     officeDeliveryCharge:
       qrContextTypeRaw === "OFFICE" ? officeDeliveryCharge : 0,
+    officePaymentMode:
+      qrContextTypeRaw === "OFFICE" ? officePaymentMode : "ONLINE",
   };
+};
+
+const isOfficeQrContext = (tableLike = {}) => {
+  if (!tableLike || typeof tableLike !== "object") return false;
+  if (tableLike.qrContextType === "OFFICE") return true;
+
+  return !!(
+    String(tableLike.officeName || "").trim() ||
+    String(tableLike.officeAddress || "").trim() ||
+    String(tableLike.officePhone || "").trim() ||
+    Number(tableLike.officeDeliveryCharge || 0) > 0
+  );
 };
 
 const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
@@ -173,17 +201,18 @@ const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
     console.error("[buildPublicTableResponse] Table parameter is null or undefined");
     throw new Error("Table parameter is required");
   }
-  
+
+  const isOfficeQr = isOfficeQrContext(table);
   const payload = {
     id: table._id,
     number: table.number,
     name: table.name,
     capacity: table.capacity,
     originalCapacity: table.originalCapacity || null, // Include originalCapacity for merged tables
-    status: table.status,
+    status: isOfficeQr ? "AVAILABLE" : table.status,
     qrSlug: table.qrSlug,
-    currentOrder: table.currentOrder || null,
-    waitlistLength,
+    currentOrder: isOfficeQr ? null : table.currentOrder || null,
+    waitlistLength: isOfficeQr ? 0 : waitlistLength,
     // CRITICAL: Include cartId so frontend can filter menu by cart
     cartId: table.cartId || null,
     cafeId: table.cartId || null, // Alias for compatibility
@@ -192,10 +221,14 @@ const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
     officeAddress: table.officeAddress || null,
     officePhone: table.officePhone || null,
     officeDeliveryCharge: Number(table.officeDeliveryCharge || 0),
+    officePaymentMode:
+      isOfficeQr
+        ? sanitizeOfficePaymentMode(table.officePaymentMode, "ONLINE")
+        : null,
   };
 
   if (options.includeSessionToken) {
-    payload.sessionToken = table.sessionToken || null;
+    payload.sessionToken = isOfficeQr ? null : table.sessionToken || null;
   }
   return payload;
 };
@@ -674,6 +707,21 @@ exports.lookupTableBySlug = async (req, res) => {
         );
       }
       return res.status(404).json({ message: "Table not found" });
+    }
+
+    // OFFICE QR is takeaway-only. Do not apply table waitlist/session ownership logic.
+    if (isOfficeQrContext(table)) {
+      const officePayload = {
+        ...buildPublicTableResponse(table, 0),
+        status: "AVAILABLE",
+        waitlistLength: 0,
+      };
+
+      return res.json({
+        table: officePayload,
+        sessionToken: null,
+        waitlist: null,
+      });
     }
 
     // Check if table is merged - handle merged tables first
@@ -1360,6 +1408,7 @@ exports.createTable = async (req, res) => {
       officeAddress,
       officePhone,
       officeDeliveryCharge,
+      officePaymentMode,
     } = req.body;
 
     const normalizedContext = normalizeQrContextPayload({
@@ -1368,6 +1417,7 @@ exports.createTable = async (req, res) => {
       officeAddress,
       officePhone,
       officeDeliveryCharge,
+      officePaymentMode,
     });
     if (
       normalizedContext.qrContextType === "OFFICE" &&
@@ -1375,6 +1425,14 @@ exports.createTable = async (req, res) => {
     ) {
       return res.status(400).json({
         message: "Office name is required when QR context type is OFFICE",
+      });
+    }
+    if (
+      normalizedContext.qrContextType === "OFFICE" &&
+      !normalizedContext.officeAddress
+    ) {
+      return res.status(400).json({
+        message: "Office address is required when QR context type is OFFICE",
       });
     }
 
@@ -1479,6 +1537,7 @@ exports.createTable = async (req, res) => {
       officeAddress: normalizedContext.officeAddress,
       officePhone: normalizedContext.officePhone,
       officeDeliveryCharge: normalizedContext.officeDeliveryCharge,
+      officePaymentMode: normalizedContext.officePaymentMode,
     });
 
     return res.status(201).json(table);
@@ -1538,6 +1597,60 @@ exports.occupyTable = async (req, res) => {
       table.sessionToken !== sessionToken
     ) {
       return res.status(403).json({ message: "Invalid session token" });
+    }
+
+    // Office QR must stay stateless/multi-customer. Never mark it occupied.
+    if (isOfficeQrContext(table)) {
+      let officeStateUpdated = false;
+
+      if (table.status !== "AVAILABLE") {
+        table.status = "AVAILABLE";
+        officeStateUpdated = true;
+      }
+      if (table.currentOrder) {
+        table.currentOrder = null;
+        officeStateUpdated = true;
+      }
+      if (table.sessionToken) {
+        table.set("sessionToken", undefined);
+        officeStateUpdated = true;
+      }
+      if (table.lastAssignedAt) {
+        table.lastAssignedAt = null;
+        officeStateUpdated = true;
+      }
+
+      if (officeStateUpdated) {
+        await table.save();
+
+        const io = req.app.get("io");
+        const emitToCafe = req.app.get("emitToCafe");
+        const tableStatusPayload = {
+          id: table._id,
+          number: table.number,
+          status: "AVAILABLE",
+          currentOrder: null,
+          sessionToken: null,
+        };
+
+        if (io && table.cartId && emitToCafe) {
+          emitToCafe(
+            io,
+            table.cartId.toString(),
+            "table:status:updated",
+            tableStatusPayload
+          );
+        }
+
+        if (io) {
+          io.emit("table:status:updated", tableStatusPayload);
+        }
+      }
+
+      return res.json({
+        success: true,
+        table: buildPublicTableResponse(table, 0),
+      });
     }
 
     // CRITICAL: Only mark as OCCUPIED if currently AVAILABLE/RESERVED
@@ -1618,6 +1731,7 @@ exports.updateTable = async (req, res) => {
       "officeAddress",
       "officePhone",
       "officeDeliveryCharge",
+      "officePaymentMode",
     ];
     for (const field of allowedFields) {
       if (field in req.body) {
@@ -1688,6 +1802,7 @@ exports.updateTable = async (req, res) => {
       "officeAddress",
       "officePhone",
       "officeDeliveryCharge",
+      "officePaymentMode",
     ].some((field) => field in req.body);
     if (hasQrContextField) {
       const normalizedContext = normalizeQrContextPayload({
@@ -1711,6 +1826,10 @@ exports.updateTable = async (req, res) => {
           updates.officeDeliveryCharge !== undefined
             ? updates.officeDeliveryCharge
             : table.officeDeliveryCharge,
+        officePaymentMode:
+          updates.officePaymentMode !== undefined
+            ? updates.officePaymentMode
+            : table.officePaymentMode,
       });
 
       if (
@@ -1721,15 +1840,40 @@ exports.updateTable = async (req, res) => {
           message: "Office name is required when QR context type is OFFICE",
         });
       }
+      if (
+        normalizedContext.qrContextType === "OFFICE" &&
+        !normalizedContext.officeAddress
+      ) {
+        return res.status(400).json({
+          message: "Office address is required when QR context type is OFFICE",
+        });
+      }
 
       updates.qrContextType = normalizedContext.qrContextType;
       updates.officeName = normalizedContext.officeName;
       updates.officeAddress = normalizedContext.officeAddress;
       updates.officePhone = normalizedContext.officePhone;
       updates.officeDeliveryCharge = normalizedContext.officeDeliveryCharge;
+      updates.officePaymentMode = normalizedContext.officePaymentMode;
+    }
+
+    const isOfficeContextAfterUpdate = isOfficeQrContext({
+      ...(table.toObject ? table.toObject() : table),
+      ...updates,
+    });
+    if (isOfficeContextAfterUpdate && updates.status && updates.status !== "AVAILABLE") {
+      updates.status = "AVAILABLE";
     }
 
     Object.assign(table, updates);
+
+    const isOfficeTable = isOfficeQrContext(table);
+    if (isOfficeTable) {
+      table.status = "AVAILABLE";
+      table.currentOrder = null;
+      table.set("sessionToken", undefined);
+      table.lastAssignedAt = null;
+    }
 
     if (!table.tableNumber && table.number) {
       table.tableNumber = String(table.number);
@@ -1743,7 +1887,7 @@ exports.updateTable = async (req, res) => {
     }
 
     // When table is being set to AVAILABLE, close previous session and clean up
-    if (updates.status === "AVAILABLE") {
+    if (!isOfficeTable && updates.status === "AVAILABLE") {
       // Save the old sessionToken before clearing it
       const oldSessionToken = table.sessionToken;
 
@@ -1769,7 +1913,7 @@ exports.updateTable = async (req, res) => {
           `[TABLE] Table ${table.number} being set to AVAILABLE - previous session closed`
         );
       }
-    } else if (updates.status === "AVAILABLE" && table.currentOrder) {
+    } else if (!isOfficeTable && updates.status === "AVAILABLE" && table.currentOrder) {
       // If table already has a currentOrder, check if it's paid/cancelled
       const order = await Order.findById(table.currentOrder);
       if (order && shouldDisplayInActiveQueues(order)) {
@@ -1824,7 +1968,7 @@ exports.updateTable = async (req, res) => {
       table.status === "AVAILABLE" &&
       originalStatus !== "AVAILABLE";
 
-    if (statusChangedToAvailable) {
+    if (!isOfficeTable && statusChangedToAvailable) {
       // Check if there's already a NOTIFIED entry before calling notifyNextWaitlist
       // This prevents loops and duplicate notifications
       const existingNotified = await Waitlist.findOne({

@@ -83,6 +83,11 @@ const tableSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+    officePaymentMode: {
+      type: String,
+      enum: ["ONLINE", "COD", "BOTH"],
+      default: "ONLINE",
+    },
     // Cafe admin association for data isolation
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Franchise association - tables belong to franchises through cafes

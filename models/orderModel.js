@@ -166,8 +166,15 @@ const orderSchema = new mongoose.Schema(
       index: true,
       sparse: true,
     },
+    // Snapshot of Office QR display name at order time
+    officeName: { type: String, trim: true },
     // Extra fixed delivery charge configured on OFFICE QR (if any)
     officeDeliveryCharge: { type: Number, default: 0, min: 0 },
+    officePaymentMode: {
+      type: String,
+      enum: ["ONLINE", "COD", "BOTH", null],
+      default: null,
+    },
     // Special instructions/notes from customer
     specialInstructions: { type: String },
     kotLines: { type: [kotLineSchema], default: [] },
@@ -199,6 +206,12 @@ const orderSchema = new mongoose.Schema(
       type: String,
       enum: ["CASH", "ONLINE", "CARD", null],
       default: null,
+    },
+    // When true, order must remain pending until payment is confirmed.
+    // Used for customer-selected online-first flows.
+    paymentRequiredBeforeProceeding: {
+      type: Boolean,
+      default: false,
     },
     // Inventory tracking - prevents double deduction
     inventoryDeducted: {

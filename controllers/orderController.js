@@ -813,6 +813,47 @@ const AUTO_ASSIGN_CREATOR_ROLES = new Set([
   "manager",
   "admin",
 ]);
+const normalizeUpper = (value) => String(value || "").trim().toUpperCase();
+const normalizeOfficePaymentMode = (value, fallback = "ONLINE") => {
+  const normalized = normalizeUpper(value);
+  if (normalized === "ONLINE" || normalized === "COD" || normalized === "BOTH") {
+    return normalized;
+  }
+  return fallback;
+};
+const isPickupOrDeliveryServiceOrder = (order) => {
+  const orderType = normalizeUpper(order?.orderType);
+  const serviceType = normalizeUpper(order?.serviceType);
+  return (
+    orderType === "PICKUP" ||
+    orderType === "DELIVERY" ||
+    serviceType === "PICKUP" ||
+    serviceType === "DELIVERY"
+  );
+};
+const requiresPaymentBeforeProceeding = (order) => {
+  if (Boolean(order?.paymentRequiredBeforeProceeding)) {
+    return true;
+  }
+  const isOfficeOrder = normalizeUpper(order?.sourceQrType) === "OFFICE";
+  if (isOfficeOrder) {
+    return normalizeUpper(order?.officePaymentMode || "ONLINE") === "ONLINE";
+  }
+  return isPickupOrDeliveryServiceOrder(order);
+};
+const isOrderPaymentComplete = async (order) => {
+  if (!order?._id) return false;
+  if (order.status === "Paid" || order.paymentStatus === "PAID") {
+    return true;
+  }
+  const paidPayment = await Payment.findOne({
+    orderId: order._id,
+    status: "PAID",
+  })
+    .limit(1)
+    .lean();
+  return !!paidPayment;
+};
 
 const buildCreatorAcceptedBy = async ({ req, cartId }) => {
   if (!req?.user) return null;
@@ -2068,8 +2109,11 @@ const createOrder = async (req, res) => {
       takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
       sourceQrType,
       sourceQrContext,
+      officeName,
       officeDeliveryCharge,
+      officePaymentMode,
       idempotencyKey,
+      paymentRequiredBeforeProceeding: requestedPaymentRequiredBeforeProceeding,
     } = req.body;
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
     const requestAnonymousSessionId = extractAnonymousSessionIdFromRequest(req);
@@ -2094,7 +2138,7 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const normalizedServiceType = String(serviceType || "")
+    let normalizedServiceType = String(serviceType || "DINE_IN")
       .trim()
       .toUpperCase();
     const normalizedOrderTypeInput = String(
@@ -2112,6 +2156,11 @@ const createOrder = async (req, res) => {
       .trim()
       .slice(0, 80);
     const normalizedOfficeDeliveryCharge = Number(officeDeliveryCharge);
+    const requestedOfficeName =
+      typeof officeName === "string" ? officeName.trim() : "";
+    const requestedOfficePaymentMode = String(officePaymentMode || "")
+      .trim()
+      .toUpperCase();
     let officeTableContext = null;
 
     // Fallback inference: if frontend misses sourceQrType but provides tableId,
@@ -2119,7 +2168,7 @@ const createOrder = async (req, res) => {
     if (tableId && mongoose.Types.ObjectId.isValid(tableId)) {
       officeTableContext = await Table.findById(tableId)
         .select(
-          "qrContextType officeName officeAddress officePhone officeDeliveryCharge cartId",
+          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode cartId",
         )
         .lean();
       if (officeTableContext?.qrContextType === "OFFICE") {
@@ -2127,12 +2176,33 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Validate service type - normalized by middleware to strict contract.
-    const validServiceTypes = ["DINE_IN", "TAKEAWAY", "DELIVERY"];
+    // OFFICE QR must stay takeaway-like even if stale frontend state sends DINE_IN.
+    if (
+      normalizedSourceQrType === "OFFICE" &&
+      normalizedServiceType === "DINE_IN"
+    ) {
+      normalizedServiceType = "TAKEAWAY";
+      console.log(
+        "[ORDER] OFFICE QR request tried DINE_IN serviceType. Forced to TAKEAWAY.",
+      );
+    }
+
+    const normalizedOfficePaymentMode = normalizeOfficePaymentMode(
+      requestedOfficePaymentMode,
+      normalizeOfficePaymentMode(officeTableContext?.officePaymentMode, "ONLINE"),
+    );
+    const resolvedOfficeName =
+      normalizedSourceQrType === "OFFICE"
+        ? requestedOfficeName ||
+          String(officeTableContext?.officeName || "").trim()
+        : "";
+
+    // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
+    const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
     if (!validServiceTypes.includes(normalizedServiceType)) {
       return res.status(400).json({
         message:
-          "Invalid service type derived from orderType. Allowed values: dine-in, takeaway, delivery.",
+          "Invalid service type derived from orderType. Allowed values: dine-in, takeaway, pickup, delivery.",
       });
     }
 
@@ -2149,15 +2219,25 @@ const createOrder = async (req, res) => {
         ? undefined
         : normalizedServiceType === "DELIVERY"
           ? "DELIVERY"
+          : normalizedServiceType === "PICKUP"
+            ? "PICKUP"
           : "TAKEAWAY";
 
     let tableDoc = null;
+    const isPickup = normalizedServiceType === "PICKUP";
     const isTakeaway =
       normalizedServiceType === "TAKEAWAY" ||
-      normalizedServiceType === "DELIVERY";
+      normalizedServiceType === "DELIVERY" ||
+      isPickup;
     const isDelivery = normalizedServiceType === "DELIVERY";
     const isOfficeQrOrder = normalizedSourceQrType === "OFFICE";
-    const isOfficeDeliveryOrder = isOfficeQrOrder && isDelivery;
+    const isOfficeDeliveryOrder = isOfficeQrOrder && !isPickup;
+    const isCustomerSelectedOnlineFirst =
+      Boolean(requestedPaymentRequiredBeforeProceeding) &&
+      !isPickup &&
+      !isDelivery &&
+      (normalizedServiceType === "DINE_IN" ||
+        normalizedServiceType === "TAKEAWAY");
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -2663,6 +2743,13 @@ const createOrder = async (req, res) => {
       }
     }
 
+    const officeRequiresOnlinePayment =
+      isOfficeQrOrder && normalizedOfficePaymentMode === "ONLINE";
+    const shouldStartPendingForPayment =
+      isPickup ||
+      isDelivery ||
+      officeRequiresOnlinePayment ||
+      isCustomerSelectedOnlineFirst;
     const effectiveDeliveryOrder = isDelivery || isOfficeDeliveryOrder;
     const resolvedAnonymousSessionId =
       requestAnonymousSessionId ||
@@ -2685,11 +2772,20 @@ const createOrder = async (req, res) => {
       sourceQrType: normalizedSourceQrType,
       sourceQrContext: normalizedSourceQrContext || undefined,
       anonymousSessionId: resolvedAnonymousSessionId || undefined,
+      officeName:
+        normalizedSourceQrType === "OFFICE" && resolvedOfficeName
+          ? resolvedOfficeName
+          : undefined,
+      officePaymentMode:
+        normalizedSourceQrType === "OFFICE"
+          ? normalizedOfficePaymentMode
+          : null,
       selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
       status: ORDER_STATUSES.NEW,
       paymentStatus: PAYMENT_STATUSES.PENDING,
       paymentMode: null,
+      paymentRequiredBeforeProceeding: shouldStartPendingForPayment,
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
     };
@@ -2796,6 +2892,9 @@ const createOrder = async (req, res) => {
         if (!orderData.customerName && fallbackOfficeName) {
           orderData.customerName = fallbackOfficeName;
         }
+        if (!orderData.officeName && fallbackOfficeName) {
+          orderData.officeName = fallbackOfficeName;
+        }
         if (!orderData.customerMobile && fallbackOfficePhone) {
           orderData.customerMobile = fallbackOfficePhone;
         }
@@ -2865,7 +2964,11 @@ const createOrder = async (req, res) => {
     });
     if (creatorAssignment) {
       orderData.acceptedBy = creatorAssignment;
-      if (orderData.serviceType !== "DINE_IN" && orderData.status === "Pending") {
+      if (
+        orderData.serviceType !== "DINE_IN" &&
+        orderData.status === "Pending" &&
+        !requiresPaymentBeforeProceeding(orderData)
+      ) {
         orderData.status = "Confirmed";
       }
     }
@@ -3300,25 +3403,17 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
-    // PICKUP/DELIVERY: do NOT notify admin list until payment is complete (order will appear when status becomes Paid)
-    /*
-    const isPickupOrDeliveryOrder =
-      order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY" ||
-      order.serviceType === "PICKUP" ||
-      order.serviceType === "DELIVERY";
-    const isTakeawayAwaitingPayment =
-      isPickupOrDeliveryOrder && order.status === "Pending";
-    */
+    // Orders awaiting mandatory payment should stay hidden until payment is complete.
+    const isOrderAwaitingPayment =
+      requiresPaymentBeforeProceeding(order) && !isPaymentMarkedPaid(order);
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe) {
+    if (order.cartId && io && emitToCafe && !isOrderAwaitingPayment) {
       const payload = orderToPlainPayload(order);
       const cartIdStr = (payload?.cartId || order.cartId).toString();
-      // Always emit kot:created so KOT prints (app PrintService / local agent) even for web customer PICKUP/DELIVERY Pending orders
+
+      // Emit for admin dashboards and printing clients.
       emitToCafe(io, cartIdStr, "kot:created", payload || order);
-      // Always emit order:created/newOrder for immediate realtime visibility
-      // across waiter/captain/manager dashboards in both local and production.
       emitToCafe(io, cartIdStr, "order:created", payload || order);
       emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
       emitOrderUpsert({
@@ -3992,6 +4087,14 @@ const getOrders = async (req, res) => {
     if (!includeHistory) {
       query.$and = query.$and || [];
       query.$and.push(buildActiveOrderMongoFilter());
+      // Hide unpaid orders that require pre-payment from active queues.
+      query.$and.push({
+        $or: [
+          { paymentRequiredBeforeProceeding: { $ne: true } },
+          { paymentStatus: PAYMENT_STATUSES.PAID },
+          { status: { $ne: ORDER_STATUSES.NEW } },
+        ],
+      });
     }
 
     // Fetch ALL orders - no date filtering, no limits, permanent storage
@@ -4681,8 +4784,15 @@ const acceptOrder = async (req, res) => {
 
     // Atomic update: first to accept wins.
     const setFields = { acceptedBy };
+    if (
+      order.serviceType !== "DINE_IN" &&
+      normalizeOrderStatus(order.status, ORDER_STATUSES.NEW) === ORDER_STATUSES.NEW &&
+      !requiresPaymentBeforeProceeding(order)
+    ) {
+      setFields.status = ORDER_STATUSES.NEW;
+    }
     applyLifecycleFields(setFields, {
-      status: order.status,
+      status: setFields.status || order.status,
       paymentStatus: order.paymentStatus,
       isPaid: order.isPaid,
     });
@@ -4807,11 +4917,29 @@ const updateOrderStatus = async (req, res) => {
       String(req.user?.role || "").toLowerCase(),
     );
 
+    const allowedTransitions = transitions[currentStatus] || new Set();
     if (!isPrivilegedRole && requestedStatus !== currentStatus) {
-      const allowedTransitions = transitions[currentStatus] || new Set();
       if (!allowedTransitions.has(requestedStatus)) {
         return res.status(400).json({
           message: `Invalid status transition from ${currentStatus} to ${requestedStatus}`,
+          currentStatus,
+          requestedStatus,
+          allowedTransitions: Array.from(allowedTransitions),
+        });
+      }
+    }
+
+    // Payment-gated orders must stay in NEW until payment is complete.
+    const isProceedingStatus = [
+      ORDER_STATUSES.PREPARING,
+      ORDER_STATUSES.READY,
+      ORDER_STATUSES.COMPLETED,
+    ].includes(requestedStatus);
+    if (requiresPaymentBeforeProceeding(order) && isProceedingStatus) {
+      const paymentComplete = await isOrderPaymentComplete(order);
+      if (!paymentComplete) {
+        return res.status(400).json({
+          message: "Payment must be completed before updating order status.",
           currentStatus,
           requestedStatus,
           allowedTransitions: Array.from(allowedTransitions),

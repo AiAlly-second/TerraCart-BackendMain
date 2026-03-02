@@ -3731,12 +3731,22 @@ exports.getRecipes = async (req, res) => {
       for (let i = 0; i < recipes.length; i++) {
         const recipeData = recipes[i];
         const recipe = new RecipeModel(recipeData);
-        // Recalculate cost using Cart Admin's cartId
-        await recipe.calculateCost(req.user._id);
-        // Update the recipe data with recalculated costs
-        recipes[i].totalCostCached = recipe.totalCostCached;
-        recipes[i].costPerPortion = recipe.costPerPortion;
-        recipes[i].lastCostUpdate = recipe.lastCostUpdate;
+        try {
+          // Recalculate cost using Cart Admin's cartId
+          await recipe.calculateCost(req.user._id);
+          // Update the recipe data with recalculated costs
+          recipes[i].totalCostCached = recipe.totalCostCached;
+          recipes[i].costPerPortion = recipe.costPerPortion;
+          recipes[i].lastCostUpdate = recipe.lastCostUpdate;
+        } catch (calcError) {
+          console.warn(
+            `[GET_RECIPES] Cost recalculation failed for recipe ${recipe._id} (${recipe.name}): ${calcError.message}`
+          );
+          // Keep API resilient: return recipe with existing cached cost values.
+          recipes[i].totalCostCached = Number(recipeData.totalCostCached || 0);
+          recipes[i].costPerPortion = Number(recipeData.costPerPortion || 0);
+          recipes[i].lastCostUpdate = recipeData.lastCostUpdate || null;
+        }
         // #region agent log
         logDebug(
           "costingController.js:1205",
