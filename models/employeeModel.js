@@ -45,6 +45,20 @@ const employeeSchema = new mongoose.Schema(
     franchiseId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Status
     isActive: { type: Boolean, default: true },
+    weeklyOffDays: {
+      type: [Number],
+      default: [],
+      validate: {
+        validator: (days) =>
+          Array.isArray(days) &&
+          days.every((day) => Number.isInteger(day) && day >= 0 && day <= 6),
+        message: "weeklyOffDays must contain integers between 0 and 6",
+      },
+    },
+    autoCheckoutEnabled: {
+      type: Boolean,
+      default: true,
+    },
   },
   { timestamps: true }
 );

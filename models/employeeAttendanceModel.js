@@ -25,7 +25,16 @@ const employeeAttendanceSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["present", "absent", "late", "half_day", "on_leave", "sick", "completed"],
+      enum: [
+        "present",
+        "absent",
+        "late",
+        "half_day",
+        "on_leave",
+        "sick",
+        "completed",
+        "auto_closed",
+      ],
       default: "present",
     },
     workingHours: {
@@ -71,6 +80,30 @@ const employeeAttendanceSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
       index: true,
+    },
+    autoCheckedOut: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    pendingTasksAtCheckout: {
+      type: Number,
+      default: 0,
+    },
+    managerOverrideUsed: {
+      type: Boolean,
+      default: false,
+    },
+    managerOverrideBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    managerOverrideReason: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 300,
     },
     breaks: [
       {

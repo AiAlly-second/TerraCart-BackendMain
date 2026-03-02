@@ -1,4 +1,39 @@
 const mongoose = require("mongoose");
+const {
+  CANONICAL_LIFECYCLE_STATUSES,
+  applyLifecycleFields,
+} = require("../utils/orderLifecycle");
+const {
+  ORDER_STATUS_VALUES,
+  PAYMENT_STATUS_VALUES,
+} = require("../utils/orderContract");
+
+const normalizeServiceType = (value) => {
+  const token = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (token === "DELIVERY") return "DELIVERY";
+  if (token === "PICKUP") return "TAKEAWAY"; // legacy alias
+  if (token === "TAKEAWAY") return "TAKEAWAY";
+  return "DINE_IN";
+};
+
+const normalizeOrderType = (value, serviceType) => {
+  const token = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/_/g, "-")
+    .replace(/\s+/g, "-");
+  if (token === "delivery") return "delivery";
+  if (token === "pickup") return "takeaway"; // legacy alias
+  if (token === "takeaway") return "takeaway";
+  if (token === "dine-in" || token === "dinein") return "dine-in";
+
+  const normalizedServiceType = normalizeServiceType(serviceType);
+  if (normalizedServiceType === "DELIVERY") return "delivery";
+  if (normalizedServiceType === "TAKEAWAY") return "takeaway";
+  return "dine-in";
+};
 
 /* ---------- sub-schemas ---------- */
 const itemSchema = new mongoose.Schema(
@@ -78,13 +113,13 @@ const orderSchema = new mongoose.Schema(
     table: { type: mongoose.Schema.Types.ObjectId, ref: "Table" },
     serviceType: {
       type: String,
-      enum: ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"],
+      enum: ["DINE_IN", "TAKEAWAY", "DELIVERY"],
       default: "DINE_IN",
     },
-    // Order fulfillment type (for TAKEAWAY service type)
+    // Canonical order type for cross-platform API consistency.
     orderType: {
       type: String,
-      enum: ["PICKUP", "DELIVERY"],
+      enum: ["dine-in", "takeaway", "delivery"],
     },
     // Customer information for takeaway/pickup/delivery orders
     customerName: { type: String },
@@ -110,11 +145,26 @@ const orderSchema = new mongoose.Schema(
       deliveryCharge: { type: Number, default: 0 }, // Delivery charge in rupees
       estimatedTime: { type: Number }, // Estimated delivery time in minutes
     },
-    // QR source context (TABLE default, OFFICE for fixed office QR orders)
+    // QR source context (kept flexible for future QR types/locations)
     sourceQrType: {
       type: String,
-      enum: ["TABLE", "OFFICE"],
+      trim: true,
       default: "TABLE",
+      uppercase: true,
+    },
+    // Generic QR context support for table/takeaway/delivery/future custom locations.
+    sourceQrContext: {
+      type: String,
+      trim: true,
+      default: null,
+    },
+    // Identity for anonymous customer sessions (web/app QR visitors).
+    anonymousSessionId: {
+      type: String,
+      trim: true,
+      default: null,
+      index: true,
+      sparse: true,
     },
     // Extra fixed delivery charge configured on OFFICE QR (if any)
     officeDeliveryCharge: { type: Number, default: 0, min: 0 },
@@ -123,32 +173,27 @@ const orderSchema = new mongoose.Schema(
     kotLines: { type: [kotLineSchema], default: [] },
     status: {
       type: String,
-      enum: [
-        // Unified flow for DINE_IN + TAKEAWAY
-        "Pending",      // Order created, awaiting confirmation
-        "Confirmed",    // Order confirmed by staff
-        "Preparing",    // Kitchen started preparing (INVENTORY DEDUCTED HERE)
-        "Ready",        // Food ready for pickup/serving
-        "Completed",    // Order completed (for takeaway: handed over)
-        "Served",       // Legacy: keep for backward compat (treat as Completed)
-        "Finalized",    // Legacy: keep for backward compat
-        "Paid",         // Payment received
-        "Cancelled",    // Order cancelled
-        "Returned",     // Order returned after payment
-        // Legacy takeaway statuses - kept for backward compatibility
-        "Accept",
-        "Accepted",
-        "Being Prepared",
-        "BeingPrepared",
-        "Exit",
-      ],
-      default: "Pending",
+      enum: ORDER_STATUS_VALUES,
+      default: "NEW",
+    },
+    // Canonical lifecycle state for cross-platform UI/status consistency.
+    lifecycleStatus: {
+      type: String,
+      enum: CANONICAL_LIFECYCLE_STATUSES,
+      default: "NEW",
+      index: true,
+    },
+    // Explicit payment flag to keep "paid" independent from legacy status naming.
+    isPaid: {
+      type: Boolean,
+      default: false,
+      index: true,
     },
     // Payment tracking (separate from order status)
     paymentStatus: {
       type: String,
-      enum: ["UNPAID", "PAID", "FAILED", "REFUNDED"],
-      default: "UNPAID",
+      enum: PAYMENT_STATUS_VALUES,
+      default: "PENDING",
     },
     paymentMode: {
       type: String,
@@ -218,5 +263,18 @@ orderSchema.index({ cartId: 1, createdAt: -1 });
 orderSchema.index({ cartId: 1, serviceType: 1, status: 1 });
 // Prevent duplicate order creation when the same client request is retried.
 orderSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
+orderSchema.index({ cartId: 1, lifecycleStatus: 1, createdAt: -1 });
+orderSchema.index({ cartId: 1, status: 1, paymentStatus: 1, createdAt: -1 });
+
+orderSchema.pre("validate", function lifecycleStatusSync(next) {
+  this.serviceType = normalizeServiceType(this.serviceType);
+  this.orderType = normalizeOrderType(this.orderType, this.serviceType);
+  applyLifecycleFields(this, {
+    status: this.status,
+    paymentStatus: this.paymentStatus,
+    isPaid: this.isPaid,
+  });
+  next();
+});
 
 module.exports = mongoose.model("Order", orderSchema);

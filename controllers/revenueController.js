@@ -3,6 +3,15 @@ const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
 const { Payment } = require("../models/paymentModel");
 const User = require("../models/userModel");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+} = require("../utils/orderContract");
+
+const SETTLED_ORDER_QUERY = Object.freeze({
+  status: ORDER_STATUSES.COMPLETED,
+  paymentStatus: PAYMENT_STATUSES.PAID,
+});
 
 // Helper function to calculate revenue from orders
 function calculateOrderRevenue(orders) {
@@ -64,7 +73,7 @@ exports.calculateDailyRevenue = async (req, res) => {
 
     // Get all paid orders for the day (including from deleted franchises - preserved)
     const allOrders = await Order.find({
-      status: "Paid",
+      ...SETTLED_ORDER_QUERY,
       paidAt: {
         $gte: targetDate,
         $lte: endDate,
@@ -234,7 +243,7 @@ exports.calculateMonthlyRevenue = async (req, res) => {
 
     // Get all paid orders for the month (including from deleted franchises - preserved)
     const allOrders = await Order.find({
-      status: "Paid",
+      ...SETTLED_ORDER_QUERY,
       paidAt: {
         $gte: startDate,
         $lte: endDate,
@@ -459,7 +468,7 @@ exports.getCurrentRevenue = async (req, res) => {
       franchiseNameMap.set(f._id.toString(), f.name);
     });
 
-    const allOrders = await Order.find({ status: "Paid" }).lean();
+    const allOrders = await Order.find(SETTLED_ORDER_QUERY).lean();
     const activeOrders = allOrders.filter(order => {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       return franchiseId && activeFranchiseIds.has(franchiseId);
@@ -680,7 +689,7 @@ exports.getFranchiseRevenue = async (req, res) => {
     const isDateRangeApplied = Boolean(rangeStart && rangeEnd);
     
     const orders = await Order.find({
-      status: "Paid",
+      ...SETTLED_ORDER_QUERY,
       franchiseId: franchiseObjectId,
     }).lean();
 
@@ -845,7 +854,7 @@ exports.getFranchiseRevenue = async (req, res) => {
 exports.getDetailedRevenueExport = async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const query = { status: "Paid" };
+    const query = { ...SETTLED_ORDER_QUERY };
 
     if (startDate || endDate) {
       query.paidAt = {};

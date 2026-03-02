@@ -2,6 +2,9 @@ const CustomerRequest = require("../models/customerRequestModel");
 const Employee = require("../models/employeeModel");
 const { Table } = require("../models/tableModel");
 const Order = require("../models/orderModel");
+const {
+  notifyAssistanceRequestCreated,
+} = require("../services/notificationEventService");
 
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
@@ -172,6 +175,33 @@ exports.createRequest = async (req, res) => {
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
     if (io && emitToCafe && requestCartId) {
       emitToCafe(io, requestCartId.toString(), "request:created", request);
+    }
+
+    if (request.requestType === "assistance") {
+      try {
+        if (io) {
+          console.log("[ASSISTANCE_REQUEST] emitting assistance_request_created", {
+            requestId: request._id?.toString?.() || null,
+            cartId: requestCartId?.toString?.() || null,
+            tableId: request.tableId?._id?.toString?.() || request.tableId?.toString?.() || null,
+          });
+          io.emit("assistance_request_created", request);
+        }
+        console.log("[ASSISTANCE_REQUEST] dispatching notification service", {
+          requestId: request._id?.toString?.() || null,
+          cartId: requestCartId?.toString?.() || null,
+        });
+        await notifyAssistanceRequestCreated({
+          io,
+          emitToCafeFn: emitToCafe,
+          request,
+        });
+      } catch (notificationError) {
+        console.error(
+          "[ASSISTANCE_REQUEST] notification dispatch failed:",
+          notificationError?.message || notificationError,
+        );
+      }
     }
 
     return res.status(201).json(request);

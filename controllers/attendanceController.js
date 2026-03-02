@@ -2,6 +2,12 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 const LeaveRequest = require("../models/leaveRequestModel");
+const User = require("../models/userModel");
+const {
+  ensureDailyTasksForEmployeeDate,
+  getPendingTaskSummaryForEmployeeDate,
+} = require("../services/dailyTaskService");
+const { sendPushToTokens } = require("../services/pushNotificationService");
 
 // IST offset constant (UTC+5:30)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
@@ -379,6 +385,49 @@ const logAttendanceEvent = ({
   };
 
   console.log(`[ATTENDANCE_EVENT] ${JSON.stringify(payload)}`);
+};
+
+const notifyEmployeePendingCheckoutTasks = async ({
+  employeeId,
+  pendingTaskCount,
+  dateKey,
+}) => {
+  try {
+    const employee = await Employee.findById(employeeId)
+      .select("_id userId email")
+      .lean();
+    if (!employee) return;
+
+    const userFilters = [];
+    if (employee.userId) {
+      userFilters.push({ _id: employee.userId });
+    }
+    userFilters.push({ employeeId: employee._id });
+    if (employee.email) {
+      userFilters.push({ email: employee.email.toLowerCase() });
+    }
+
+    const users = await User.find({ $or: userFilters })
+      .select("_id fcmToken")
+      .lean();
+    const tokens = users
+      .map((user) => String(user.fcmToken || "").trim())
+      .filter(Boolean);
+
+    if (!tokens.length) return;
+
+    await sendPushToTokens(tokens, {
+      title: "Checkout Blocked",
+      body: `Complete ${pendingTaskCount} pending task(s) before checkout.`,
+      data: {
+        notificationType: "attendance_checkout_blocked",
+        pendingTasks: String(pendingTaskCount),
+        dateKey: String(dateKey || ""),
+      },
+    });
+  } catch (_error) {
+    // Non-blocking notification side effect.
+  }
 };
 
 // Helper function to build query based on user role
@@ -1294,6 +1343,18 @@ exports.checkIn = async (req, res) => {
       throw saveErr;
     }
 
+    try {
+      await ensureDailyTasksForEmployeeDate({
+        employee,
+        targetDate: new Date(),
+        generatedBy: user._id || null,
+      });
+    } catch (taskGenerationError) {
+      console.error(
+        `[ATTENDANCE] Failed to ensure daily tasks on check-in for employee ${targetEmployeeId}: ${taskGenerationError.message}`
+      );
+    }
+
     await attendance.populate("employeeId", "name mobile employeeRole");
     const normalizedAttendance = normalizeAttendanceRecord(attendance);
 
@@ -1691,6 +1752,65 @@ exports.checkOutById = async (req, res) => {
       });
     }
 
+    const managerOverrideRequested =
+      req.body?.managerOverride === true ||
+      String(req.body?.managerOverride || "").toLowerCase() === "true";
+    const managerOverrideReason = String(
+      req.body?.managerOverrideReason || req.body?.overrideReason || ""
+    ).trim();
+    const canUseManagerOverride = [
+      "manager",
+      "admin",
+      "franchise_admin",
+      "super_admin",
+    ].includes(user.role);
+
+    if (managerOverrideRequested && !canUseManagerOverride) {
+      return res.status(403).json({
+        success: false,
+        message: "Manager override is not allowed for your role.",
+        code: "MANAGER_OVERRIDE_NOT_ALLOWED",
+      });
+    }
+
+    const pendingTaskSummary = await getPendingTaskSummaryForEmployeeDate({
+      employeeId: activeAttendance.employeeId,
+      dateKey: activeAttendance.attendanceDateIST || getISTDateString(),
+    });
+    const pendingTaskCount = Number(
+      pendingTaskSummary.totalPendingTaskCount || 0
+    );
+
+    if (pendingTaskCount > 0 && !(managerOverrideRequested && canUseManagerOverride)) {
+      await notifyEmployeePendingCheckoutTasks({
+        employeeId: activeAttendance.employeeId,
+        pendingTaskCount,
+        dateKey: pendingTaskSummary.dateKey,
+      });
+
+      logAttendanceEvent({
+        action: "checkout",
+        outcome: "rejected_pending_tasks",
+        employeeId: activeAttendance.employeeId,
+        attendanceId: activeAttendance._id,
+        userId: user._id,
+        role: user.role,
+        deviceId: requestMeta.deviceId,
+        requestTimestampMs: requestMeta.requestTimestampMs,
+        message: `Checkout blocked due to ${pendingTaskCount} pending task(s)`,
+      });
+
+      await activeAttendance.populate("employeeId", "name mobile employeeRole");
+      return res.status(409).json({
+        success: false,
+        code: "PENDING_TASKS_BLOCK_CHECKOUT",
+        message: "Complete assigned tasks before checkout or request manager override.",
+        pendingTaskCount,
+        managerOverrideAllowed: canUseManagerOverride,
+        attendance: normalizeAttendanceRecord(activeAttendance),
+      });
+    }
+
     // Get current time in IST, then convert to UTC for MongoDB storage
     const checkOutTimeIST = getISTNow();
     const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
@@ -1741,6 +1861,16 @@ exports.checkOutById = async (req, res) => {
     activeAttendance.checkInStatus = "checked_out";
     activeAttendance.canTakeBreak = false;
     activeAttendance.isCheckedOut = true;
+    activeAttendance.pendingTasksAtCheckout = pendingTaskCount;
+    activeAttendance.managerOverrideUsed =
+      managerOverrideRequested && canUseManagerOverride;
+    activeAttendance.managerOverrideBy =
+      managerOverrideRequested && canUseManagerOverride ? user._id : null;
+    activeAttendance.managerOverrideReason =
+      managerOverrideRequested && canUseManagerOverride
+        ? managerOverrideReason
+        : "";
+    activeAttendance.autoCheckedOut = false;
     
     // Update status - if less than 4 hours, mark as half_day, otherwise completed
     if (totalWorkingMinutes < 240) {
@@ -1783,6 +1913,7 @@ exports.checkOutById = async (req, res) => {
       message: "Checked out successfully",
       data: normalizedAttendance,
       attendance: normalizedAttendance,
+      pendingTaskCount,
       totalWorkingMinutes: totalWorkingMinutes,
       workingHours: activeAttendance.workingHours,
       overtime: activeAttendance.overtime,

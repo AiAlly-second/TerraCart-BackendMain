@@ -266,7 +266,7 @@ const validateQuantity = (field = 'quantity') => (req, res, next) => {
 /**
  * Validate order status
  */
-const validOrderStatuses = ['Pending', 'Confirmed', 'Preparing', 'Ready', 'Served', 'Paid', 'Cancelled', 'Returned'];
+const validOrderStatuses = ['NEW', 'PREPARING', 'READY', 'COMPLETED'];
 const validateOrderStatus = (field = 'status') => (req, res, next) => {
   const status = req.body[field];
   

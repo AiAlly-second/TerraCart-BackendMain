@@ -2,4 +2,6 @@
 node_modules
 .env.development
 .env.production 
+config/firebase-service-account.json
+config/*firebase-adminsdk*.json
 config/terracart-3fb9f-firebase-adminsdk-fbsvc-0625177e20.json

@@ -9,6 +9,13 @@ const PaymentQR = require("../models/paymentQrModel");
 const Employee = require("../models/employeeModel");
 const { releaseTableForOrder } = require("./orderController");
 const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES: ORDER_PAYMENT_STATUSES,
+  buildOrderStatusUpdatedPayload,
+} = require("../utils/orderContract");
+const { applyLifecycleFields } = require("../utils/orderLifecycle");
+const { notifyPaymentReceived } = require("../services/notificationEventService");
 const { Jimp } = require("jimp");
 const jsQR = require("jsqr");
 
@@ -55,6 +62,7 @@ const buildOrderUpsertPayload = (order) => {
   const orderId = toSocketIdString(source._id || source.id || source.orderId);
   const cartId = toSocketIdString(source.cartId || source.cafeId);
   const statusRaw = String(source.status || "").trim();
+  const paymentStatusRaw = String(source.paymentStatus || "").trim();
   const orderTypeRaw = String(
     source.orderType || source.serviceType || "",
   ).trim();
@@ -66,6 +74,7 @@ const buildOrderUpsertPayload = (order) => {
       source.updatedAt || source.createdAt,
     ),
     status: statusRaw || null,
+    paymentStatus: paymentStatusRaw || null,
     orderType: orderTypeRaw || null,
   };
 };
@@ -808,8 +817,14 @@ exports.markPaymentPaid = async (req, res) => {
     await payment.save();
 
     if (order) {
-      order.status = "Paid";
+      order.status = ORDER_STATUSES.COMPLETED;
+      order.paymentStatus = ORDER_PAYMENT_STATUSES.PAID;
       order.paidAt = new Date();
+      applyLifecycleFields(order, {
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        isPaid: true,
+      });
       const needsFallbackConsumption = !order.inventoryDeducted;
       if (needsFallbackConsumption) {
         order.inventoryDeducted = true;
@@ -820,18 +835,30 @@ exports.markPaymentPaid = async (req, res) => {
       const emitToCafe = req.app.get("emitToCafe");
       if (io) {
         io.emit("paymentUpdated", formatPaymentResponse(payment));
-        io.emit("orderUpdated", order);
       }
       if (order.cartId && io && emitToCafe) {
-        emitToCafe(io, order.cartId.toString(), "order:created", order);
-        emitToCafe(io, order.cartId.toString(), "newOrder", order);
-        emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-        emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+        const statusPayload = buildOrderStatusUpdatedPayload(order);
+        emitToCafe(
+          io,
+          order.cartId.toString(),
+          "order_status_updated",
+          statusPayload,
+        );
         emitOrderUpsert({
           io,
           emitToCafe,
           order,
           cartId: order.cartId.toString(),
+        });
+        notifyPaymentReceived({
+          io,
+          emitToCafeFn: emitToCafe,
+          order,
+        }).catch((pushError) => {
+          console.error(
+            "[PAYMENT] payment_received notification failed:",
+            pushError?.message || pushError,
+          );
         });
       }
       await releaseTableForOrder(order, io, emitToCafe);
@@ -894,7 +921,10 @@ exports.syncPaidOrders = async (req, res) => {
   try {
     // Filter orders by caller scope so no cross-cart sync happens.
     const scope = await resolvePaymentScope(req.user);
-    const query = buildOrderScopeQuery(scope, { status: "Paid" });
+    const query = buildOrderScopeQuery(scope, {
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: ORDER_PAYMENT_STATUSES.PAID,
+    });
     if (!query) {
       return res.json({ synced: 0, payments: [] });
     }

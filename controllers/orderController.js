@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 const Order = require("../models/orderModel");
 const PrintJob = require("../models/printJobModel");
 const PrinterConfig = require("../models/printerConfigModel");
@@ -13,6 +13,24 @@ const Cart = require("../models/cartModel");
 const {
   consumeIngredientsForOrder,
 } = require("../services/costing-v2/orderConsumptionService");
+const {
+  notifyNewOrder,
+  notifyOrderReady,
+  notifyPaymentReceived,
+  notifyOrderCancelled,
+} = require("../services/notificationEventService");
+const {
+  applyLifecycleFields,
+} = require("../utils/orderLifecycle");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+  normalizeOrderStatus,
+  normalizePaymentStatus,
+  buildOrderStatusUpdatedPayload,
+  buildActiveOrderMongoFilter,
+  shouldDisplayInActiveQueues,
+} = require("../utils/orderContract");
 
 // Simple in-memory cache for franchise and cafe data to prevent repeated DB queries
 const invoiceDataCache = {
@@ -57,19 +75,47 @@ const setCachedCafe = (cartId, data) => {
 const toPaise = (n) => Math.round(Number(n) * 100);
 const toRupees = (p) => Number((p / 100).toFixed(2));
 
-const FINAL_ORDER_STATUSES = ["Paid", "Cancelled", "Finalized", "Returned", "Exit"];
+const FINAL_ORDER_STATUSES = [ORDER_STATUSES.COMPLETED];
 const ACTIVE_TAKEAWAY_TOKEN_STATUSES = [
-  "Pending",
-  "Confirmed",
-  "Preparing",
-  "Ready",
-  "Served",
-  "Finalized",
-  "Accept",
-  "Accepted",
-  "Being Prepared",
-  "BeingPrepared",
+  ORDER_STATUSES.NEW,
+  ORDER_STATUSES.PREPARING,
+  ORDER_STATUSES.READY,
+  ORDER_STATUSES.COMPLETED,
 ];
+
+const isCanonicalStatus = (status, expectedStatus) =>
+  normalizeOrderStatus(status, ORDER_STATUSES.NEW) === expectedStatus;
+
+const isPaymentMarkedPaid = (orderLike) =>
+  normalizePaymentStatus(
+    orderLike?.paymentStatus,
+    PAYMENT_STATUSES.PENDING,
+  ) === PAYMENT_STATUSES.PAID;
+
+const isOrderSettled = (orderLike) =>
+  isCanonicalStatus(orderLike?.status, ORDER_STATUSES.COMPLETED) &&
+  isPaymentMarkedPaid(orderLike);
+
+const NOTIFICATION_TRACE_ENABLED =
+  String(process.env.BACKEND_ENABLE_NOTIFICATION_DEBUG || "").toLowerCase() ===
+  "true";
+
+const writeOrderNotificationTrace = (message, metadata = null) => {
+  if (!NOTIFICATION_TRACE_ENABLED) return;
+  let suffix = "";
+  if (metadata && typeof metadata === "object") {
+    try {
+      suffix = ` ${JSON.stringify(metadata)}`;
+    } catch (_error) {
+      suffix = " [metadata_unserializable]";
+    }
+  }
+  try {
+    process.stdout.write(`[ORDER_NOTIFICATION] ${message}${suffix}\n`);
+  } catch (_error) {
+    // Ignore debug logging failures.
+  }
+};
 const sanitizeAddonName = (value) => {
   const normalized = String(value || "")
     .replace(/^\(\s*\+\s*\)\s*/u, "")
@@ -165,6 +211,17 @@ const normalizeObjectId = (value) => {
         : "";
   if (!asString || !mongoose.Types.ObjectId.isValid(asString)) return null;
   return new mongoose.Types.ObjectId(asString);
+};
+
+const normalizeSourceQrType = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase();
+  if (!normalized) return "TABLE";
+  if (normalized.length > 40 || !/^[A-Z0-9_:-]+$/.test(normalized)) {
+    return "CUSTOM";
+  }
+  return normalized;
 };
 
 const normalizeDocType = (value) => {
@@ -281,6 +338,13 @@ const hasPrivilegedOrderAccess = async (user, order) => {
 
 const TAKEAWAY_LIKE_SERVICE_TYPES = new Set(["TAKEAWAY", "PICKUP", "DELIVERY"]);
 
+const normalizeAnonymousSessionId = (value) => {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized.length > 160) return "";
+  if (!/^[A-Za-z0-9._:-]+$/.test(normalized)) return "";
+  return normalized;
+};
+
 const extractSessionTokenFromRequest = (req) => {
   const bodyToken =
     req?.body && typeof req.body.sessionToken === "string"
@@ -320,13 +384,18 @@ const isTakeawayLikeOrder = (order) => {
 const verifyPublicOrderSessionAccess = async (
   order,
   sessionToken,
-  { allowPendingTakeawayWithoutToken = false } = {},
+  {
+    allowPendingTakeawayWithoutToken = false,
+    anonymousSessionId = "",
+  } = {},
 ) => {
   if (!order) {
     return { ok: false, status: 404, message: "Order not found" };
   }
 
   const token = String(sessionToken || "").trim();
+  const normalizedAnonymousSessionId =
+    normalizeAnonymousSessionId(anonymousSessionId);
   const serviceType = String(order.serviceType || "")
     .trim()
     .toUpperCase();
@@ -351,11 +420,34 @@ const verifyPublicOrderSessionAccess = async (
   }
 
   if (isTakeawayLikeOrder(order)) {
+    const orderAnonymousSessionId = normalizeAnonymousSessionId(
+      order.anonymousSessionId
+    );
     const isPendingTakeaway =
-      serviceType === "TAKEAWAY" && String(order.status || "").trim() === "Pending";
+      serviceType === "TAKEAWAY" &&
+      normalizeOrderStatus(order.status, ORDER_STATUSES.NEW) ===
+        ORDER_STATUSES.NEW;
 
     if (allowPendingTakeawayWithoutToken && isPendingTakeaway) {
       return { ok: true };
+    }
+
+    if (orderAnonymousSessionId) {
+      if (!normalizedAnonymousSessionId) {
+        return {
+          ok: false,
+          status: 401,
+          message: "Not authorized, anonymous session is required",
+        };
+      }
+
+      if (orderAnonymousSessionId !== normalizedAnonymousSessionId) {
+        return {
+          ok: false,
+          status: 403,
+          message: "Not authorized, invalid anonymous session",
+        };
+      }
     }
 
     if (order.sessionToken) {
@@ -497,12 +589,43 @@ const buildNewOrderAvailablePayload = (order) => {
   };
 };
 
-/** Convert order to plain object for socket emit (cartId and kotLines predictable for local agent / clients). */
+/** Convert order to client-safe payload for sockets/API responses. */
 const orderToPlainPayload = (order) => {
   if (!order) return null;
-  if (typeof order.toObject === "function") return order.toObject();
-  if (typeof order.toJSON === "function") return order.toJSON();
-  return order;
+
+  let plain = order;
+  if (typeof order.toObject === "function") {
+    plain = order.toObject();
+  } else if (typeof order.toJSON === "function") {
+    plain = order.toJSON();
+  }
+  if (!plain || typeof plain !== "object") {
+    return plain;
+  }
+
+  const payload = { ...plain };
+  applyLifecycleFields(payload, {
+    status: payload.status,
+    paymentStatus: payload.paymentStatus,
+    isPaid: payload.isPaid,
+  });
+
+  const assignedStaff =
+    payload.assignedStaff ||
+    mapAcceptedByToAssignedStaff(
+      plain.acceptedBy,
+      plain.acceptedBy?.employeeRole || null,
+    );
+
+  if (assignedStaff) {
+    payload.assignedStaff = assignedStaff;
+    payload.assignmentDisplayType = resolveAssignmentDisplayType(assignedStaff.role);
+  }
+
+  // Do not leak legacy acceptedBy in API/socket payloads.
+  delete payload.acceptedBy;
+
+  return payload;
 };
 
 const SOCKET_EMIT_DEBUG_ENABLED =
@@ -535,6 +658,30 @@ const toSocketIdString = (value) => {
   return "";
 };
 
+const extractAnonymousSessionIdFromRequest = (req) => {
+  const bodySessionId =
+    req?.body && typeof req.body.anonymousSessionId === "string"
+      ? req.body.anonymousSessionId
+      : "";
+  const querySessionId =
+    req?.query && typeof req.query.anonymousSessionId === "string"
+      ? req.query.anonymousSessionId
+      : "";
+  const rawHeaderSessionId =
+    req?.headers?.["x-anonymous-session-id"] ||
+    req?.headers?.["x-session-id"] ||
+    req?.headers?.["x-device-session-id"];
+  const headerSessionId = Array.isArray(rawHeaderSessionId)
+    ? String(rawHeaderSessionId[0] || "")
+    : String(rawHeaderSessionId || "");
+
+  return (
+    normalizeAnonymousSessionId(bodySessionId) ||
+    normalizeAnonymousSessionId(querySessionId) ||
+    normalizeAnonymousSessionId(headerSessionId)
+  );
+};
+
 const normalizeOrderUpsertTimestamp = (value) => {
   if (!value) return new Date().toISOString();
   if (value instanceof Date) return value.toISOString();
@@ -551,22 +698,59 @@ const normalizeOrderUpsertTimestamp = (value) => {
 
 const buildOrderUpsertPayload = (order) => {
   const source = orderToPlainPayload(order) || {};
+  const statusPayload = buildOrderStatusUpdatedPayload(source);
   const orderId = toSocketIdString(source._id || source.id || source.orderId);
   const cartId = toSocketIdString(source.cartId || source.cafeId);
-  const statusRaw = String(source.status || "").trim();
+  const serviceTypeRaw = String(source.serviceType || "").trim();
+  const anonymousSessionId = normalizeAnonymousSessionId(
+    source.anonymousSessionId
+  );
   const orderTypeRaw = String(
     source.orderType || source.serviceType || "",
   ).trim();
 
   return {
-    orderId: orderId || null,
+    orderId: statusPayload.orderId || orderId || null,
     cartId: cartId || null,
-    updatedAt: normalizeOrderUpsertTimestamp(
-      source.updatedAt || source.createdAt,
-    ),
-    status: statusRaw || null,
+    updatedAt: normalizeOrderUpsertTimestamp(statusPayload.updatedAt),
+    status: statusPayload.status,
+    paymentStatus: statusPayload.paymentStatus,
+    lifecycleStatus: statusPayload.status,
+    isPaid: statusPayload.paymentStatus === PAYMENT_STATUSES.PAID,
+    serviceType: serviceTypeRaw || null,
     orderType: orderTypeRaw || null,
+    anonymousSessionId: anonymousSessionId || null,
   };
+};
+
+const resolveOrderAudienceIdentity = (order) => {
+  const source = orderToPlainPayload(order) || {};
+  const userId = toSocketIdString(
+    source.userId || source.customerId || source.user?._id || null
+  );
+  const serviceType = String(source.serviceType || "")
+    .trim()
+    .toUpperCase();
+  const anonymousSessionId = normalizeAnonymousSessionId(
+    source.anonymousSessionId ||
+      (serviceType !== "DINE_IN" ? source.sessionToken : "")
+  );
+
+  return {
+    userId: userId || null,
+    anonymousSessionId: anonymousSessionId || null,
+  };
+};
+
+const emitToOrderAudienceRooms = (io, order, eventName, payload) => {
+  if (!io || !order || !eventName) return;
+  const { userId, anonymousSessionId } = resolveOrderAudienceIdentity(order);
+  if (userId) {
+    io.to(`user_${userId}`).emit(eventName, payload);
+  }
+  if (anonymousSessionId) {
+    io.to(`anon_${anonymousSessionId}`).emit(eventName, payload);
+  }
 };
 
 const emitOrderUpsert = ({
@@ -583,13 +767,46 @@ const emitOrderUpsert = ({
   if (!resolvedCartId || !payload.orderId) return;
 
   emitToCafe(io, resolvedCartId, "order:upsert", payload);
+  emitToOrderAudienceRooms(io, order, "order:upsert", payload);
+
+  if (payload.status) {
+    emitToOrderAudienceRooms(io, order, "order_status_updated", payload);
+  }
+
   writeSocketEmitDebugLog(
     `[SOCKET_DEBUG] emit order:upsert room=cart:${resolvedCartId} orderId=${payload.orderId} cartId=${payload.cartId || resolvedCartId} status=${payload.status || "unknown"} source=${sourceEvent}`,
   );
 };
 
-const ACCEPTABLE_ORDER_STATUSES = ["Pending", "Confirmed", "Preparing", "Ready", "Served"];
-const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
+const emitCanonicalOrderStatusUpdate = ({
+  io,
+  emitToCafe,
+  order,
+  cartId = null,
+  sourceEvent = "unknown",
+}) => {
+  if (!io || !emitToCafe || !order) return;
+  const source = orderToPlainPayload(order) || order;
+  const payload = buildOrderStatusUpdatedPayload(source);
+  const resolvedCartId = toSocketIdString(
+    cartId || source?.cartId || source?.cafeId || null,
+  );
+  if (!resolvedCartId || !payload.orderId) return;
+
+  emitToCafe(io, resolvedCartId, "order_status_updated", payload);
+  emitToOrderAudienceRooms(io, source, "order_status_updated", payload);
+
+  writeSocketEmitDebugLog(
+    `[SOCKET_DEBUG] emit order_status_updated room=cart:${resolvedCartId} orderId=${payload.orderId} status=${payload.status} paymentStatus=${payload.paymentStatus} source=${sourceEvent}`,
+  );
+};
+
+const ACCEPTABLE_ORDER_STATUSES = [
+  ORDER_STATUSES.NEW,
+  ORDER_STATUSES.PREPARING,
+  ORDER_STATUSES.READY,
+];
+const ACCEPTABLE_SERVICE_TYPES = ["DINE_IN", "TAKEAWAY", "DELIVERY"];
 const AUTO_ASSIGN_CREATOR_ROLES = new Set([
   "waiter",
   "captain",
@@ -841,7 +1058,6 @@ function isTakeawayLikeForKot(order = {}) {
 
   if (
     serviceType === "TAKEAWAY" ||
-    serviceType === "PICKUP" ||
     serviceType === "DELIVERY"
   ) {
     return true;
@@ -874,10 +1090,7 @@ function resolveKotTypeLabel(order = {}) {
     return "DELIVERY";
   }
 
-  if (
-    serviceType === "PICKUP" ||
-    (serviceType === "TAKEAWAY" && orderType === "PICKUP")
-  ) {
+  if (serviceType === "TAKEAWAY" && orderType === "PICKUP") {
     return "TAKEAWAY";
   }
 
@@ -1652,29 +1865,36 @@ const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
 };
 
 // Order status transitions
-// UNIFIED flow for both DINE_IN and TAKEAWAY:
-// Pending → Confirmed → Preparing → Ready → Completed → Paid
-// Legacy statuses (Served, Finalized, Accepted, Being Prepared) still supported for backward compatibility
+// Unified flow for all order types:
+// NEW â†’ PREPARING â†’ READY â†’ COMPLETED
 const transitions = {
-  // Unified flow statuses
-  Pending: new Set(["Confirmed", "Cancelled", "Accepted"]), // Accepted for legacy takeaway accept flow
-  Confirmed: new Set(["Preparing", "Cancelled"]),
-  Preparing: new Set(["Ready", "Cancelled"]),
-  Ready: new Set(["Completed", "Served", "Cancelled"]), // Served for legacy dine-in
-  Completed: new Set(["Paid", "Cancelled"]),
-  Paid: new Set(["Returned"]),
-  Cancelled: new Set([]),
-  Returned: new Set([]),
-  // Legacy DINE_IN statuses (backward compatibility)
-  Served: new Set(["Paid", "Completed", "Cancelled"]), // Allow transition to Completed or Paid
-  Finalized: new Set(["Paid", "Cancelled"]),
-  // Legacy TAKEAWAY statuses (backward compatibility)
-  Accept: new Set(["Preparing", "Being Prepared", "BeingPrepared", "Cancelled"]),
-  Accepted: new Set(["Preparing", "Being Prepared", "BeingPrepared", "Cancelled"]),
-  "Being Prepared": new Set(["Ready", "Completed", "Cancelled"]),
-  BeingPrepared: new Set(["Ready", "Completed", "Cancelled"]),
-  Exit: new Set([]), // Final status for legacy takeaway
+  [ORDER_STATUSES.NEW]: new Set([
+    ORDER_STATUSES.PREPARING,
+    ORDER_STATUSES.READY,
+    ORDER_STATUSES.COMPLETED,
+  ]),
+  [ORDER_STATUSES.PREPARING]: new Set([
+    ORDER_STATUSES.READY,
+    ORDER_STATUSES.COMPLETED,
+  ]),
+  [ORDER_STATUSES.READY]: new Set([ORDER_STATUSES.COMPLETED]),
+  [ORDER_STATUSES.COMPLETED]: new Set([]),
 };
+
+const shouldReleaseTableForStatus = (status, paymentStatus) => {
+  const normalizedStatus = normalizeOrderStatus(status, ORDER_STATUSES.NEW);
+  const normalizedPaymentStatus = normalizePaymentStatus(
+    paymentStatus,
+    PAYMENT_STATUSES.PENDING,
+  );
+  return (
+    normalizedStatus === ORDER_STATUSES.COMPLETED &&
+    normalizedPaymentStatus === PAYMENT_STATUSES.PAID
+  );
+};
+
+const isReadyStatus = (status) =>
+  normalizeOrderStatus(status, ORDER_STATUSES.NEW) === ORDER_STATUSES.READY;
 
 const resetInventoryDeductionFlag = async (orderId) => {
   if (!orderId) return;
@@ -1769,7 +1989,7 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
     }
 
     console.log(
-      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} → AVAILABLE (Order ${order._id} status: ${order.status})`,
+      `[TABLE] Released table ${table.number} (${table._id}) - Status: ${oldStatus} â†’ AVAILABLE (Order ${order._id} status: ${order.status})`,
     );
   } catch (err) {
     console.error("Failed to release table", err);
@@ -1835,22 +2055,24 @@ const createOrder = async (req, res) => {
     });
     const {
       items,
-      serviceType = "DINE_IN",
-      orderType, // PICKUP or DELIVERY (for TAKEAWAY service type)
+      serviceType,
+      orderTypeInput, // normalized by order validation middleware
       tableId,
       sessionToken,
       customerName,
       customerMobile,
       customerEmail,
-      cartId: requestCartId, // Accept cartId from request body (for takeaway/pickup/delivery orders)
+      cartId: requestCartId, // Accept cartId from request body (for takeaway/delivery orders)
       customerLocation, // { latitude, longitude, address }
       selectedAddons, // Add-ons selected by customer
       takeawayToken: requestedTakeawayToken, // Optional pre-assigned takeaway token from customer app
       sourceQrType,
+      sourceQrContext,
       officeDeliveryCharge,
       idempotencyKey,
     } = req.body;
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
+    const requestAnonymousSessionId = extractAnonymousSessionIdFromRequest(req);
     let { tableNumber } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -1872,13 +2094,23 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const normalizedServiceType = String(serviceType || "DINE_IN")
+    const normalizedServiceType = String(serviceType || "")
       .trim()
       .toUpperCase();
-    const normalizedOrderType =
-      typeof orderType === "string" ? orderType.trim().toUpperCase() : undefined;
-    let normalizedSourceQrType =
-      sourceQrType === "OFFICE" ? "OFFICE" : "TABLE";
+    const normalizedOrderTypeInput = String(
+      orderTypeInput || req.body.orderType || "",
+    )
+      .trim()
+      .toLowerCase();
+    let normalizedSourceQrType = normalizeSourceQrType(sourceQrType);
+    if (!normalizedSourceQrType) {
+      normalizedSourceQrType = "TABLE";
+    }
+    const normalizedSourceQrContext = String(
+      sourceQrContext || req.body?.qrContext || ""
+    )
+      .trim()
+      .slice(0, 80);
     const normalizedOfficeDeliveryCharge = Number(officeDeliveryCharge);
     let officeTableContext = null;
 
@@ -1895,46 +2127,37 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
-    const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
+    // Validate service type - normalized by middleware to strict contract.
+    const validServiceTypes = ["DINE_IN", "TAKEAWAY", "DELIVERY"];
     if (!validServiceTypes.includes(normalizedServiceType)) {
-      return res.status(400).json({ message: "Invalid service type" });
+      return res.status(400).json({
+        message:
+          "Invalid service type derived from orderType. Allowed values: dine-in, takeaway, delivery.",
+      });
     }
 
-    // Preserve subtype even when clients omit orderType but send serviceType=PICKUP/DELIVERY.
-    // Ignore stale orderType for explicit dine-in requests.
+    writeOrderNotificationTrace("createOrder request normalized", {
+      serviceType: normalizedServiceType,
+      orderType: normalizedOrderTypeInput || null,
+      requestCartId: requestCartId || null,
+      hasAnonymousSessionId: !!requestAnonymousSessionId,
+    });
+
+    // `orderTypeInput` is the canonical API value (dine-in|takeaway|delivery).
     const effectiveOrderType =
       normalizedServiceType === "DINE_IN"
         ? undefined
-        : normalizedOrderType ||
-          (normalizedServiceType === "PICKUP" ||
-          normalizedServiceType === "DELIVERY"
-            ? normalizedServiceType
-            : undefined);
-
-    // For PICKUP/DELIVERY, validate orderType
-    if (
-      (normalizedServiceType === "PICKUP" ||
-        normalizedServiceType === "DELIVERY") &&
-      !effectiveOrderType
-    ) {
-      return res.status(400).json({
-        message:
-          "orderType (PICKUP or DELIVERY) is required for this service type",
-      });
-    }
+        : normalizedServiceType === "DELIVERY"
+          ? "DELIVERY"
+          : "TAKEAWAY";
 
     let tableDoc = null;
     const isTakeaway =
       normalizedServiceType === "TAKEAWAY" ||
-      normalizedServiceType === "PICKUP" ||
       normalizedServiceType === "DELIVERY";
-    const isPickup =
-      normalizedServiceType === "PICKUP" || effectiveOrderType === "PICKUP";
-    const isDelivery =
-      normalizedServiceType === "DELIVERY" || effectiveOrderType === "DELIVERY";
+    const isDelivery = normalizedServiceType === "DELIVERY";
     const isOfficeQrOrder = normalizedSourceQrType === "OFFICE";
-    const isOfficeDeliveryOrder = isOfficeQrOrder && !isPickup;
+    const isOfficeDeliveryOrder = isOfficeQrOrder && isDelivery;
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
@@ -2003,18 +2226,10 @@ const createOrder = async (req, res) => {
       // Check 2: If not found, search for any active order for this table with matching sessionToken
       if (!hasActiveOrderForTable && sessionToken) {
         try {
-          const activeStatuses = [
-            "Pending",
-            "Confirmed",
-            "Preparing",
-            "Ready",
-            "Served",
-            "Finalized",
-          ];
           existingOrderForTable = await Order.findOne({
             table: tableDoc._id,
             sessionToken: sessionToken,
-            status: { $in: activeStatuses },
+            ...buildActiveOrderMongoFilter(),
             serviceType: "DINE_IN",
           });
 
@@ -2156,15 +2371,15 @@ const createOrder = async (req, res) => {
     let cartId = null;
     let deliveryInfo = null; // Store delivery info for delivery orders
     let pickupCartData = null; // Store cart data for pickup location
-    let cartAdmin = null; // Store cart admin user (for pickup/delivery orders)
+    let cartAdmin = null; // Store cart admin user (for delivery orders)
     if (req.user && req.user.role === "admin" && req.user._id) {
       cartId = req.user._id;
       console.log(
         "[ORDER] Using cartId from authenticated user:",
         cartId.toString(),
       );
-    } else if (isTakeaway && requestCartId && !isPickup && !isDelivery) {
-      // For regular takeaway orders (not pickup/delivery), accept either:
+    } else if (isTakeaway && requestCartId && !isDelivery) {
+      // For regular takeaway orders (non-delivery), accept either:
       // 1) cart admin user id (legacy), or
       // 2) Cart document id (used by some frontend flows).
       const User = require("../models/userModel");
@@ -2241,11 +2456,11 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // For PICKUP/DELIVERY orders, validate cart configuration and delivery eligibility
-    if (isPickup || isDelivery) {
+    // For DELIVERY orders, validate cart configuration and delivery eligibility.
+    if (isDelivery) {
       if (!requestCartId) {
         return res.status(400).json({
-          message: "cartId is required for pickup/delivery orders",
+          message: "cartId is required for delivery orders",
         });
       }
 
@@ -2314,18 +2529,11 @@ const createOrder = async (req, res) => {
         }
       } catch (cartError) {
         console.error(
-          "[ORDER] Error processing cart for pickup/delivery:",
+          "[ORDER] Error processing cart for delivery:",
           cartError,
         );
         return res.status(400).json({
           message: `Failed to process cart: ${cartError.message}`,
-        });
-      }
-
-      // Validate pickup/delivery configuration
-      if (isPickup && !cart.pickupEnabled) {
-        return res.status(400).json({
-          message: "Pickup is not enabled for this cart",
         });
       }
 
@@ -2391,7 +2599,7 @@ const createOrder = async (req, res) => {
 
       // Set cartId to cartAdminId (user ID), not Cart document ID
       cartId = cartAdminId;
-      console.log("[ORDER] Set cartId for pickup/delivery order:", {
+      console.log("[ORDER] Set cartId for delivery order:", {
         requestCartId: requestCartId,
         cartAdminId: cartAdminId,
         finalCartId: cartId,
@@ -2412,7 +2620,7 @@ const createOrder = async (req, res) => {
     }
 
     // Fallback: For takeaway orders without cartId, get the first active cafe admin
-    if (isTakeaway && !cartId && !isPickup && !isDelivery) {
+    if (isTakeaway && !cartId && !isDelivery) {
       const User = require("../models/userModel");
       const firstCafe = await User.findOne({
         role: "admin",
@@ -2435,14 +2643,14 @@ const createOrder = async (req, res) => {
       }
     }
 
-    // Set franchiseId: priority 1) from authenticated cafe admin's franchise, 2) from table's franchiseId, 3) from cart admin's franchise (for pickup/delivery), 4) from cafe's franchise
+    // Set franchiseId: priority 1) from authenticated cafe admin's franchise, 2) from table's franchiseId, 3) from cart admin's franchise (for delivery), 4) from cafe's franchise
     let franchiseId = null;
     if (req.user && req.user.role === "admin" && req.user.franchiseId) {
       franchiseId = req.user.franchiseId;
     } else if (!isTakeaway && tableDoc && tableDoc.franchiseId) {
       franchiseId = tableDoc.franchiseId;
-    } else if ((isPickup || isDelivery) && cartAdmin && cartAdmin.franchiseId) {
-      // For pickup/delivery orders, use franchiseId from cartAdmin (already fetched)
+    } else if (isDelivery && cartAdmin && cartAdmin.franchiseId) {
+      // For delivery orders, use franchiseId from cartAdmin (already fetched)
       franchiseId = cartAdmin.franchiseId;
     } else if (cartId) {
       // If we have cartId but no franchiseId, get it from the cafe admin user
@@ -2455,27 +2663,32 @@ const createOrder = async (req, res) => {
       }
     }
 
-    const shouldStartPendingForPayment = isPickup || isDelivery;
     const effectiveDeliveryOrder = isDelivery || isOfficeDeliveryOrder;
+    const resolvedAnonymousSessionId =
+      requestAnonymousSessionId ||
+      (isTakeaway ? normalizeAnonymousSessionId(sessionToken || "") : "");
 
     const orderData = {
       _id: orderId,
       tableNumber: String(tableNumber),
-      table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/pickup/delivery
-      serviceType: isPickup || isDelivery ? "TAKEAWAY" : normalizedServiceType, // Store as TAKEAWAY for backward compatibility
-      orderType: isPickup ? "PICKUP" : effectiveDeliveryOrder ? "DELIVERY" : undefined,
-      // For takeaway/pickup/delivery orders, store session token to isolate each customer session
+      table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/delivery
+      serviceType: isDelivery ? "DELIVERY" : normalizedServiceType,
+      orderType:
+        normalizedServiceType === "DINE_IN"
+          ? "dine-in"
+          : effectiveDeliveryOrder
+            ? "delivery"
+            : "takeaway",
+      // For takeaway/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
       sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
       sourceQrType: normalizedSourceQrType,
+      sourceQrContext: normalizedSourceQrContext || undefined,
+      anonymousSessionId: resolvedAnonymousSessionId || undefined,
       selectedAddons: normalizeSelectedAddons(selectedAddons),
       kotLines: [kot],
-      // UNIFIED STATUS FLOW:
-      // - PICKUP/DELIVERY: Start as 'Pending' (awaiting payment confirmation)
-      // - DINE_IN and regular TAKEAWAY: Start as 'Confirmed'
-      status: shouldStartPendingForPayment ? "Pending" : "Confirmed",
-      // Payment tracking: All orders start as UNPAID
-      paymentStatus: "UNPAID",
+      status: ORDER_STATUSES.NEW,
+      paymentStatus: PAYMENT_STATUSES.PENDING,
       paymentMode: null,
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
@@ -2536,10 +2749,10 @@ const createOrder = async (req, res) => {
       orderData.specialInstructions = specialInstructions;
     }
 
-    // Add customer information for takeaway/pickup/delivery orders
-    if (isTakeaway || isPickup || isDelivery) {
-      // Customer fields are required for pickup/delivery
-      if (isPickup || isDelivery) {
+    // Add customer information for takeaway/delivery orders.
+    if (isTakeaway || isDelivery) {
+      // Customer fields are required for delivery.
+      if (isDelivery) {
         if (!customerName || !customerName.trim()) {
           return res.status(400).json({ message: "Customer name is required" });
         }
@@ -2561,7 +2774,7 @@ const createOrder = async (req, res) => {
         orderData.customerEmail = customerEmail.trim();
       }
 
-      // Store customer location for pickup/delivery
+      // Store customer location for takeaway/delivery
       if (customerLocation) {
         orderData.customerLocation = {
           latitude: customerLocation.latitude,
@@ -2606,8 +2819,8 @@ const createOrder = async (req, res) => {
         orderData.deliveryInfo = deliveryInfo;
       }
 
-      // Store pickup location (cart address) for pickup/delivery orders
-      if ((isPickup || isDelivery) && pickupCartData) {
+      // Store pickup location (cart address) for delivery orders.
+      if (isDelivery && pickupCartData) {
         if (pickupCartData.address || pickupCartData.coordinates) {
           orderData.pickupLocation = {
             address:
@@ -2939,7 +3152,7 @@ const createOrder = async (req, res) => {
             }
 
             console.log(
-              `✅ [ORDER] Updated customer record: ${customer.name} (${customer.phone || customer.email
+              `âœ… [ORDER] Updated customer record: ${customer.name} (${customer.phone || customer.email
               }) - Visit #${customer.visitCount} for order ${orderId}`,
             );
           } else {
@@ -3002,7 +3215,7 @@ const createOrder = async (req, res) => {
             try {
               customer = await Customer.create(newCustomerData);
               console.log(
-                `✅ [ORDER] Created new customer record: ${customer.name} (${customer.phone || customer.email
+                `âœ… [ORDER] Created new customer record: ${customer.name} (${customer.phone || customer.email
                 }) for order ${orderId}`,
               );
               console.log("[ORDER] Created customer details:", {
@@ -3116,6 +3329,13 @@ const createOrder = async (req, res) => {
         sourceEvent: "createOrder",
       });
 
+      writeOrderNotificationTrace("socket emits for order create", {
+        orderId: String(order._id || ""),
+        cartId: cartIdStr,
+        status: payload?.status || order.status || null,
+        lifecycleStatus: payload?.lifecycleStatus || null,
+      });
+
       // Keep legacy explicit availability event for compatibility.
       const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
       const isActiveStatus = !FINAL_ORDER_STATUSES.includes(order.status);
@@ -3127,10 +3347,35 @@ const createOrder = async (req, res) => {
           buildNewOrderAvailablePayload(order),
         );
       }
+
+      notifyNewOrder({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: payload || order,
+      })
+        .then((pushResult) => {
+          writeOrderNotificationTrace("new-order push completed", {
+            orderId: String(order._id || ""),
+            cartId: cartIdStr,
+            success: !!pushResult?.success,
+            skipped: !!pushResult?.skipped,
+            reason: pushResult?.reason || null,
+            tokenCount: pushResult?.tokenCount || 0,
+            successCount: pushResult?.successCount || 0,
+            failureCount: pushResult?.failureCount || 0,
+          });
+        })
+        .catch((pushError) => {
+          writeOrderNotificationTrace("new-order push failed", {
+            orderId: String(order._id || ""),
+            cartId: cartIdStr,
+            error: pushError?.message || "unknown",
+          });
+        });
     }
     // KOT printing is handled by print-claim/template clients.
     // Keep order creation side-effect free to avoid duplicate legacy prints.
-    return res.status(201).json(order);
+    return res.status(201).json(orderToPlainPayload(order));
   } catch (err) {
     console.error("[ORDER] createOrder - Unhandled error:", err);
     console.error("[ORDER] Error stack:", err.stack);
@@ -3195,7 +3440,12 @@ const addKot = async (req, res) => {
     const hasPrivilegedAccess = await hasPrivilegedOrderAccess(req.user, order);
     if (!hasPrivilegedAccess) {
       const sessionToken = extractSessionTokenFromRequest(req);
-      const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken);
+      const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
+      const sessionAccess = await verifyPublicOrderSessionAccess(
+        order,
+        sessionToken,
+        { anonymousSessionId }
+      );
       if (!sessionAccess.ok) {
         return res
           .status(sessionAccess.status)
@@ -3211,48 +3461,54 @@ const addKot = async (req, res) => {
       console.log(
         `[ORDER] addKot idempotent replay detected for key ${requestKotIdempotencyKey}. Returning existing order ${order._id}.`,
       );
-      return res.json(order);
+      return res.json(orderToPlainPayload(order));
     }
 
-    // Define statuses that allow adding KOTs
-    // For takeaway orders, allow more statuses (customers can add items even if preparing)
-    // For dine-in orders, also allow more statuses for flexibility
+    const normalizedStatus = normalizeOrderStatus(
+      order.status,
+      ORDER_STATUSES.NEW,
+    );
+    const normalizedPaymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
     const allowedStatusesForKot = [
-      "Pending",
-      "Confirmed",
-      "Preparing",
-      "Ready",
+      ORDER_STATUSES.NEW,
+      ORDER_STATUSES.PREPARING,
+      ORDER_STATUSES.READY,
     ];
 
-    // Never allow adding KOTs to these final statuses
-    const blockedStatuses = [
-      "Cancelled",
-      "Returned",
-      "Paid",
-      "Served",
-      "Finalized",
-    ];
-
-    if (blockedStatuses.includes(order.status)) {
+    if (
+      normalizedStatus === ORDER_STATUSES.COMPLETED ||
+      normalizedPaymentStatus === PAYMENT_STATUSES.PAID
+    ) {
       console.error(
-        "[ORDER] addKot - Order is in a final status that blocks KOTs:",
-        order.status,
+        "[ORDER] addKot - blocked on settled/completed order:",
+        JSON.stringify({
+          orderId: String(order._id || ""),
+          status: normalizedStatus,
+          paymentStatus: normalizedPaymentStatus,
+        }),
       );
       return res.status(400).json({
-        message: `Cannot add items to order with status: ${order.status
-          }. Order is already ${order.status.toLowerCase()}.`,
-        currentStatus: order.status,
+        message:
+          "Cannot add items to completed/paid orders. Please create a new order.",
+        currentStatus: normalizedStatus,
+        paymentStatus: normalizedPaymentStatus,
       });
     }
 
-    if (!allowedStatusesForKot.includes(order.status)) {
+    if (!allowedStatusesForKot.includes(normalizedStatus)) {
       console.error(
-        "[ORDER] addKot - Order status does not allow adding KOTs:",
-        order.status,
+        "[ORDER] addKot - status does not allow add:",
+        JSON.stringify({
+          orderId: String(order._id || ""),
+          status: normalizedStatus,
+        }),
       );
       return res.status(400).json({
-        message: `Order is not open for adding items. Current status: ${order.status}. Please contact staff if you need to modify your order.`,
-        currentStatus: order.status,
+        message: `Order is not open for adding items. Current status: ${normalizedStatus}.`,
+        currentStatus: normalizedStatus,
         allowedStatuses: allowedStatusesForKot,
       });
     }
@@ -3511,7 +3767,7 @@ const addKot = async (req, res) => {
             customer.lastVisitAt = new Date();
             await customer.save();
             console.log(
-              `✅ [ORDER] addKot - Updated customer record: ${customer.name} (${customer.phone || customer.email
+              `âœ… [ORDER] addKot - Updated customer record: ${customer.name} (${customer.phone || customer.email
               }) for order ${order._id}`,
             );
           } else {
@@ -3537,8 +3793,13 @@ const addKot = async (req, res) => {
     if (order.cartId) {
       const payload = orderToPlainPayload(order);
       const cartIdStr = (payload?.cartId || order.cartId).toString();
-      emitToCafe(io, cartIdStr, "order:status:updated", payload || order);
-      emitToCafe(io, cartIdStr, "orderUpdated", payload || order); // Legacy support
+      emitCanonicalOrderStatusUpdate({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: cartIdStr,
+        sourceEvent: "addKot",
+      });
       emitToCafe(io, cartIdStr, "kot:status:updated", payload || order); // KOT updated
       // Emit kot:created so app PrintService / local agent can print the new KOT (same as createOrder)
       emitToCafe(io, cartIdStr, "kot:created", payload || order);
@@ -3570,7 +3831,7 @@ const addKot = async (req, res) => {
       */
     }
 
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -3581,97 +3842,96 @@ const finalizeOrder = async (req, res) => {
   try {
     const order = await Order.findById(req.params.id);
     if (!order) {
-      console.log("Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
     }
 
-    console.log("Attempting to finalize order:", {
-      orderId: order._id,
-      currentStatus: order.status,
-      allowedTransitions: Array.from(transitions[order.status] || []),
+    const currentStatus = normalizeOrderStatus(order.status, ORDER_STATUSES.NEW);
+    const targetStatus = ORDER_STATUSES.COMPLETED;
+    const allowedTransitions = transitions[currentStatus] || new Set();
+
+    if (
+      currentStatus !== ORDER_STATUSES.COMPLETED &&
+      !allowedTransitions.has(targetStatus)
+    ) {
+      return res.status(400).json({
+        message: `Cannot finalize from ${currentStatus}.`,
+        currentStatus,
+        allowedTransitions: Array.from(allowedTransitions),
+      });
+    }
+
+    order.status = targetStatus;
+    order.paymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
+    if (
+      order.paymentStatus === PAYMENT_STATUSES.PAID &&
+      !order.paidAt
+    ) {
+      order.paidAt = new Date();
+    }
+    applyLifecycleFields(order, {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      isPaid: order.paymentStatus === PAYMENT_STATUSES.PAID,
     });
 
-    if (!transitions[order.status]?.has("Finalized")) {
-      console.log("Invalid transition:", {
-        from: order.status,
-        to: "Finalized",
-        allowedTransitions: Array.from(transitions[order.status] || []),
-      });
-      return res.status(400).json({
-        message: `Cannot finalize from ${order.status}. Order must be in 'Served' state.`,
-        currentStatus: order.status,
-        allowedTransitions: Array.from(transitions[order.status] || []),
-      });
+    const needsFallbackConsumption = !order.inventoryDeducted;
+    if (needsFallbackConsumption) {
+      order.inventoryDeducted = true;
+      order.inventoryDeductedAt = new Date();
     }
-
-    order.status = "Finalized";
-    order.inventoryDeducted = true;
-    order.inventoryDeductedAt = new Date();
     await order.save();
 
-    // Await consumption to surface failures (MenuItemV2 not found, no recipe) for diagnostics
-    const userId = req.user
-      ? req.user._id
-      : order.cartId && (order.cartId._id || order.cartId);
-    if (userId) {
-      console.log(
-        `[COSTING] Finalized order ${order._id} - Triggering consumption (User: ${userId})`,
-      );
-      try {
-        const result = await consumeIngredientsForOrder(order, userId);
-        if (result.success) {
-          console.log(
-            `[COSTING] Finalized order ${order._id} consumption success`,
-          );
-        } else {
-          console.warn(
-            `[COSTING] Finalized order ${order._id} consumption failed: ${result.message}`,
-          );
-          if (result.summary?.errors?.length) {
-            console.warn(
-              `[COSTING] Consumption errors:`,
-              result.summary.errors,
-            );
-          }
-          if (shouldResetInventoryDeduction(result)) {
+    if (needsFallbackConsumption) {
+      const userId = req.user
+        ? req.user._id
+        : order.cartId && (order.cartId._id || order.cartId);
+      if (userId) {
+        try {
+          const result = await consumeIngredientsForOrder(order, userId);
+          if (!result.success && shouldResetInventoryDeduction(result)) {
             await resetInventoryDeductionFlag(order._id);
           }
+        } catch (err) {
+          console.error(
+            `[COSTING] Finalize consumption error for order ${order._id}:`,
+            err,
+          );
+          await resetInventoryDeductionFlag(order._id);
         }
-      } catch (err) {
-        console.error(
-          `[COSTING] Finalized order ${order._id} consumption error:`,
-          err,
-        );
+      } else {
         await resetInventoryDeductionFlag(order._id);
       }
-    } else {
-      console.warn(
-        `[COSTING] Skipping consumption for finalized order ${order._id}: no req.user and no order.cartId`,
-      );
-      await resetInventoryDeductionFlag(order._id);
     }
 
-    // Release table when order is finalized
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    await releaseTableForOrder(order, io, emitToCafe);
+    if (shouldReleaseTableForStatus(order.status, order.paymentStatus)) {
+      await releaseTableForOrder(order, io, emitToCafe);
+    }
 
-    // Emit socket event to cafe room (only for admin panel, not customer frontend)
     if (order.cartId && io && emitToCafe) {
-      // Only emit to admin panel - customer frontend uses polling to avoid loops
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      const payload = orderToPlainPayload(order);
+      emitCanonicalOrderStatusUpdate({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "finalizeOrder",
+      });
+      emitToCafe(io, order.cartId.toString(), "kot:status:updated", payload || order); // KOT updated
       emitOrderUpsert({
         io,
         emitToCafe,
-        order,
+        order: payload || order,
         cartId: order.cartId.toString(),
         sourceEvent: "finalizeOrder",
       });
     }
 
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -3726,18 +3986,13 @@ const getOrders = async (req, res) => {
     }
     // For super_admin, no query-level restriction (see all orders)
 
-    // PICKUP/DELIVERY: hide unpaid Pending orders from cart admin until payment is done.
-    // Regular TAKEAWAY should follow dine-in visibility.
-    query.$and = query.$and || [];
-    query.$and.push({
-      $or: [
-        { status: { $ne: "Pending" } },
-        {
-          orderType: { $nin: ["PICKUP", "DELIVERY"] },
-          serviceType: { $nin: ["PICKUP", "DELIVERY"] },
-        },
-      ],
-    });
+    const includeHistory =
+      String(req.query?.includeHistory || "").trim().toLowerCase() === "true";
+
+    if (!includeHistory) {
+      query.$and = query.$and || [];
+      query.$and.push(buildActiveOrderMongoFilter());
+    }
 
     // Fetch ALL orders - no date filtering, no limits, permanent storage
     // Add limit to prevent infinite queries (max 10000 orders at once)
@@ -3802,14 +4057,8 @@ const getOrders = async (req, res) => {
       }
     }
 
-    for (const order of orders) {
-      order.assignedStaff = mapAcceptedByToAssignedStaff(
-        order.acceptedBy,
-        order.acceptedBy?.employeeRole || null,
-      );
-    }
-
-    return res.json(orders);
+    const responseOrders = orders.map((order) => orderToPlainPayload(order));
+    return res.json(responseOrders);
   } catch (err) {
     console.error("[GET_ORDERS] Error:", err);
     return res.status(500).json({ message: err.message });
@@ -3893,11 +4142,18 @@ const getOrderById = async (req, res) => {
     const hasPrivilegedAccess = await hasPrivilegedOrderAccess(req.user, order);
     if (!hasPrivilegedAccess) {
       const sessionToken = extractSessionTokenFromRequest(req);
-      const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken, {
-        allowPendingTakeawayWithoutToken: true,
-      });
+      const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
+      const sessionAccess = await verifyPublicOrderSessionAccess(
+        order,
+        sessionToken,
+        {
+          allowPendingTakeawayWithoutToken: true,
+          anonymousSessionId,
+        }
+      );
       if (!sessionAccess.ok) {
         delete order.sessionToken;
+        delete order.anonymousSessionId;
       }
     }
 
@@ -4004,22 +4260,12 @@ const getOrderById = async (req, res) => {
       order.acceptedBy?.employeeRole || null,
     );
     */
-    if (hasPrivilegedAccess) {
-      order.assignedStaff = mapAcceptedByToAssignedStaff(
-        order.acceptedBy,
-        order.acceptedBy?.employeeRole || null,
-      );
-    } else if (order.acceptedBy && typeof order.acceptedBy === "object") {
-      // Customer/public response: do not expose staff identity or disability details.
-      const sanitizedAcceptedBy = { ...order.acceptedBy };
-      delete sanitizedAcceptedBy.employeeName;
-      if (sanitizedAcceptedBy.disability) {
-        delete sanitizedAcceptedBy.disability;
-      }
-      order.acceptedBy = sanitizedAcceptedBy;
-      delete order.assignedStaff;
+    const responseOrder = orderToPlainPayload(order);
+    if (!hasPrivilegedAccess && responseOrder) {
+      delete responseOrder.assignedStaff;
+      delete responseOrder.assignmentDisplayType;
     }
-    return res.json(order);
+    return res.json(responseOrder);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -4103,12 +4349,24 @@ const addItemsToOrder = async (req, res) => {
       }
     }
 
-    // Check if order can be modified - only allow adding items until payment is done
-    // Block adding items to Paid, Cancelled, or Returned orders
-    if (["Paid", "Cancelled", "Returned"].includes(order.status)) {
+    // Block adding items once lifecycle is completed or payment is already done.
+    const normalizedStatus = normalizeOrderStatus(
+      order.status,
+      ORDER_STATUSES.NEW,
+    );
+    const normalizedPaymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
+    if (
+      normalizedStatus === ORDER_STATUSES.COMPLETED ||
+      normalizedPaymentStatus === PAYMENT_STATUSES.PAID
+    ) {
       return res.status(400).json({
-        message: `Cannot add items to order with status: ${order.status}. Items can only be added to unpaid orders.`,
-        currentStatus: order.status,
+        message:
+          "Cannot add items to completed/paid orders. Items can only be added while order is active.",
+        currentStatus: normalizedStatus,
+        paymentStatus: normalizedPaymentStatus,
       });
     }
 
@@ -4175,19 +4433,25 @@ const addItemsToOrder = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId) {
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-      emitToCafe(io, order.cartId.toString(), "kot:status:updated", order); // KOT updated
+      const payload = orderToPlainPayload(order);
+      emitCanonicalOrderStatusUpdate({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "addItemsToOrder",
+      });
+      emitToCafe(io, order.cartId.toString(), "kot:status:updated", payload || order); // KOT updated
       emitOrderUpsert({
         io,
         emitToCafe,
-        order,
+        order: payload || order,
         cartId: order.cartId.toString(),
         sourceEvent: "addItemsToOrder",
       });
     }
 
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     console.error("[ORDER] addItemsToOrder - Error:", err);
     return res.status(500).json({ message: err.message });
@@ -4258,11 +4522,24 @@ const updateOrderAddons = async (req, res) => {
       }
     }
 
-    // Same modification rules as add-items endpoint
-    if (["Paid", "Cancelled", "Returned"].includes(order.status)) {
+    // Same modification rules as add-items endpoint.
+    const normalizedStatus = normalizeOrderStatus(
+      order.status,
+      ORDER_STATUSES.NEW,
+    );
+    const normalizedPaymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
+    if (
+      normalizedStatus === ORDER_STATUSES.COMPLETED ||
+      normalizedPaymentStatus === PAYMENT_STATUSES.PAID
+    ) {
       return res.status(400).json({
-        message: `Cannot update add-ons for order with status: ${order.status}. Add-ons can only be updated on unpaid active orders.`,
-        currentStatus: order.status,
+        message:
+          "Cannot update add-ons for completed/paid orders. Add-ons can only be changed while order is active.",
+        currentStatus: normalizedStatus,
+        paymentStatus: normalizedPaymentStatus,
       });
     }
 
@@ -4289,18 +4566,24 @@ const updateOrderAddons = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId && emitToCafe) {
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      const payload = orderToPlainPayload(order);
+      emitCanonicalOrderStatusUpdate({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "updateOrderAddons",
+      });
       emitOrderUpsert({
         io,
         emitToCafe,
-        order,
+        order: payload || order,
         cartId: order.cartId.toString(),
         sourceEvent: "updateOrderAddons",
       });
     }
 
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     console.error("[ORDER] updateOrderAddons - Error:", err);
     return res.status(500).json({ message: err.message });
@@ -4397,11 +4680,12 @@ const acceptOrder = async (req, res) => {
     const assignmentDisplayType = resolveAssignmentDisplayType(accepterRole);
 
     // Atomic update: first to accept wins.
-    // For takeaway flows we normalize Pending -> Confirmed when accepted.
     const setFields = { acceptedBy };
-    if (order.serviceType !== "DINE_IN") {
-      setFields.status = "Confirmed";
-    }
+    applyLifecycleFields(setFields, {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      isPaid: order.isPaid,
+    });
     const updatedOrder = await Order.findOneAndUpdate(
       {
         _id: orderId,
@@ -4429,28 +4713,17 @@ const acceptOrder = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     let assignedStaff = null;
+    const updatedOrderPayload = orderToPlainPayload(updatedOrder);
     if (io && updatedOrder.cartId && emitToCafe) {
       assignedStaff = mapAcceptedByToAssignedStaff(
         updatedOrder.acceptedBy,
         accepterRole,
       );
 
-      emitToCafe(
-        io,
-        updatedOrder.cartId.toString(),
-        "order:status:updated",
-        updatedOrder,
-      );
-      emitToCafe(
-        io,
-        updatedOrder.cartId.toString(),
-        "orderUpdated",
-        updatedOrder,
-      );
-      emitOrderUpsert({
+      emitCanonicalOrderStatusUpdate({
         io,
         emitToCafe,
-        order: updatedOrder,
+        order: updatedOrderPayload,
         cartId: updatedOrder.cartId.toString(),
         sourceEvent: "acceptOrder",
       });
@@ -4463,15 +4736,19 @@ const acceptOrder = async (req, res) => {
           status: updatedOrder.status,
           assignedStaff,
           assignmentDisplayType,
-          order: updatedOrder,
+          order: updatedOrderPayload,
         },
       );
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: updatedOrderPayload,
+        cartId: updatedOrder.cartId.toString(),
+        sourceEvent: "acceptOrder",
+      });
     }
 
-    const responseOrder =
-      typeof updatedOrder.toObject === "function"
-        ? updatedOrder.toObject()
-        : updatedOrder;
+    const responseOrder = updatedOrderPayload || {};
     responseOrder.assignedStaff = assignedStaff;
     responseOrder.assignmentDisplayType = assignmentDisplayType;
     return res.json(responseOrder);
@@ -4484,41 +4761,29 @@ const acceptOrder = async (req, res) => {
 // ---------------- UPDATE ORDER STATUS ----------------
 const updateOrderStatus = async (req, res) => {
   try {
-    const { status, reason } = req.body;
-    if (!status) return res.status(400).json({ message: "Status required" });
+    const { status, reason, paymentStatus } = req.body || {};
+    if (!status) {
+      return res.status(400).json({ message: "Status required" });
+    }
+
+    const requestedStatus = normalizeOrderStatus(status, ORDER_STATUSES.NEW);
+    const requestedPaymentStatus =
+      paymentStatus !== undefined
+        ? normalizePaymentStatus(paymentStatus, PAYMENT_STATUSES.PENDING)
+        : null;
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    // Check access permissions based on admin role:
-    // - Cafe admin: for DINE_IN, enforce cart ownership; for TAKEAWAY, allow flexible control
-    // - Franchise admin: can only update orders from cafes under their franchise
-    // - Super admin: can update all orders
     if (req.user && req.user.role === "admin" && req.user._id) {
-      // Cafe admin - only enforce cartId check for dine-in orders
-      if (order.serviceType !== "TAKEAWAY") {
-        if (
-          !order.cartId ||
-          order.cartId.toString() !== req.user._id.toString()
-        ) {
-          return res
-            .status(403)
-            .json({ message: "Order does not belong to your cafe" });
+      if (order.serviceType !== "TAKEAWAY" && order.serviceType !== "DELIVERY") {
+        if (!order.cartId || order.cartId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Order does not belong to your cafe" });
         }
       }
-    } else if (
-      req.user &&
-      req.user.role === "franchise_admin" &&
-      req.user._id
-    ) {
-      // Franchise admin - check if order belongs to their franchise
-      if (
-        !order.franchiseId ||
-        order.franchiseId.toString() !== req.user._id.toString()
-      ) {
-        return res
-          .status(403)
-          .json({ message: "Order does not belong to your franchise" });
+    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
+      if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
+        return res.status(403).json({ message: "Order does not belong to your franchise" });
       }
     } else if (
       req.user &&
@@ -4536,182 +4801,62 @@ const updateOrderStatus = async (req, res) => {
           .json({ message: "Order does not belong to your cart/kiosk" });
       }
     }
-    // For super_admin, no restriction (they can update all orders)
 
-    // ADMIN FLEXIBLE STATUS CHANGES: Allow admins to change status to any valid status
-    // This gives admins full control over order status regardless of normal flow
-    // Include both DINE_IN and TAKEAWAY statuses
-    const validStatuses = [
-      "Pending",
-      "Confirmed",
-      "Preparing",
-      "Ready",
-      "Served",
-      "Finalized",
-      "Paid",
-      "Cancelled",
-      "Returned",
-      // TAKEAWAY statuses
-      "Accept",
-      "Accepted",
-      "Being Prepared",
-      "BeingPrepared",
-      "Completed",
-      "Exit",
-    ];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({
-        message: `Invalid status: ${status}`,
-        validStatuses,
-      });
-    }
+    const currentStatus = normalizeOrderStatus(order.status, ORDER_STATUSES.NEW);
+    const isPrivilegedRole = ["admin", "franchise_admin", "super_admin"].includes(
+      String(req.user?.role || "").toLowerCase(),
+    );
 
-    // For non-admin users, validate status transitions based on service type
-    if (
-      req.user &&
-      !["admin", "franchise_admin", "super_admin"].includes(req.user.role)
-    ) {
-      const currentStatus = order.status;
+    if (!isPrivilegedRole && requestedStatus !== currentStatus) {
       const allowedTransitions = transitions[currentStatus] || new Set();
-
-      // Normalize status names for comparison (handle "Being Prepared" vs "BeingPrepared")
-      const normalizedStatus =
-        status === "Being Prepared" ? "BeingPrepared" : status;
-      const normalizedCurrent =
-        currentStatus === "Being Prepared" ? "BeingPrepared" : currentStatus;
-
-      // Check if transition is allowed
-      if (
-        !allowedTransitions.has(status) &&
-        !allowedTransitions.has(normalizedStatus)
-      ) {
-        // Special handling: Allow "Accept" -> "Being Prepared" for takeaway orders starting from Pending
-        if (
-          order.serviceType === "TAKEAWAY" &&
-          (currentStatus === "Pending" ||
-            currentStatus === "Accept" ||
-            currentStatus === "Accepted") &&
-          (status === "Being Prepared" || status === "BeingPrepared")
-        ) {
-          // Allow this transition
-        } else {
-          return res.status(400).json({
-            message: `Invalid status transition from ${currentStatus} to ${status}`,
-            currentStatus,
-            requestedStatus: status,
-            allowedTransitions: Array.from(allowedTransitions),
-          });
-        }
-      }
-    }
-
-    // PICKUP/DELIVERY: block order from proceeding until payment is complete.
-    const isPickupOrDeliveryOrder =
-      order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY" ||
-      order.serviceType === "PICKUP" ||
-      order.serviceType === "DELIVERY";
-    const isProceedingStatus = [
-      "Confirmed",
-      "Preparing",
-      "Being Prepared",
-      "BeingPrepared",
-      "Ready",
-      "Completed",
-      "Served",
-    ].includes(status);
-    if (isPickupOrDeliveryOrder && isProceedingStatus) {
-      const alreadyPaid =
-        order.status === "Paid" || order.paymentStatus === "PAID";
-      let paymentComplete = alreadyPaid;
-      if (!paymentComplete) {
-        const paidPayment = await Payment.findOne({
-          orderId: order._id,
-          status: "PAID",
-        })
-          .limit(1)
-          .lean();
-        paymentComplete = !!paidPayment;
-      }
-      if (!paymentComplete) {
+      if (!allowedTransitions.has(requestedStatus)) {
         return res.status(400).json({
-          message:
-            "Payment must be marked complete before this order can proceed. Please confirm payment (online or cash) in the Payments panel first.",
-          code: "PAYMENT_REQUIRED",
+          message: `Invalid status transition from ${currentStatus} to ${requestedStatus}`,
+          currentStatus,
+          requestedStatus,
+          allowedTransitions: Array.from(allowedTransitions),
         });
       }
     }
 
-    // Log the status change (admin has full control)
-    console.log("Status update (admin flexible):", {
-      orderId: order._id,
-      serviceType: order.serviceType,
-      currentStatus: order.status,
-      requestedStatus: status,
-      isAdmin: !!req.user,
+    const updateData = {
+      status: requestedStatus,
+      paymentStatus:
+        requestedPaymentStatus ??
+        normalizePaymentStatus(order.paymentStatus, PAYMENT_STATUSES.PENDING),
+    };
+
+    if (reason) {
+      updateData.cancellationReason = String(reason).trim();
+    }
+
+    if (updateData.paymentStatus === PAYMENT_STATUSES.PAID) {
+      updateData.paidAt = new Date();
+    }
+
+    const isPreparingStatus = requestedStatus === ORDER_STATUSES.PREPARING;
+    const needsInventoryDeduction = isPreparingStatus && !order.inventoryDeducted;
+    const isCompletionOrReady =
+      requestedStatus === ORDER_STATUSES.READY ||
+      requestedStatus === ORDER_STATUSES.COMPLETED;
+    const needsFallbackConsumption = isCompletionOrReady && !order.inventoryDeducted;
+
+    if (needsInventoryDeduction || needsFallbackConsumption) {
+      updateData.inventoryDeducted = true;
+      updateData.inventoryDeductedAt = new Date();
+    }
+
+    applyLifecycleFields(updateData, {
+      status: updateData.status,
+      paymentStatus: updateData.paymentStatus,
+      isPaid:
+        updateData.paymentStatus === PAYMENT_STATUSES.PAID || order.isPaid === true,
     });
 
-    const io = req.app.get("io");
-
-    // Prepare update object for faster atomic update
-    const updateData = { status };
-    if (reason) {
-      updateData.cancellationReason = reason;
-    }
-
-    // Handle status-specific updates
-    if (status === "Paid") {
-      updateData.paidAt = new Date();
-      updateData.paymentStatus = "PAID";
-    } else if (status === "Returned") {
-      updateData.returnedAt = new Date();
-      updateData.paidAt = null;
-      updateData.paymentStatus = "REFUNDED";
-      if (Array.isArray(order.kotLines)) {
-        order.kotLines.forEach((kot, index) => {
-          const kotLine = order.kotLines[index];
-          const items = Array.isArray(kotLine.items) ? kotLine.items : [];
-          kotLine.items = items.map((item) => {
-            const plainItem = item?.toObject ? item.toObject() : item;
-            return {
-              ...plainItem,
-              returned: true,
-            };
-          });
-          kotLine.subtotal = 0;
-          kotLine.gst = 0;
-          kotLine.totalAmount = 0;
-        });
-        updateData.kotLines = order.kotLines;
-      }
-    }
-
-    // CRITICAL: Inventory deduction ONLY happens when status changes to "Preparing" or "Being Prepared"
-    // AND only if inventory hasn't already been deducted (inventoryDeducted flag)
-    const isPreparingStatus = ["Preparing", "Being Prepared", "BeingPrepared"].includes(status);
-    const needsInventoryDeduction = isPreparingStatus && !order.inventoryDeducted;
-
-    // Fallback: If order reaches Completed, Paid, Ready, Served, or Exit without consumption, trigger now
-    // Served: cart admin may mark dine-in as "Served" without going through Preparing/Ready (e.g. one-click serve)
-    const isCompletionStatus = ["Completed", "Paid", "Ready", "Served", "Exit"].includes(status);
-    const needsFallbackConsumption = isCompletionStatus && !order.inventoryDeducted;
-
-    if (needsInventoryDeduction) {
-      // Set the flag BEFORE consumption to prevent race conditions
-      updateData.inventoryDeducted = true;
-      updateData.inventoryDeductedAt = new Date();
-    } else if (needsFallbackConsumption) {
-      // Set flag so we consume once and avoid duplicate runs
-      updateData.inventoryDeducted = true;
-      updateData.inventoryDeductedAt = new Date();
-    }
-
-    // Use findByIdAndUpdate for faster atomic update (instead of find + save)
-    const updatedOrder = await Order.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: false }, // Skip validators for speed
-    )
+    const updatedOrder = await Order.findByIdAndUpdate(req.params.id, updateData, {
+      new: true,
+      runValidators: true,
+    })
       .populate("table", "number name status")
       .lean();
 
@@ -4719,245 +4864,114 @@ const updateOrderStatus = async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
 
-    // Update local order object for socket emission
-    Object.assign(order, updatedOrder);
+    const userId = req.user
+      ? req.user._id
+      : updatedOrder.cartId && (updatedOrder.cartId._id || updatedOrder.cartId);
 
-    // INVENTORY CONSUMPTION - ONLY when changing to PREPARING status
-    // This ensures:
-    // 1. Real-time inventory deduction when kitchen starts
-    // 2. No double deduction (flag is set above)
-    // 3. Finance panel accuracy
-    if (needsInventoryDeduction) {
-      const userId = req.user
-        ? req.user._id
-        : updatedOrder.cartId &&
-        (updatedOrder.cartId._id || updatedOrder.cartId);
-
-      if (!userId) {
-        console.warn(
-          `[COSTING] Skipping consumption for order ${updatedOrder._id}: no req.user and no order.cartId`,
+    if ((needsInventoryDeduction || needsFallbackConsumption) && userId) {
+      consumeIngredientsForOrder(updatedOrder, userId).catch(async (consumptionError) => {
+        console.error(
+          `[COSTING] Error consuming ingredients for order ${updatedOrder._id}:`,
+          consumptionError,
         );
-      } else {
-        console.log(
-          `[COSTING] 🔥 Status changed to ${status} for order ${order._id} - Triggering REAL-TIME inventory deduction (User: ${userId})`,
-        );
-
-        // Run ingredient consumption in background (non-blocking)
-        consumeIngredientsForOrder(updatedOrder, userId)
-          .then(async (consumptionResult) => {
-            if (consumptionResult.success) {
-              console.log(
-                `[COSTING] ✅ Successfully consumed ingredients for order ${order._id} (status: ${status})`,
-              );
-            } else {
-              // It's normal to have "already processed" or "no items" - log as info, not error/warn
-              const isBenign =
-                consumptionResult.alreadyProcessed ||
-                consumptionResult.message?.includes("No new items");
-              if (isBenign) {
-                console.log(
-                  `[COSTING] ℹ️ Consumption skipped for ${order._id}: ${consumptionResult.message}`,
-                );
-              } else {
-                console.warn(
-                  `[COSTING] ❌ Failed to consume ingredients for order ${order._id}:`,
-                );
-                if (consumptionResult.summary?.errors) {
-                  consumptionResult.summary.errors.forEach((e) => {
-                    console.warn(` - ${e.item}: ${e.error}`);
-                  });
-                } else {
-                  console.warn(
-                    consumptionResult.error ||
-                    consumptionResult.message ||
-                    "Unknown error",
-                  );
-                }
-                if (shouldResetInventoryDeduction(consumptionResult)) {
-                  await resetInventoryDeductionFlag(updatedOrder._id);
-                }
-              }
-            }
-          })
-          .catch(async (consumptionError) => {
-            console.error(
-              `[COSTING] ❌ Error consuming ingredients for order ${order._id}:`,
-              consumptionError,
-            );
-            await resetInventoryDeductionFlag(updatedOrder._id);
-          });
-      }
-      if (!userId) {
         await resetInventoryDeductionFlag(updatedOrder._id);
-      }
-    } else if (isPreparingStatus && order.inventoryDeducted) {
-      console.log(
-        `[COSTING] ℹ️ Order ${order._id} already had inventory deducted - skipping duplicate consumption`,
-      );
-    } else if (needsFallbackConsumption) {
-      const userId = req.user
-        ? req.user._id
-        : updatedOrder.cartId &&
-        (updatedOrder.cartId._id || updatedOrder.cartId);
-
-      if (!userId) {
-        console.warn(
-          `[COSTING] Skipping fallback consumption for order ${updatedOrder._id}: no req.user and no order.cartId`,
-        );
-      } else {
-        console.log(
-          `[COSTING] 🔥 Fallback: Order ${updatedOrder._id} reached ${status} without consumption - triggering now`,
-        );
-
-        consumeIngredientsForOrder(updatedOrder, userId)
-          .then(async (consumptionResult) => {
-            if (consumptionResult.success) {
-              console.log(
-                `[COSTING] ✅ Fallback consumption success for order ${order._id}`,
-              );
-            } else {
-              const isBenign =
-                consumptionResult.alreadyProcessed ||
-                consumptionResult.message?.includes("No new items");
-              if (isBenign) {
-                console.log(
-                  `[COSTING] ℹ️ Fallback consumption skipped for ${order._id}: ${consumptionResult.message}`,
-                );
-              } else {
-                console.warn(
-                  `[COSTING] ❌ Fallback consumption failed for order ${order._id}:`,
-                );
-                if (consumptionResult.summary?.errors) {
-                  consumptionResult.summary.errors.forEach((e) => {
-                    console.warn(` - ${e.item}: ${e.error}`);
-                  });
-                } else {
-                  console.warn(
-                    consumptionResult.error ||
-                    consumptionResult.message ||
-                    "Unknown error",
-                  );
-                }
-                if (shouldResetInventoryDeduction(consumptionResult)) {
-                  await resetInventoryDeductionFlag(updatedOrder._id);
-                }
-              }
-            }
-          })
-          .catch(async (consumptionError) => {
-            console.error(
-              `[COSTING] ❌ Fallback consumption error for order ${order._id}:`,
-              consumptionError,
-            );
-            await resetInventoryDeductionFlag(updatedOrder._id);
-          });
-      }
-      if (!userId) {
-        await resetInventoryDeductionFlag(updatedOrder._id);
-      }
+      });
     }
 
-    // Handle payment updates in background (non-blocking)
+    const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
+    const updatedOrderPayload = orderToPlainPayload(updatedOrder);
 
-    // Emit socket event immediately for fast UI update
-    if (order.cartId && io && emitToCafe) {
-      // Emit immediately with updated order data
-      emitToCafe(
+    if (updatedOrder.cartId && io && emitToCafe) {
+      emitCanonicalOrderStatusUpdate({
         io,
-        order.cartId.toString(),
-        "order:status:updated",
-        updatedOrder,
-      );
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", updatedOrder); // Legacy support
+        emitToCafe,
+        order: updatedOrderPayload,
+        cartId: updatedOrder.cartId.toString(),
+        sourceEvent: "updateOrderStatus",
+      });
       emitOrderUpsert({
         io,
         emitToCafe,
-        order: updatedOrder,
-        cartId: order.cartId.toString(),
+        order: updatedOrderPayload,
+        cartId: updatedOrder.cartId.toString(),
         sourceEvent: "updateOrderStatus",
       });
     }
 
-    // Handle payment and table release in background (non-blocking)
-    Promise.all([
-      // Payment handling
-      (async () => {
-        if (status === "Paid") {
-          try {
-            const { payment, created } = await ensurePaymentRecord(
-              updatedOrder,
-              {
-                status: "PAID",
-                method: "CASH",
-                description: "Payment recorded via admin panel",
-              },
-            );
-            if (payment && io) {
-              const payload = formatPaymentPayload(payment);
-              if (payload) {
-                io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
-              }
-            }
-          } catch (err) {
-            console.error("[UPDATE_STATUS] Payment error:", err);
+    if (updateData.paymentStatus === PAYMENT_STATUSES.PAID) {
+      try {
+        const { payment, created } = await ensurePaymentRecord(updatedOrder, {
+          status: "PAID",
+          method: "CASH",
+          description: "Payment recorded via order status update",
+        });
+        if (payment && io) {
+          const payload = formatPaymentPayload(payment);
+          if (payload) {
+            io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
           }
         }
+      } catch (paymentError) {
+        console.error("[UPDATE_STATUS] Payment sync failed:", paymentError);
+      }
+    }
 
-        if (status === "Returned") {
-          try {
-            const payments = await Payment.find({ orderId: order._id });
-            const updatePromises = payments.map((payment) => {
-              payment.status = "CANCELLED";
-              payment.cancelledAt = new Date();
-              payment.cancellationReason = "Order returned";
-              return payment.save().then(() => {
-                if (io) {
-                  const payload = formatPaymentPayload(payment);
-                  if (payload) {
-                    io.emit("paymentUpdated", payload);
-                  }
-                }
-              });
-            });
-            await Promise.all(updatePromises);
-          } catch (err) {
-            console.error("[UPDATE_STATUS] Payment cancellation error:", err);
-          }
-        }
-      })(),
-      // Table release
-      (async () => {
-        if (["Paid", "Cancelled", "Returned", "Finalized"].includes(status)) {
-          try {
-            await releaseTableForOrder(updatedOrder, io, emitToCafe);
-          } catch (err) {
-            console.error("[UPDATE_STATUS] Table release error:", err);
-          }
-        }
-      })(),
-    ]).catch((err) => {
-      console.error("[UPDATE_STATUS] Background task error:", err);
-    });
+    if (isReadyStatus(updatedOrder.status)) {
+      notifyOrderReady({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: updatedOrderPayload,
+      }).catch((pushError) => {
+        console.error("[UPDATE_STATUS] order_ready notification failed:", pushError);
+      });
+    }
 
-    // Return immediately - don't wait for background tasks
-    return res.json(updatedOrder);
+    if (updateData.paymentStatus === PAYMENT_STATUSES.PAID) {
+      notifyPaymentReceived({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: updatedOrderPayload,
+      }).catch((pushError) => {
+        console.error("[UPDATE_STATUS] payment_received notification failed:", pushError);
+      });
+    }
+
+    if (reason && requestedStatus === ORDER_STATUSES.COMPLETED) {
+      notifyOrderCancelled({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: updatedOrderPayload,
+        reason,
+      }).catch((pushError) => {
+        console.error("[UPDATE_STATUS] order_cancelled notification failed:", pushError);
+      });
+    }
+
+    if (shouldReleaseTableForStatus(updatedOrder.status, updatedOrder.paymentStatus)) {
+      await releaseTableForOrder(updatedOrder, io, emitToCafe);
+    }
+
+    return res.json(updatedOrderPayload);
   } catch (err) {
     console.error("Status update error:", err);
     return res.status(500).json({ message: err.message });
   }
 };
-
 // ---------------- CUSTOMER CANCEL/RETURN ORDER ----------------
 const cancelOrderByCustomer = async (req, res) => {
   try {
-    const { status, reason } = req.body;
+    const { status, reason } = req.body || {};
     const orderId = req.params.id;
+    const requestedAction = String(status || "Cancelled")
+      .trim()
+      .toUpperCase();
+    const isCancelAction = requestedAction === "CANCELLED";
+    const isReturnAction = requestedAction === "RETURNED";
 
-    if (!status) return res.status(400).json({ message: "Status required" });
-    if (status !== "Cancelled" && status !== "Returned") {
+    if (!isCancelAction && !isReturnAction) {
       return res.status(400).json({
-        message: "Only Cancelled or Returned status allowed for customers",
+        message: "Only Cancelled or Returned actions are allowed",
       });
     }
 
@@ -4965,46 +4979,54 @@ const cancelOrderByCustomer = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const sessionToken = extractSessionTokenFromRequest(req);
-    const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken, {
-      allowPendingTakeawayWithoutToken: status === "Cancelled",
-    });
+    const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
+    const sessionAccess = await verifyPublicOrderSessionAccess(
+      order,
+      sessionToken,
+      {
+        allowPendingTakeawayWithoutToken: isCancelAction,
+        anonymousSessionId,
+      }
+    );
     if (!sessionAccess.ok) {
       return res
         .status(sessionAccess.status)
         .json({ message: sessionAccess.message });
     }
 
-    // Check if status transition is allowed
-    const allowedStatuses =
-      status === "Cancelled"
-        ? [
-          "Pending",
-          "Confirmed",
-          "Preparing",
-          "Ready",
-          "Served",
-          "Finalized",
-          "Completed",
-        ]
-        : ["Paid"];
+    const currentStatus = normalizeOrderStatus(order.status, ORDER_STATUSES.NEW);
+    const currentPaymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
 
-    if (!allowedStatuses.includes(order.status)) {
+    if (isCancelAction && currentPaymentStatus === PAYMENT_STATUSES.PAID) {
       return res.status(400).json({
-        message: `Cannot ${status.toLowerCase()} order with status ${order.status
-          }`,
-        currentStatus: order.status,
-        allowedStatuses,
+        message: "Paid orders cannot be cancelled. Use return flow instead.",
+        currentStatus,
+        paymentStatus: currentPaymentStatus,
+      });
+    }
+
+    if (isReturnAction && currentPaymentStatus !== PAYMENT_STATUSES.PAID) {
+      return res.status(400).json({
+        message: "Only paid orders can be returned.",
+        currentStatus,
+        paymentStatus: currentPaymentStatus,
       });
     }
 
     const io = req.app.get("io");
 
-    order.status = status;
+    order.status = ORDER_STATUSES.COMPLETED;
+    order.paymentStatus = isReturnAction
+      ? PAYMENT_STATUSES.PENDING
+      : currentPaymentStatus;
     if (reason) {
-      order.cancellationReason = reason;
+      order.cancellationReason = String(reason).trim();
     }
 
-    if (status === "Returned") {
+    if (isReturnAction) {
       order.returnedAt = new Date();
       order.paidAt = null;
       if (Array.isArray(order.kotLines)) {
@@ -5041,29 +5063,50 @@ const cancelOrderByCustomer = async (req, res) => {
       }
     }
 
+    applyLifecycleFields(order, {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      isPaid: order.paymentStatus === PAYMENT_STATUSES.PAID,
+    });
     await order.save();
 
-    // Release table if order is cancelled or returned
+    // Release table for cancelled/returned flows so dine-in table is reusable.
     const emitToCafe = req.app.get("emitToCafe");
-    if (["Cancelled", "Returned"].includes(status)) {
-      await releaseTableForOrder(order, io, emitToCafe);
-    }
+    await releaseTableForOrder(order, io, emitToCafe);
 
-    // Emit socket event to cafe room (only for admin panel, not customer frontend)
     if (order.cartId && io && emitToCafe) {
-      // Only emit to admin panel - customer frontend uses polling to avoid loops
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-      emitOrderUpsert({
+      const payload = orderToPlainPayload(order);
+      emitCanonicalOrderStatusUpdate({
         io,
         emitToCafe,
-        order,
+        order: payload || order,
         cartId: order.cartId.toString(),
         sourceEvent: "cancelOrderByCustomer",
       });
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "cancelOrderByCustomer",
+      });
+
+      notifyOrderCancelled({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: payload || order,
+        reason:
+          order.cancellationReason ||
+          (isReturnAction ? "Customer returned order" : "Customer cancelled order"),
+      }).catch((pushError) => {
+        console.error(
+          "[CANCEL_BY_CUSTOMER] order_cancelled notification failed:",
+          pushError,
+        );
+      });
     }
 
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     console.error("Customer cancel/return error:", err);
     return res.status(500).json({ message: err.message });
@@ -5080,26 +5123,32 @@ const confirmPaymentByCustomer = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     const sessionToken = extractSessionTokenFromRequest(req);
-    const sessionAccess = await verifyPublicOrderSessionAccess(order, sessionToken);
+    const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
+    const sessionAccess = await verifyPublicOrderSessionAccess(
+      order,
+      sessionToken,
+      { anonymousSessionId }
+    );
     if (!sessionAccess.ok) {
       return res
         .status(sessionAccess.status)
         .json({ message: sessionAccess.message });
     }
 
-    // Check if order can be confirmed as paid (must be Finalized or Completed)
-    const allowedStatuses = ["Finalized", "Completed"];
-
-    if (!allowedStatuses.includes(order.status)) {
+    const currentStatus = normalizeOrderStatus(order.status, ORDER_STATUSES.NEW);
+    if (currentStatus !== ORDER_STATUSES.COMPLETED) {
       return res.status(400).json({
-        message: `Cannot confirm payment for order with status ${order.status}. Order must be Finalized or Completed.`,
-        currentStatus: order.status,
-        allowedStatuses,
+        message:
+          "Cannot confirm payment before order is completed.",
+        currentStatus,
       });
     }
 
-    // Check if already paid
-    if (order.status === "Paid") {
+    const currentPaymentStatus = normalizePaymentStatus(
+      order.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    );
+    if (currentPaymentStatus === PAYMENT_STATUSES.PAID) {
       return res
         .status(400)
         .json({ message: "Order is already marked as paid" });
@@ -5107,13 +5156,17 @@ const confirmPaymentByCustomer = async (req, res) => {
 
     const io = req.app.get("io");
 
-    // Update order status to Paid and set payment fields
-    order.status = "Paid";
+    order.status = ORDER_STATUSES.COMPLETED;
+    order.paymentStatus = PAYMENT_STATUSES.PAID;
     order.paidAt = new Date();
-    order.paymentStatus = "PAID";
     order.paymentMode = paymentMethod || "CASH";
+    applyLifecycleFields(order, {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      isPaid: true,
+    });
 
-    // Fallback: trigger inventory consumption if order reached Paid without going through Preparing/Completed
+    // Fallback: trigger inventory consumption if order reached paid without prior deduction.
     const needsFallbackConsumption = !order.inventoryDeducted;
     if (needsFallbackConsumption) {
       order.inventoryDeducted = true;
@@ -5166,7 +5219,7 @@ const confirmPaymentByCustomer = async (req, res) => {
       }
     }
 
-    // Create or update payment record
+    // Create or update payment record.
     const { payment, created } = await ensurePaymentRecord(order, {
       status: "PAID",
       method: paymentMethod || "CASH",
@@ -5180,18 +5233,17 @@ const confirmPaymentByCustomer = async (req, res) => {
       }
     }
 
-    // Emit socket event to cafe room (so cart admin sees the order when payment is confirmed)
     const emitToCafe = req.app.get("emitToCafe");
-
-    // Release table
-    await releaseTableForOrder(order, io, emitToCafe);
     if (order.cartId && emitToCafe) {
       const payload = orderToPlainPayload(order);
       const cartIdStr = (payload?.cartId || order.cartId).toString();
-      emitToCafe(io, cartIdStr, "order:created", payload || order);
-      emitToCafe(io, cartIdStr, "newOrder", payload || order);
-      emitToCafe(io, cartIdStr, "order:status:updated", payload || order);
-      emitToCafe(io, cartIdStr, "orderUpdated", payload || order);
+      emitCanonicalOrderStatusUpdate({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: cartIdStr,
+        sourceEvent: "confirmPaymentByCustomer",
+      });
       emitOrderUpsert({
         io,
         emitToCafe,
@@ -5199,10 +5251,25 @@ const confirmPaymentByCustomer = async (req, res) => {
         cartId: cartIdStr,
         sourceEvent: "confirmPaymentByCustomer",
       });
+
+      notifyPaymentReceived({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: payload || order,
+      }).catch((pushError) => {
+        console.error(
+          "[CONFIRM_PAYMENT_CUSTOMER] payment_received notification failed:",
+          pushError,
+        );
+      });
+    }
+
+    if (shouldReleaseTableForStatus(order.status, order.paymentStatus)) {
+      await releaseTableForOrder(order, io, emitToCafe);
     }
 
     console.log("Payment confirmed by customer:", order._id);
-    return res.json(order);
+    return res.json(orderToPlainPayload(order));
   } catch (err) {
     console.error("Customer confirm payment error:", err);
     return res.status(500).json({ message: err.message });
@@ -5331,11 +5398,10 @@ const returnItems = async (req, res) => {
       }
     }
 
-    // Check if order can be modified (admin can remove items from any status except Cancelled/Returned)
-    if (["Cancelled", "Returned"].includes(order.status)) {
+    // Disallow item returns on already returned orders.
+    if (order.returnedAt) {
       return res.status(400).json({
-        message: `Cannot remove items from order with status ${order.status
-          }. Order is already ${order.status.toLowerCase()}.`,
+        message: "Order is already returned.",
       });
     }
 
@@ -5381,15 +5447,17 @@ const returnItems = async (req, res) => {
     order.kotLines = kotLines;
     order.markModified("kotLines");
 
-    // If all items are returned, mark order as Returned
+    // If all items are returned, close lifecycle but keep payment pending (refund flow).
     const allItemsReturned = kotLines.every((kot) => {
       const items = Array.isArray(kot.items) ? kot.items : [];
       return items.length > 0 && items.every((item) => item.returned);
     });
 
     if (allItemsReturned) {
-      order.status = "Returned";
+      order.status = ORDER_STATUSES.COMPLETED;
+      order.paymentStatus = PAYMENT_STATUSES.PENDING;
       order.returnedAt = new Date();
+      order.paidAt = null;
 
       // Cancel associated payments
       const payments = await Payment.find({ orderId: order._id });
@@ -5401,32 +5469,54 @@ const returnItems = async (req, res) => {
       }
     }
 
+    applyLifecycleFields(order, {
+      status: order.status,
+      paymentStatus: order.paymentStatus,
+      isPaid: order.paymentStatus === PAYMENT_STATUSES.PAID,
+    });
     await order.save();
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
 
-    // Release table if order is fully returned
-    if (order.status === "Returned") {
+    // Release table if order is fully returned.
+    if (allItemsReturned) {
       await releaseTableForOrder(order, io, emitToCafe);
     }
     if (io && order.cartId && emitToCafe) {
-      // Only emit to admin panel - customer frontend uses polling to avoid loops
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
-      emitOrderUpsert({
+      const payload = orderToPlainPayload(order);
+      emitCanonicalOrderStatusUpdate({
         io,
         emitToCafe,
-        order,
+        order: payload || order,
         cartId: order.cartId.toString(),
         sourceEvent: "returnItems",
       });
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order: payload || order,
+        cartId: order.cartId.toString(),
+        sourceEvent: "returnItems",
+      });
+
+      if (allItemsReturned) {
+        notifyOrderCancelled({
+          io,
+          emitToCafeFn: emitToCafe,
+          order: payload || order,
+          reason: "Order returned",
+        }).catch((pushError) => {
+          console.error("[RETURN_ITEMS] order_cancelled notification failed:", pushError);
+        });
+      }
     }
 
+    const responseOrder = orderToPlainPayload(order);
     res.json({
       message: `${itemIds.length} item(s) returned successfully`,
-      order,
+      order: responseOrder,
       returnedAmount: totalReturnedAmount,
       allItemsReturned,
     });
@@ -5475,10 +5565,10 @@ const convertToTakeaway = async (req, res) => {
       });
     }
 
-    // Check if order can be converted (not cancelled or returned)
-    if (["Cancelled", "Returned"].includes(order.status)) {
+    // Check if order can be converted (skip returned orders).
+    if (order.returnedAt) {
       return res.status(400).json({
-        message: `Cannot convert order with status ${order.status}`,
+        message: "Cannot convert returned order",
       });
     }
 
@@ -5552,8 +5642,13 @@ const convertToTakeaway = async (req, res) => {
       order.kotLines = kotLines;
       order.markModified("kotLines");
 
-      // Update payment record for original order if it exists (for paid orders)
-      if (order.status === "Paid") {
+      const normalizedPaymentStatus = normalizePaymentStatus(
+        order.paymentStatus,
+        PAYMENT_STATUSES.PENDING,
+      );
+
+      // Update payment record for original order if it exists (for paid orders).
+      if (normalizedPaymentStatus === PAYMENT_STATUSES.PAID) {
         const originalOrderAmount = getOrderBillAmount(order);
         const originalPayment = await Payment.findOne({ orderId: order._id });
         if (originalPayment) {
@@ -5570,6 +5665,11 @@ const convertToTakeaway = async (req, res) => {
         }
       }
 
+      applyLifecycleFields(order, {
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        isPaid: order.paymentStatus === PAYMENT_STATUSES.PAID,
+      });
       // Save the updated original order
       await order.save();
 
@@ -5577,21 +5677,28 @@ const convertToTakeaway = async (req, res) => {
       const io = req.app.get("io");
       const emitToCafe = req.app.get("emitToCafe");
       if (io && order.cartId && emitToCafe) {
-        // Only emit to admin panel - customer frontend uses polling to avoid loops
-        emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-        emitToCafe(io, order.cartId.toString(), "orderUpdated", order); // Legacy support
+        const payload = orderToPlainPayload(order);
+        emitCanonicalOrderStatusUpdate({
+          io,
+          emitToCafe,
+          order: payload || order,
+          cartId: order.cartId.toString(),
+          sourceEvent: "convertToTakeaway",
+        });
         emitOrderUpsert({
           io,
           emitToCafe,
-          order,
+          order: payload || order,
           cartId: order.cartId.toString(),
           sourceEvent: "convertToTakeaway",
         });
       }
 
+      const responseOrder = orderToPlainPayload(order);
+
       return res.json({
         message: `${selectedItems.length} item(s) marked as takeaway successfully. Items remain in the same dine-in order.`,
-        order: order,
+        order: responseOrder,
       });
     }
 
@@ -5659,7 +5766,7 @@ const updatePrintStatus = async (req, res) => {
     }
 
     if (Object.keys(update).length === 0) {
-      return res.json(order);
+      return res.json(orderToPlainPayload(order));
     }
 
     // Atomic guards:

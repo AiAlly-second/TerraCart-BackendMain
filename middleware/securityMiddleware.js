@@ -450,6 +450,12 @@ const getCorsConfig = () => {
     'X-Idempotency-Key',
     'x-idempotency-key',
     'Idempotency-Key',
+    'X-Session-Token',
+    'x-session-token',
+    'X-Session-Id',
+    'x-session-id',
+    'X-Anonymous-Session-Id',
+    'x-anonymous-session-id',
   ];
   const allowedOrigins = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())

@@ -22,6 +22,9 @@ const {
   scheduleDailyRevenue,
   scheduleMonthlyRevenue,
 } = require("./services/revenueScheduler");
+const {
+  startAttendanceTaskSchedulers,
+} = require("./services/attendanceTaskSchedulerService");
 
 // Security middleware
 const {
@@ -124,6 +127,30 @@ const SOCKET_ROLE_ALLOWLIST = new Set([
   "employee",
 ]);
 
+const SOCKET_TRACE_ENABLED =
+  String(
+    process.env.BACKEND_ENABLE_SOCKET_TRACE ||
+      process.env.BACKEND_ENABLE_SOCKET_DEBUG ||
+      ""
+  ).toLowerCase() === "true";
+
+const writeSocketTraceLog = (message, metadata = null) => {
+  if (!SOCKET_TRACE_ENABLED) return;
+  let suffix = "";
+  if (metadata && typeof metadata === "object") {
+    try {
+      suffix = ` ${JSON.stringify(metadata)}`;
+    } catch (_error) {
+      suffix = " [metadata_unserializable]";
+    }
+  }
+  try {
+    process.stdout.write(`[SOCKET_TRACE] ${message}${suffix}\n`);
+  } catch (_error) {
+    // Ignore trace write errors.
+  }
+};
+
 const normalizeSocketRoomValue = (value) => {
   const normalized = String(value || "").trim();
   if (!normalized) return null;
@@ -133,6 +160,11 @@ const normalizeSocketRoomValue = (value) => {
 };
 
 const normalizeSocketRole = (role) => String(role || "").trim().toLowerCase();
+
+const toSocketUserRoom = (userId) => {
+  const normalized = normalizeSocketRoomValue(userId);
+  return normalized ? `user_${normalized}` : null;
+};
 
 const extractSocketBearerToken = (socket) => {
   const authToken = socket?.handshake?.auth?.token;
@@ -145,6 +177,18 @@ const extractSocketBearerToken = (socket) => {
     "";
   if (!raw) return "";
   return raw.startsWith("Bearer ") ? raw.slice(7).trim() : raw.trim();
+};
+
+const extractSocketAnonymousSessionId = (socket) => {
+  const authSessionId = socket?.handshake?.auth?.anonymousSessionId;
+  const querySessionId = socket?.handshake?.query?.anonymousSessionId;
+  const headerSessionId = socket?.handshake?.headers?.["x-anonymous-session-id"];
+  const raw =
+    (typeof authSessionId === "string" && authSessionId) ||
+    (typeof querySessionId === "string" && querySessionId) ||
+    (typeof headerSessionId === "string" && headerSessionId) ||
+    "";
+  return normalizeSocketRoomValue(raw);
 };
 
 const resolveSocketCartIds = async (user) => {
@@ -291,6 +335,7 @@ app.use("/api/admin/costing", require("./routes/costingRoutes"));
 app.use("/api/costing-v2", require("./routes/costing-v2Routes"));
 app.use("/api/dashboard", require("./routes/dashboardRoutes"));
 app.use("/api/tasks", require("./routes/taskRoutes"));
+app.use("/api/daily-tasks", require("./routes/dailyTaskRoutes"));
 app.use("/api/customer-requests", require("./routes/customerRequestRoutes"));
 app.use("/api/leave-requests", require("./routes/leaveRequestRoutes"));
 app.use("/api/compliance", require("./routes/complianceRoutes"));
@@ -300,6 +345,7 @@ app.use("/api/print", require("./routes/printRoutes")); // Network printer route
 app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queue for mobile agent
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
 app.use("/api/app", require("./routes/appUpdateRoutes"));
+app.use("/api", require("./routes/notificationRoutes"));
 
 
 // Health check endpoints (both /health and /api/health for compatibility)
@@ -350,6 +396,10 @@ if (
 
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
+  writeSocketTraceLog("client connected", {
+    socketId: socket.id,
+    hasUser: !!socket.data?.user,
+  });
   // Client connected - removed verbose logging
   // Auto-join authenticated staff to their cart/cafe rooms so realtime
   // order/KOT updates work even if explicit join events are delayed or missing.
@@ -361,6 +411,19 @@ io.on("connection", (socket) => {
       const role = normalizeSocketRole(user.role);
       if (role && SOCKET_ROLE_ALLOWLIST.has(role)) {
         socket.join(`role:${role}`);
+        writeSocketTraceLog("joined role room", {
+          socketId: socket.id,
+          room: `role:${role}`,
+        });
+      }
+
+      const userRoom = toSocketUserRoom(user?._id);
+      if (userRoom) {
+        socket.join(userRoom);
+        writeSocketTraceLog("joined user room", {
+          socketId: socket.id,
+          room: userRoom,
+        });
       }
 
       // Keep super_admin explicit-join only to avoid joining many rooms.
@@ -372,34 +435,76 @@ io.on("connection", (socket) => {
         if (!normalizedCartId) continue;
         socket.join(`cart:${normalizedCartId}`);
         socket.join(`cafe:${normalizedCartId}`);
+        writeSocketTraceLog("joined cart/cafe rooms", {
+          socketId: socket.id,
+          cartId: normalizedCartId,
+        });
       }
     } catch (_error) {
       // Best-effort auto-join; explicit join events still work as fallback.
     }
   })();
 
+  const initialAnonymousSessionId = extractSocketAnonymousSessionId(socket);
+  if (initialAnonymousSessionId) {
+    socket.join(`anon_${initialAnonymousSessionId}`);
+    writeSocketTraceLog("joined anon room on connect", {
+      socketId: socket.id,
+      room: `anon_${initialAnonymousSessionId}`,
+    });
+  }
+
   // Join cafe room
   socket.on("join:cafe", async (cafeId) => {
     const normalizedCafeId = normalizeSocketRoomValue(cafeId);
-    if (!normalizedCafeId) return;
+    if (!normalizedCafeId) {
+      writeSocketTraceLog("join:cafe rejected invalid room", {
+        socketId: socket.id,
+        cafeId,
+      });
+      return;
+    }
 
     const user = socket.data?.user || null;
     if (user && normalizeSocketRole(user.role) !== "super_admin") {
       const allowedCartIds = await resolveSocketCartIds(user);
-      if (!allowedCartIds.has(normalizedCafeId)) return;
+      if (!allowedCartIds.has(normalizedCafeId)) {
+        writeSocketTraceLog("join:cafe rejected unauthorized room", {
+          socketId: socket.id,
+          cafeId: normalizedCafeId,
+          userId: user._id ? String(user._id) : null,
+        });
+        return;
+      }
     }
 
     const room = `cafe:${normalizedCafeId}`;
     socket.join(room);
+    writeSocketTraceLog("join:cafe", {
+      socketId: socket.id,
+      room,
+    });
   });
 
   // Join franchise room
   socket.on("join:franchise", (franchiseId) => {
     const normalizedFranchiseId = normalizeSocketRoomValue(franchiseId);
-    if (!normalizedFranchiseId) return;
+    if (!normalizedFranchiseId) {
+      writeSocketTraceLog("join:franchise rejected invalid room", {
+        socketId: socket.id,
+        franchiseId,
+      });
+      return;
+    }
 
     const user = socket.data?.user || null;
-    if (!user) return;
+    if (!user) {
+      writeSocketTraceLog("join:franchise rejected anonymous", {
+        socketId: socket.id,
+        franchiseId: normalizedFranchiseId,
+      });
+      return;
+    }
 
     const role = normalizeSocketRole(user.role);
     if (role === "super_admin") {
@@ -414,18 +519,40 @@ io.on("connection", (socket) => {
 
     if ((role === "franchise_admin" && sameFranchiseId) || (role === "admin" && adminFranchiseId)) {
       socket.join(`franchise:${normalizedFranchiseId}`);
+      writeSocketTraceLog("join:franchise", {
+        socketId: socket.id,
+        room: `franchise:${normalizedFranchiseId}`,
+      });
+      return;
     }
+
+    writeSocketTraceLog("join:franchise rejected unauthorized room", {
+      socketId: socket.id,
+      franchiseId: normalizedFranchiseId,
+      userId: user._id ? String(user._id) : null,
+      role,
+    });
   });
 
   // Join role-based room
   socket.on("join:role", (role) => {
     const normalizedRequestedRole = normalizeSocketRole(role);
     if (!normalizedRequestedRole || !SOCKET_ROLE_ALLOWLIST.has(normalizedRequestedRole)) {
+      writeSocketTraceLog("join:role rejected invalid role", {
+        socketId: socket.id,
+        role,
+      });
       return;
     }
 
     const user = socket.data?.user || null;
-    if (!user) return;
+    if (!user) {
+      writeSocketTraceLog("join:role rejected anonymous", {
+        socketId: socket.id,
+        role: normalizedRequestedRole,
+      });
+      return;
+    }
 
     const normalizedUserRole = normalizeSocketRole(user.role);
     if (
@@ -433,38 +560,130 @@ io.on("connection", (socket) => {
       normalizedUserRole === normalizedRequestedRole
     ) {
       socket.join(`role:${normalizedRequestedRole}`);
+      writeSocketTraceLog("join:role", {
+        socketId: socket.id,
+        room: `role:${normalizedRequestedRole}`,
+      });
+      return;
     }
+
+    writeSocketTraceLog("join:role rejected unauthorized role", {
+      socketId: socket.id,
+      role: normalizedRequestedRole,
+      userRole: normalizedUserRole,
+    });
   });
 
   // Join cart room (for mobile app users)
   socket.on("join:cart", async (cartId) => {
     const normalizedCartId = normalizeSocketRoomValue(cartId);
-    if (!normalizedCartId) return;
+    if (!normalizedCartId) {
+      writeSocketTraceLog("join:cart rejected invalid room", {
+        socketId: socket.id,
+        cartId,
+      });
+      return;
+    }
 
     const user = socket.data?.user || null;
     if (user && normalizeSocketRole(user.role) !== "super_admin") {
       const allowedCartIds = await resolveSocketCartIds(user);
-      if (!allowedCartIds.has(normalizedCartId)) return;
+      if (!allowedCartIds.has(normalizedCartId)) {
+        writeSocketTraceLog("join:cart rejected unauthorized room", {
+          socketId: socket.id,
+          cartId: normalizedCartId,
+          userId: user._id ? String(user._id) : null,
+        });
+        return;
+      }
     }
 
     const cartRoom = `cart:${normalizedCartId}`;
     const cafeRoom = `cafe:${normalizedCartId}`;
     socket.join(cartRoom);
     socket.join(cafeRoom);
+    writeSocketTraceLog("join:cart", {
+      socketId: socket.id,
+      cartRoom,
+      cafeRoom,
+    });
+  });
+
+  socket.on("join_room", (payload) => {
+    const normalizedPayload =
+      payload && typeof payload === "object"
+        ? payload
+        : { anonymousSessionId: payload };
+
+    const requestedUserId = normalizeSocketRoomValue(normalizedPayload?.userId);
+    const requestedAnonymousSessionId = normalizeSocketRoomValue(
+      normalizedPayload?.anonymousSessionId
+    );
+
+    if (requestedUserId) {
+      const socketUser = socket.data?.user || null;
+      const socketUserId = normalizeSocketRoomValue(socketUser?._id);
+      const socketUserRole = normalizeSocketRole(socketUser?.role);
+      const canJoinUserRoom =
+        socketUserId &&
+        (socketUserId === requestedUserId || socketUserRole === "super_admin");
+      if (canJoinUserRoom) {
+        socket.join(`user_${requestedUserId}`);
+        writeSocketTraceLog("join_room user", {
+          socketId: socket.id,
+          room: `user_${requestedUserId}`,
+        });
+      } else {
+        writeSocketTraceLog("join_room user rejected", {
+          socketId: socket.id,
+          requestedUserId,
+          socketUserId: socketUserId || null,
+          socketUserRole: socketUserRole || null,
+        });
+      }
+    }
+
+    if (requestedAnonymousSessionId) {
+      socket.join(`anon_${requestedAnonymousSessionId}`);
+      writeSocketTraceLog("join_room anon", {
+        socketId: socket.id,
+        room: `anon_${requestedAnonymousSessionId}`,
+      });
+    }
   });
 
   // Join kiosk room (for mobile app users)
   socket.on("join:kiosk", (kioskId) => {
     const normalizedKioskId = normalizeSocketRoomValue(kioskId);
-    if (!normalizedKioskId) return;
+    if (!normalizedKioskId) {
+      writeSocketTraceLog("join:kiosk rejected invalid room", {
+        socketId: socket.id,
+        kioskId,
+      });
+      return;
+    }
 
     const user = socket.data?.user || null;
-    if (!user) return;
+    if (!user) {
+      writeSocketTraceLog("join:kiosk rejected anonymous", {
+        socketId: socket.id,
+        kioskId: normalizedKioskId,
+      });
+      return;
+    }
 
     socket.join(`kiosk:${normalizedKioskId}`);
+    writeSocketTraceLog("join:kiosk", {
+      socketId: socket.id,
+      room: `kiosk:${normalizedKioskId}`,
+    });
   });
 
   socket.on("disconnect", (reason) => {
+    writeSocketTraceLog("client disconnected", {
+      socketId: socket.id,
+      reason,
+    });
     // Client disconnected - removed verbose logging
   });
 
@@ -484,6 +703,14 @@ const emitToCafe = (io, cafeId, event, data) => {
     const cartRoom = `cart:${cafeId}`;
     io.to(cafeRoom).emit(event, data);
     io.to(cartRoom).emit(event, data); // Also emit to cart room
+    writeSocketTraceLog("emitToCafe", {
+      event,
+      cafeRoom,
+      cartRoom,
+      orderId: data?._id || data?.orderId || null,
+      status: data?.status || null,
+      lifecycleStatus: data?.lifecycleStatus || null,
+    });
     // Emitted to cafe and cart rooms
   }
 };
@@ -503,6 +730,14 @@ const emitToCart = (io, cartId, event, data) => {
     const cafeRoom = `cafe:${cartId}`;
     io.to(cartRoom).emit(event, data);
     io.to(cafeRoom).emit(event, data); // Also emit to cafe room for backward compatibility
+    writeSocketTraceLog("emitToCart", {
+      event,
+      cartRoom,
+      cafeRoom,
+      orderId: data?._id || data?.orderId || null,
+      status: data?.status || null,
+      lifecycleStatus: data?.lifecycleStatus || null,
+    });
     // Emitted to cart room
   }
 };
@@ -541,6 +776,7 @@ const startServer = async () => {
   try {
     await connectDB();
     await setupSocketRedisAdapter();
+    startAttendanceTaskSchedulers({ io, emitToCafe });
 
     const PORT = process.env.PORT || 5001;
     const keepAliveTimeoutMs = Number.parseInt(

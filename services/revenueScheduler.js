@@ -1,6 +1,10 @@
 const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
 const User = require("../models/userModel");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+} = require("../utils/orderContract");
 
 // Helper function to calculate revenue from orders
 function calculateOrderRevenue(orders) {
@@ -25,9 +29,10 @@ async function calculateDailyRevenue() {
     const endDate = new Date(yesterday);
     endDate.setHours(23, 59, 59, 999);
 
-    // Get all paid orders for yesterday
+    // Get all settled orders for yesterday.
     const orders = await Order.find({
-      status: "Paid",
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
       paidAt: {
         $gte: yesterday,
         $lte: endDate,
@@ -42,7 +47,10 @@ async function calculateDailyRevenue() {
 
     for (const order of orders) {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cafeId =
+        order.cartId?.toString() ||
+        order.cafeId?.toString() ||
+        order.cafeId;
 
       if (franchiseId) {
         if (!franchiseMap.has(franchiseId)) {
@@ -150,9 +158,10 @@ async function calculateMonthlyRevenue() {
     const endDate = new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0);
     endDate.setHours(23, 59, 59, 999);
 
-    // Get all paid orders for last month
+    // Get all settled orders for last month.
     const orders = await Order.find({
-      status: "Paid",
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
       paidAt: {
         $gte: lastMonth,
         $lte: endDate,
@@ -167,7 +176,10 @@ async function calculateMonthlyRevenue() {
 
     for (const order of orders) {
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
-      const cafeId = order.cafeId?.toString() || order.cafeId;
+      const cafeId =
+        order.cartId?.toString() ||
+        order.cafeId?.toString() ||
+        order.cafeId;
 
       if (franchiseId) {
         if (!franchiseMap.has(franchiseId)) {

@@ -5,6 +5,11 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 const Task = require("../models/taskModel");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+  buildActiveOrderMongoFilter,
+} = require("../utils/orderContract");
 
 // Helper to get cartId based on user role (returns cartId, not cafeId)
 const getCafeId = async (user) => {
@@ -92,7 +97,7 @@ exports.getDashboardStats = async (req, res) => {
       const clauses = [
         orderScope,
         {
-          $or: statusMatchers.map((matcher) => ({ status: matcher })),
+          status: { $in: statusMatchers },
         },
       ];
       if (acceptedKotScope) {
@@ -101,20 +106,9 @@ exports.getDashboardStats = async (req, res) => {
       return { $and: clauses };
     };
 
-    const pendingKotStatusMatchers = [
-      /^pending$/i,
-      /^confirmed$/i,
-      /^accept$/i,
-      /^accepted$/i,
-    ];
-    const preparingKotStatusMatchers = [
-      /^preparing$/i,
-      /^being prepared$/i,
-      /^beingprepared$/i,
-    ];
-    const readyKotStatusMatchers = requireAcceptedKotAssignment
-      ? [/^ready$/i, /^served$/i, /^completed$/i, /^finalized$/i]
-      : [/^ready$/i];
+    const pendingKotStatuses = [ORDER_STATUSES.NEW];
+    const preparingKotStatuses = [ORDER_STATUSES.PREPARING];
+    const readyKotStatuses = [ORDER_STATUSES.READY];
 
     // Run all queries in parallel for faster response
     const [
@@ -123,6 +117,8 @@ exports.getDashboardStats = async (req, res) => {
       pendingKOTs,
       preparingKOTs,
       readyKOTs,
+      completedUnpaid,
+      completedPaid,
       lowStockItems,
       todayAttendance,
       occupiedTables,
@@ -132,31 +128,7 @@ exports.getDashboardStats = async (req, res) => {
       // Active orders (real-time, excluding terminal statuses)
       Order.countDocuments({
         ...orderScope,
-        $nor: [
-          { status: /^paid$/i },
-          { status: /^cancelled$/i },
-          { status: /^returned$/i },
-          { status: /^rejected$/i },
-          { status: /^completed$/i },
-          { status: /^finalized$/i },
-          { status: /^closed$/i },
-          { status: /^exit$/i },
-          {
-            $and: [
-              { status: /^served$/i },
-              {
-                $or: [
-                  { serviceType: /^takeaway$/i },
-                  { serviceType: /^pickup$/i },
-                  { serviceType: /^delivery$/i },
-                  { orderType: /^takeaway$/i },
-                  { orderType: /^pickup$/i },
-                  { orderType: /^delivery$/i },
-                ],
-              },
-            ],
-          },
-        ],
+        ...buildActiveOrderMongoFilter(),
       }),
 
       // Today's revenue orders - use aggregation for faster calculation
@@ -165,7 +137,8 @@ exports.getDashboardStats = async (req, res) => {
           $match: {
             ...orderScope,
             createdAt: { $gte: today, $lt: tomorrow },
-            status: { $in: ["Paid", "Finalized", "Exit"] },
+            status: ORDER_STATUSES.COMPLETED,
+            paymentStatus: PAYMENT_STATUSES.PAID,
           },
         },
         {
@@ -188,13 +161,27 @@ exports.getDashboardStats = async (req, res) => {
       ]),
 
       // Pending KOTs (orders waiting for kitchen start).
-      Order.countDocuments(buildKotStatusQuery(pendingKotStatusMatchers)),
+      Order.countDocuments(buildKotStatusQuery(pendingKotStatuses)),
 
       // Preparing KOTs.
-      Order.countDocuments(buildKotStatusQuery(preparingKotStatusMatchers)),
+      Order.countDocuments(buildKotStatusQuery(preparingKotStatuses)),
 
       // Ready KOTs.
-      Order.countDocuments(buildKotStatusQuery(readyKotStatusMatchers)),
+      Order.countDocuments(buildKotStatusQuery(readyKotStatuses)),
+
+      // Completed but payment pending.
+      Order.countDocuments({
+        ...orderScope,
+        status: ORDER_STATUSES.COMPLETED,
+        paymentStatus: { $ne: PAYMENT_STATUSES.PAID },
+      }),
+
+      // Completed and paid (history bucket).
+      Order.countDocuments({
+        ...orderScope,
+        status: ORDER_STATUSES.COMPLETED,
+        paymentStatus: PAYMENT_STATUSES.PAID,
+      }),
 
       // Low stock items (threshold can be configured)
       // InventoryItem model uses cartId, support cafeId for backward compatibility
@@ -256,6 +243,8 @@ exports.getDashboardStats = async (req, res) => {
         pendingKOTs,
         preparingKOTs,
         readyKOTs,
+        completedUnpaid,
+        completedPaid,
         lowStockItems,
         todayAttendance,
         occupiedTables,
@@ -289,9 +278,12 @@ exports.getRecentActivity = async (req, res) => {
       .lean();
 
     recentOrders.forEach((order) => {
+      const isCompletedPaid =
+        order.status === ORDER_STATUSES.COMPLETED &&
+        order.paymentStatus === PAYMENT_STATUSES.PAID;
       activities.push({
         type: "order",
-        action: order.status === "Finalized" ? "completed" : order.status.toLowerCase(),
+        action: isCompletedPaid ? "paid" : String(order.status || "").toLowerCase(),
         description: `Order #${order.orderNumber || order._id} ${order.status}`,
         amount: order.totalAmount,
         timestamp: order.createdAt,
@@ -360,7 +352,8 @@ exports.getPerformanceMetrics = async (req, res) => {
     const weeklyOrders = await Order.find({
       cartId: cafeId,
       createdAt: { $gte: weekAgo },
-      status: "Finalized",
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
     }).lean();
 
     const weeklyRevenue = weeklyOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
@@ -369,7 +362,8 @@ exports.getPerformanceMetrics = async (req, res) => {
     const monthlyOrders = await Order.find({
       cartId: cafeId,
       createdAt: { $gte: monthAgo },
-      status: "Finalized",
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
     }).lean();
 
     const monthlyRevenue = monthlyOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
@@ -390,7 +384,8 @@ exports.getPerformanceMetrics = async (req, res) => {
       const dayOrders = await Order.countDocuments({
         cartId: cafeId,
         createdAt: { $gte: date, $lt: nextDate },
-        status: "Finalized",
+        status: ORDER_STATUSES.COMPLETED,
+        paymentStatus: PAYMENT_STATUSES.PAID,
       });
 
       ordersPerDay.push({

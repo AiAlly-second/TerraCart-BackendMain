@@ -1,83 +1,96 @@
 const Order = require("../models/orderModel");
 const { releaseTableForOrder } = require("../controllers/orderController");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+  normalizeOrderStatus,
+  buildOrderStatusUpdatedPayload,
+} = require("../utils/orderContract");
+const { applyLifecycleFields } = require("../utils/orderLifecycle");
 
 function scheduleOrderAutoRelease(io, options = {}) {
   const minutes =
     Number(process.env.ORDER_AUTO_RELEASE_MINUTES) ||
     options.minutes ||
-    30; // Increased default from 5 to 30 minutes
+    30;
   const intervalMs =
     Number(process.env.ORDER_AUTO_RELEASE_POLL_MS) ||
     options.intervalMs ||
-    300_000; // Increased from 60s to 5 minutes (300s)
+    300_000;
 
   if (minutes <= 0) {
-    console.log("⏱️  Order auto-release disabled (ORDER_AUTO_RELEASE_MINUTES <= 0)");
+    console.log("[ORDER_AUTO_RELEASE] disabled (ORDER_AUTO_RELEASE_MINUTES <= 0)");
     return;
   }
 
   const runCleanup = async () => {
     const cutoff = new Date(Date.now() - minutes * 60_000);
     try {
-      // Only auto-release orders that are truly stale and abandoned:
-      // - "Pending" orders with NO KOTs that haven't been confirmed after X minutes
-      // - Only for DINE_IN orders (not TAKEAWAY)
-      // - Must have no items/KOTs (truly empty orders)
       const staleOrders = await Order.find({
-        status: "Pending", // Only auto-release Pending orders, not Confirmed ones
-        serviceType: "DINE_IN", // Only auto-release dine-in orders
-        createdAt: { $lt: cutoff }, // Use createdAt to check when order was actually created
+        status: ORDER_STATUSES.NEW,
+        paymentStatus: PAYMENT_STATUSES.PENDING,
+        serviceType: "DINE_IN",
+        createdAt: { $lt: cutoff },
         autoReleasedAt: { $exists: false },
-        // Only orders with no KOTs (empty orders)
-        $or: [
-          { kotLines: { $exists: false } },
-          { kotLines: { $size: 0 } }
-        ]
+        $or: [{ kotLines: { $exists: false } }, { kotLines: { $size: 0 } }],
       });
 
-      if (!staleOrders.length) {
-        return;
-      }
+      if (!staleOrders.length) return;
 
       console.log(
-        `⏱️  Auto-releasing ${staleOrders.length} stale orders (>${minutes} min).`
+        `[ORDER_AUTO_RELEASE] processing stale empty orders count=${staleOrders.length} thresholdMinutes=${minutes}`,
       );
 
       for (const order of staleOrders) {
         try {
-          // Only cancel truly empty Pending orders (no KOTs)
-          // These are likely abandoned/forgotten orders
-          const hasKOTs = order.kotLines && order.kotLines.length > 0;
-          
-          if (!hasKOTs && order.status === "Pending") {
-            // Empty pending order that's been sitting for >30 minutes - safe to cancel
-            order.status = "Cancelled";
-            order.autoReleasedAt = new Date();
-            await order.save();
-            await releaseTableForOrder(order, io);
-            if (io) {
-              io.emit("orderUpdated", order);
-            }
-            console.log(`⏱️  Auto-released empty pending order ${order._id} (abandoned for >${minutes} min)`);
+          const hasKOTs = Array.isArray(order.kotLines) && order.kotLines.length > 0;
+          const normalizedStatus = normalizeOrderStatus(
+            order.status,
+            ORDER_STATUSES.NEW,
+          );
+          if (hasKOTs || normalizedStatus !== ORDER_STATUSES.NEW) {
+            continue;
           }
+
+          order.status = ORDER_STATUSES.COMPLETED;
+          order.paymentStatus = PAYMENT_STATUSES.PENDING;
+          order.cancellationReason = "AUTO_RELEASED_EMPTY_ORDER";
+          order.autoReleasedAt = new Date();
+          applyLifecycleFields(order, {
+            status: order.status,
+            paymentStatus: order.paymentStatus,
+            isPaid: false,
+          });
+
+          await order.save();
+          await releaseTableForOrder(order, io);
+
+          if (io) {
+            io.emit("order_status_updated", buildOrderStatusUpdatedPayload(order));
+          }
+
+          console.log(
+            `[ORDER_AUTO_RELEASE] auto-released orderId=${order._id} reason=EMPTY_NEW_ORDER`,
+          );
         } catch (err) {
-          console.error("Auto-release failed for order", order._id, err);
+          console.error("[ORDER_AUTO_RELEASE] order sweep failure", {
+            orderId: order?._id || null,
+            error: err?.message || err,
+          });
         }
       }
     } catch (err) {
-      console.error("Auto-release sweep error:", err);
+      console.error("[ORDER_AUTO_RELEASE] sweep error", err);
     }
   };
 
   setInterval(runCleanup, intervalMs);
   console.log(
-    `⏱️  Order auto-release scheduled: ${minutes} minute timeout, running every ${Math.round(
-      intervalMs / 1000
-    )}s`
+    `[ORDER_AUTO_RELEASE] scheduled timeoutMinutes=${minutes} pollSeconds=${Math.round(
+      intervalMs / 1000,
+    )}`,
   );
 }
 
 module.exports = { scheduleOrderAutoRelease };
-
-
 

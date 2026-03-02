@@ -5,6 +5,18 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Customer = require("../models/customerModel");
 const User = require("../models/userModel");
 const mongoose = require("mongoose");
+const {
+  ORDER_STATUSES,
+  PAYMENT_STATUSES,
+  normalizeOrderStatus,
+  normalizePaymentStatus,
+} = require("../utils/orderContract");
+
+const isSettledOrder = (order) =>
+  normalizeOrderStatus(order?.status, ORDER_STATUSES.NEW) ===
+    ORDER_STATUSES.COMPLETED &&
+  normalizePaymentStatus(order?.paymentStatus, PAYMENT_STATUSES.PENDING) ===
+    PAYMENT_STATUSES.PAID;
 
 // Helper function to build hierarchy query based on user role
 const buildHierarchyQuery = (user) => {
@@ -93,10 +105,13 @@ exports.getAnalyticsSummary = async (req, res) => {
     // Get order statistics
     const orders = await Order.find(dateFilter);
     const totalOrders = orders.length;
-    const completedOrders = orders.filter(o => ["Paid", "Finalized"].includes(o.status)).length;
-    const cancelledOrders = orders.filter(o => o.status === "Cancelled").length;
+    const completedOrders = orders.filter((o) => isSettledOrder(o)).length;
+    const cancelledOrders = orders.filter((o) => {
+      const token = String(o?.status || "").trim().toLowerCase();
+      return token === "cancelled" || token === "canceled";
+    }).length;
     const totalRevenue = orders
-      .filter(o => ["Paid", "Finalized"].includes(o.status))
+      .filter((o) => isSettledOrder(o))
       .reduce((sum, o) => sum + (o.totalAmount || 0), 0);
     
     // Get average order value
@@ -193,7 +208,7 @@ exports.getOrderAnalytics = async (req, res) => {
     // Revenue by day
     const revenueByDay = {};
     orders.forEach(order => {
-      if (["Paid", "Finalized"].includes(order.status)) {
+      if (isSettledOrder(order)) {
         const day = new Date(order.createdAt).toISOString().split('T')[0];
         revenueByDay[day] = (revenueByDay[day] || 0) + (order.totalAmount || 0);
       }
@@ -221,7 +236,7 @@ exports.getOrderAnalytics = async (req, res) => {
       .map(([name, count]) => ({ name, count }));
     
     // Average order value
-    const completedOrders = orders.filter(o => ["Paid", "Finalized"].includes(o.status));
+    const completedOrders = orders.filter((o) => isSettledOrder(o));
     const totalRevenue = completedOrders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
     const avgOrderValue = completedOrders.length > 0 ? totalRevenue / completedOrders.length : 0;
     
@@ -265,7 +280,8 @@ exports.getMenuAnalytics = async (req, res) => {
     const orders = await Order.find({
       ...hierarchyQuery,
       createdAt: { $gte: start, $lte: end },
-      status: { $in: ["Paid", "Finalized"] },
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
     }).lean();
     
     // Calculate item performance
@@ -388,7 +404,8 @@ exports.getRevenueAnalytics = async (req, res) => {
     const orders = await Order.find({
       ...hierarchyQuery,
       createdAt: { $gte: start, $lte: end },
-      status: { $in: ["Paid", "Finalized"] },
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: PAYMENT_STATUSES.PAID,
     }).lean();
     
     // Revenue by day

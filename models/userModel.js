@@ -108,6 +108,14 @@ const userSchema = new mongoose.Schema(
       port: { type: Number, default: 9100 },
       enabled: { type: Boolean, default: true },
     },
+    // Firebase Cloud Messaging token (latest device token)
+    fcmToken: { type: String, trim: true, default: null, index: true, sparse: true },
+    fcmTokenPlatform: {
+      type: String,
+      enum: ["android", "ios", "web", "unknown"],
+      default: "unknown",
+    },
+    fcmTokenUpdatedAt: { type: Date, default: null },
     // Token version for logout from all devices
     // Incrementing this invalidates all existing tokens
     tokenVersion: { type: Number, default: 0 },

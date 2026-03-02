@@ -25,11 +25,14 @@ const {
   authorize,
   optionalProtect,
 } = require("../middleware/authMiddleware");
+const {
+  validateOrderType,
+} = require("../middleware/orderValidationMiddleware");
 
 const router = express.Router();
 
 /* ---------- main flow (public - customer-facing) ---------- */
-router.post("/", optionalProtect, createOrder); // first Confirm - public for customers, but authenticate if token provided
+router.post("/", optionalProtect, validateOrderType, createOrder); // first Confirm - public for customers, but authenticate if token provided
 router.get("/takeaway-token/next", optionalProtect, getNextTakeawayToken);
 router.post("/:id/kot", optionalProtect, addKot); // Order More → Confirm - public for customers
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);

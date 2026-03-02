@@ -5,6 +5,9 @@ const Order = require("../models/orderModel");
 const Waitlist = require("../models/waitlistModel");
 const Employee = require("../models/employeeModel");
 const { notifyNextWaitlist } = require("./waitlistController");
+const {
+  shouldDisplayInActiveQueues,
+} = require("../utils/orderContract");
 
 const activeWaitlistStatuses = ["WAITING", "NOTIFIED"];
 
@@ -206,27 +209,23 @@ async function cleanupOldSessionOrders(tableId, oldSessionToken = null) {
   try {
     const { Payment } = require("../models/paymentModel");
 
-    // Build query to find ALL non-paid orders for this table
-    // When a new session starts, we want to clean up all previous orders (except paid ones)
-    const orderQuery = {
-      table: tableId,
-      status: { $nin: ["Paid", "Cancelled"] },
-    };
+    // Build query to find orders that are still active in operational queues.
+    const oldOrders = await Order.find({ table: tableId });
+    const activeOrders = oldOrders.filter((order) =>
+      shouldDisplayInActiveQueues(order),
+    );
 
-    // Find all non-paid orders for this table
-    const oldOrders = await Order.find(orderQuery);
-
-    if (oldOrders.length > 0) {
+    if (activeOrders.length > 0) {
       console.log(
         `[TABLE] Cleaning up ${
-          oldOrders.length
+          activeOrders.length
         } old orders for table ${tableId} (old sessionToken: ${
           oldSessionToken || "none"
         })`
       );
 
       // Delete associated non-paid payments
-      for (const order of oldOrders) {
+      for (const order of activeOrders) {
         try {
           const payments = await Payment.find({ orderId: order._id });
           for (const payment of payments) {
@@ -247,7 +246,9 @@ async function cleanupOldSessionOrders(tableId, oldSessionToken = null) {
       }
 
       // Delete all non-paid orders for this table
-      const deleteResult = await Order.deleteMany(orderQuery);
+      const deleteResult = await Order.deleteMany({
+        _id: { $in: activeOrders.map((order) => order._id) },
+      });
       console.log(
         `[TABLE] Deleted ${deleteResult.deletedCount} old orders for table ${tableId}`
       );
@@ -763,9 +764,7 @@ exports.lookupTableBySlug = async (req, res) => {
       try {
         activeOrder = await Order.findById(table.currentOrder).lean();
         if (activeOrder) {
-          const isUnpaid =
-            activeOrder.status &&
-            !["Paid", "Cancelled", "Returned"].includes(activeOrder.status);
+          const isUnpaid = shouldDisplayInActiveQueues(activeOrder);
 
           // For unpaid orders on this table, allow access if:
           // 1. Order's sessionToken matches client's sessionToken, OR
@@ -1773,7 +1772,7 @@ exports.updateTable = async (req, res) => {
     } else if (updates.status === "AVAILABLE" && table.currentOrder) {
       // If table already has a currentOrder, check if it's paid/cancelled
       const order = await Order.findById(table.currentOrder);
-      if (order && !["Paid", "Cancelled"].includes(order.status)) {
+      if (order && shouldDisplayInActiveQueues(order)) {
         return res.status(400).json({
           message:
             "Cannot mark table available while active order exists. Please cancel or pay the order first.",
@@ -2046,7 +2045,7 @@ exports.mergeTables = async (req, res) => {
       }
       if (table.currentOrder) {
         const order = await Order.findById(table.currentOrder);
-        if (order && !["Paid", "Cancelled"].includes(order.status)) {
+        if (order && shouldDisplayInActiveQueues(order)) {
           return res
             .status(400)
             .json({ message: `Table ${table.number} has an active order` });
