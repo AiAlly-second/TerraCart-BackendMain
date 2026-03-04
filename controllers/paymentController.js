@@ -495,20 +495,15 @@ const normalizeOfficePaymentMode = (value, fallback = "ONLINE") => {
 
 const requiresPaymentBeforeProceeding = (order) => {
   if (!order) return false;
-  if (Boolean(order.paymentRequiredBeforeProceeding)) return true;
-
   const normalizedSourceQrType = String(order.sourceQrType || "")
     .trim()
     .toUpperCase();
-  const normalizedOfficePaymentMode = normalizeOfficePaymentMode(
-    order.officePaymentMode,
-    "ONLINE",
-  );
-
-  return (
-    normalizedSourceQrType === "OFFICE" &&
-    normalizedOfficePaymentMode === "ONLINE"
-  );
+  if (normalizedSourceQrType === "OFFICE") {
+    // Business rule: OFFICE QR orders are prepaid-only.
+    return true;
+  }
+  if (Boolean(order.paymentRequiredBeforeProceeding)) return true;
+  return false;
 };
 
 const formatPaymentResponse = (payment) => ({
@@ -693,11 +688,8 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   order.paymentMode = payment.method === "ONLINE" ? "ONLINE" : "CASH";
 
   if (isPaymentFirstOrder) {
-    if (order.status === "Pending") {
-      order.status = "Confirmed";
-    }
   } else {
-    order.status = "Paid";
+    order.status = ORDER_STATUSES.COMPLETED;
     needsFallbackConsumption = !order.inventoryDeducted;
     if (needsFallbackConsumption) {
       order.inventoryDeducted = true;
@@ -715,9 +707,6 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   if (order.cartId && io && emitToCafe) {
     const cartId = order.cartId.toString();
     const statusPayload = buildOrderStatusUpdatedPayload(order);
-    emitToCafe(io, cartId, "order:created", order);
-    emitToCafe(io, cartId, "newOrder", order);
-    emitToCafe(io, cartId, "kot:created", order);
     emitToCafe(io, cartId, "order:status:updated", order);
     emitToCafe(io, cartId, "order_status_updated", statusPayload);
     emitToCafe(io, cartId, "orderUpdated", order);
@@ -803,9 +792,7 @@ exports.createPaymentIntent = async (req, res) => {
 
     const isOfficeOrder =
       String(order.sourceQrType || "").trim().toUpperCase() === "OFFICE";
-    const officePaymentMode = isOfficeOrder
-      ? normalizeOfficePaymentMode(order.officePaymentMode, "ONLINE")
-      : null;
+    const officePaymentMode = isOfficeOrder ? "ONLINE" : null;
 
     if (officePaymentMode === "ONLINE" && method !== "ONLINE") {
       return res.status(400).json({
@@ -888,9 +875,6 @@ exports.createPaymentIntent = async (req, res) => {
 
     if (shouldAdvanceOrderForCashSelection) {
       order.paymentRequiredBeforeProceeding = false;
-      if (order.status === "Pending") {
-        order.status = "Confirmed";
-      }
       order.paymentMode = "CASH";
       await order.save();
     }
@@ -905,10 +889,20 @@ exports.createPaymentIntent = async (req, res) => {
     }
 
     if (shouldAdvanceOrderForCashSelection && order.cartId && io && emitToCafe) {
-      emitToCafe(io, order.cartId.toString(), "order:created", order);
-      emitToCafe(io, order.cartId.toString(), "newOrder", order);
+      emitToCafe(
+        io,
+        order.cartId.toString(),
+        "order_status_updated",
+        buildOrderStatusUpdatedPayload(order),
+      );
       emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
       emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      emitOrderUpsert({
+        io,
+        emitToCafe,
+        order,
+        cartId: order.cartId.toString(),
+      });
     }
 
     return res.status(201).json(formatPaymentResponse(payment));

@@ -20,6 +20,9 @@ const {
   notifyOrderCancelled,
 } = require("../services/notificationEventService");
 const {
+  sendOrderStatusNotification,
+} = require("../services/pushNotificationService");
+const {
   applyLifecycleFields,
 } = require("../utils/orderLifecycle");
 const {
@@ -283,6 +286,14 @@ const MOBILE_ORDER_ROLES = new Set([
   "manager",
   "employee",
 ]);
+
+const buildEmployeeVisibleQueueMongoFilter = () => ({
+  $or: [
+    { paymentRequiredBeforeProceeding: { $ne: true } },
+    { paymentStatus: PAYMENT_STATUSES.PAID },
+    { paymentMode: "CASH" },
+  ],
+});
 
 const resolveMobileCartId = async (user) => {
   if (!user) return null;
@@ -794,6 +805,9 @@ const emitCanonicalOrderStatusUpdate = ({
   if (!resolvedCartId || !payload.orderId) return;
 
   emitToCafe(io, resolvedCartId, "order_status_updated", payload);
+  // Legacy admin-web listeners still consume these full-order events.
+  emitToCafe(io, resolvedCartId, "order:status:updated", source);
+  emitToCafe(io, resolvedCartId, "orderUpdated", source);
   emitToOrderAudienceRooms(io, source, "order_status_updated", payload);
 
   writeSocketEmitDebugLog(
@@ -831,13 +845,23 @@ const isPickupOrDeliveryServiceOrder = (order) => {
     serviceType === "DELIVERY"
   );
 };
+const isCashOnDeliveryOrder = (order) =>
+  normalizeUpper(order?.paymentMode) === "CASH";
 const requiresPaymentBeforeProceeding = (order) => {
-  if (Boolean(order?.paymentRequiredBeforeProceeding)) {
-    return true;
-  }
   const isOfficeOrder = normalizeUpper(order?.sourceQrType) === "OFFICE";
   if (isOfficeOrder) {
-    return normalizeUpper(order?.officePaymentMode || "ONLINE") === "ONLINE";
+    // Business rule: OFFICE QR orders are prepaid-only.
+    return true;
+  }
+
+  const serviceType = normalizeUpper(order?.serviceType);
+  if (serviceType === "DINE_IN") {
+    // Dine-in orders always follow counter/COD flow.
+    return false;
+  }
+
+  if (Boolean(order?.paymentRequiredBeforeProceeding)) {
+    return true;
   }
   return isPickupOrDeliveryServiceOrder(order);
 };
@@ -2168,7 +2192,7 @@ const createOrder = async (req, res) => {
     if (tableId && mongoose.Types.ObjectId.isValid(tableId)) {
       officeTableContext = await Table.findById(tableId)
         .select(
-          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode cartId",
+          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode cartId cafeId",
         )
         .lean();
       if (officeTableContext?.qrContextType === "OFFICE") {
@@ -2187,10 +2211,14 @@ const createOrder = async (req, res) => {
       );
     }
 
-    const normalizedOfficePaymentMode = normalizeOfficePaymentMode(
+    const requestedNormalizedOfficePaymentMode = normalizeOfficePaymentMode(
       requestedOfficePaymentMode,
       normalizeOfficePaymentMode(officeTableContext?.officePaymentMode, "ONLINE"),
     );
+    const normalizedOfficePaymentMode =
+      normalizedSourceQrType === "OFFICE"
+        ? "ONLINE"
+        : requestedNormalizedOfficePaymentMode;
     const resolvedOfficeName =
       normalizedSourceQrType === "OFFICE"
         ? requestedOfficeName ||
@@ -2236,28 +2264,12 @@ const createOrder = async (req, res) => {
       Boolean(requestedPaymentRequiredBeforeProceeding) &&
       !isPickup &&
       !isDelivery &&
-      (normalizedServiceType === "DINE_IN" ||
-        normalizedServiceType === "TAKEAWAY");
+      normalizedServiceType === "TAKEAWAY";
+    let resolvedSessionToken =
+      typeof sessionToken === "string" ? sessionToken.trim() : "";
 
     // For TAKEAWAY orders, skip all table-related logic
     if (!isTakeaway) {
-      // DINE_IN orders require table and session token
-      if (!sessionToken) {
-        console.log(
-          "[ORDER] createOrder - Missing sessionToken for DINE_IN order",
-          {
-            serviceType: normalizedServiceType,
-            tableId,
-            tableNumber,
-            hasItems: items && items.length > 0,
-          },
-        );
-        return res.status(400).json({
-          message:
-            "Session token is required for dine-in orders. Please scan the table QR code again.",
-        });
-      }
-
       if (!tableId && !tableNumber) {
         return res
           .status(400)
@@ -2277,6 +2289,43 @@ const createOrder = async (req, res) => {
         return res.status(404).json({ message: "Table record not found" });
       }
 
+      const requesterRole = String(req.user?.role || "").toLowerCase();
+      const canBootstrapDineInSession =
+        requesterRole === "admin" ||
+        requesterRole === "franchise_admin" ||
+        requesterRole === "super_admin" ||
+        requesterRole === "manager" ||
+        requesterRole === "waiter" ||
+        requesterRole === "captain" ||
+        requesterRole === "cook" ||
+        requesterRole === "employee";
+
+      // Staff/admin initiated dine-in orders may not always have a token from client.
+      // Reuse current table token when available; otherwise generate one.
+      if (!resolvedSessionToken) {
+        if (!canBootstrapDineInSession) {
+          console.log(
+            "[ORDER] createOrder - Missing sessionToken for DINE_IN order",
+            {
+              serviceType: normalizedServiceType,
+              tableId,
+              tableNumber,
+              hasItems: items && items.length > 0,
+            },
+          );
+          return res.status(400).json({
+            message:
+              "Session token is required for dine-in orders. Please scan the table QR code again.",
+          });
+        }
+
+        resolvedSessionToken = String(tableDoc.sessionToken || "").trim();
+        if (!resolvedSessionToken) {
+          resolvedSessionToken = `STAFF_${tableDoc._id}_${Date.now()}`;
+          tableDoc.sessionToken = resolvedSessionToken;
+        }
+      }
+
       // CRITICAL: Check if user has an active order for this table
       // If they do, allow order creation even if sessionToken doesn't match
       // This prevents "table assigned to another guest" error when user has active order
@@ -2290,7 +2339,7 @@ const createOrder = async (req, res) => {
           existingOrderForTable = await Order.findById(orderId);
           if (
             existingOrderForTable &&
-            existingOrderForTable.sessionToken === sessionToken
+            existingOrderForTable.sessionToken === resolvedSessionToken
           ) {
             // User has an active order with matching sessionToken - allow order creation
             hasActiveOrderForTable = true;
@@ -2304,11 +2353,11 @@ const createOrder = async (req, res) => {
       }
 
       // Check 2: If not found, search for any active order for this table with matching sessionToken
-      if (!hasActiveOrderForTable && sessionToken) {
+      if (!hasActiveOrderForTable && resolvedSessionToken) {
         try {
           existingOrderForTable = await Order.findOne({
             table: tableDoc._id,
-            sessionToken: sessionToken,
+            sessionToken: resolvedSessionToken,
             ...buildActiveOrderMongoFilter(),
             serviceType: "DINE_IN",
           });
@@ -2339,7 +2388,7 @@ const createOrder = async (req, res) => {
 
       const shouldReject =
         tableDoc.sessionToken &&
-        tableDoc.sessionToken !== sessionToken &&
+        tableDoc.sessionToken !== resolvedSessionToken &&
         !hasActiveOrderForTable &&
         tableDoc.status === "OCCUPIED" &&
         tableHasOtherOrder;
@@ -2349,7 +2398,7 @@ const createOrder = async (req, res) => {
           `[ORDER] Rejecting order - table ${tableDoc.number} is occupied by another guest:`,
           {
             tableSessionToken: tableDoc.sessionToken,
-            requestSessionToken: sessionToken,
+            requestSessionToken: resolvedSessionToken,
             hasActiveOrder: hasActiveOrderForTable,
             currentOrder: tableDoc.currentOrder,
             tableStatus: tableDoc.status,
@@ -2365,39 +2414,46 @@ const createOrder = async (req, res) => {
       // This handles cases where table status is AVAILABLE/RESERVED but has stale sessionToken
       if (
         tableDoc.sessionToken &&
-        tableDoc.sessionToken !== sessionToken &&
+        tableDoc.sessionToken !== resolvedSessionToken &&
         !hasActiveOrderForTable &&
         tableDoc.status !== "OCCUPIED"
       ) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has sessionToken mismatch but status is ${tableDoc.status} - updating sessionToken to: ${sessionToken}`,
+          `[ORDER] Table ${tableDoc.number} has sessionToken mismatch but status is ${tableDoc.status} - updating sessionToken to: ${resolvedSessionToken}`,
         );
-        tableDoc.sessionToken = sessionToken;
+        tableDoc.sessionToken = resolvedSessionToken;
       }
 
       // If table has no sessionToken, set it (user is claiming the table)
-      if (!tableDoc.sessionToken && sessionToken) {
+      if (!tableDoc.sessionToken && resolvedSessionToken) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has no sessionToken - setting it to: ${sessionToken}`,
+          `[ORDER] Table ${tableDoc.number} has no sessionToken - setting it to: ${resolvedSessionToken}`,
         );
-        tableDoc.sessionToken = sessionToken;
+        tableDoc.sessionToken = resolvedSessionToken;
       }
 
       // If user has active order but sessionToken doesn't match table's sessionToken,
       // update table's sessionToken to match the order's sessionToken
-      if (hasActiveOrderForTable && tableDoc.sessionToken !== sessionToken) {
+      if (
+        hasActiveOrderForTable &&
+        tableDoc.sessionToken !== resolvedSessionToken
+      ) {
         console.log(
-          `[ORDER] Updating table ${tableDoc.number} sessionToken to match active order: ${sessionToken}`,
+          `[ORDER] Updating table ${tableDoc.number} sessionToken to match active order: ${resolvedSessionToken}`,
         );
-        tableDoc.sessionToken = sessionToken;
+        tableDoc.sessionToken = resolvedSessionToken;
       }
 
       // If table has no sessionToken but user has active order, set it
-      if (hasActiveOrderForTable && !tableDoc.sessionToken && sessionToken) {
+      if (
+        hasActiveOrderForTable &&
+        !tableDoc.sessionToken &&
+        resolvedSessionToken
+      ) {
         console.log(
-          `[ORDER] Setting table ${tableDoc.number} sessionToken from active order: ${sessionToken}`,
+          `[ORDER] Setting table ${tableDoc.number} sessionToken from active order: ${resolvedSessionToken}`,
         );
-        tableDoc.sessionToken = sessionToken;
+        tableDoc.sessionToken = resolvedSessionToken;
       }
 
       tableNumber =
@@ -2407,7 +2463,7 @@ const createOrder = async (req, res) => {
       }
 
       if (!tableDoc.sessionToken) {
-        tableDoc.sessionToken = sessionToken;
+        tableDoc.sessionToken = resolvedSessionToken;
       }
     } else {
       // For TAKEAWAY orders, set tableNumber to "TAKEAWAY" and skip table assignment
@@ -2512,8 +2568,9 @@ const createOrder = async (req, res) => {
         // Fall through to fallback logic below
       }
     } else if (!isTakeaway && tableDoc) {
-      if (tableDoc.cartId) {
-        cartId = tableDoc.cartId;
+      const tableCartId = tableDoc.cartId || tableDoc.cafeId || null;
+      if (tableCartId) {
+        cartId = tableCartId;
         console.log("[ORDER] Using cartId from table:", cartId.toString());
       } else if (tableDoc.franchiseId) {
         // Fallback: table has no cartId but has franchiseId - use first cart under franchise
@@ -2533,6 +2590,29 @@ const createOrder = async (req, res) => {
             cartId.toString(),
           );
         }
+      }
+    }
+
+    // Staff-created dine-in fallback: trust authenticated staff cart binding
+    // when legacy table docs are missing cartId/cafeId.
+    if (!isTakeaway && !cartId && requestCartId && req.user) {
+      const requesterRole = String(req.user?.role || "").toLowerCase();
+      const canTrustRequesterCart =
+        requesterRole === "admin" ||
+        requesterRole === "franchise_admin" ||
+        requesterRole === "super_admin" ||
+        requesterRole === "manager" ||
+        requesterRole === "waiter" ||
+        requesterRole === "captain" ||
+        requesterRole === "cook" ||
+        requesterRole === "employee";
+      const normalizedRequestCartId = normalizeObjectId(requestCartId);
+      if (canTrustRequesterCart && normalizedRequestCartId) {
+        cartId = normalizedRequestCartId;
+        console.log(
+          "[ORDER] Using trusted request cartId fallback for dine-in order:",
+          cartId.toString(),
+        );
       }
     }
 
@@ -2691,8 +2771,12 @@ const createOrder = async (req, res) => {
 
     // OFFICE QR fallback: if cart couldn't be resolved from request flow,
     // use cartId attached to the office table context.
-    if (!cartId && isOfficeDeliveryOrder && officeTableContext?.cartId) {
-      cartId = officeTableContext.cartId;
+    if (
+      !cartId &&
+      isOfficeDeliveryOrder &&
+      (officeTableContext?.cartId || officeTableContext?.cafeId)
+    ) {
+      cartId = officeTableContext.cartId || officeTableContext.cafeId;
       console.log(
         "[ORDER] Using cartId from office table context:",
         cartId.toString ? cartId.toString() : cartId,
@@ -2753,7 +2837,9 @@ const createOrder = async (req, res) => {
     const effectiveDeliveryOrder = isDelivery || isOfficeDeliveryOrder;
     const resolvedAnonymousSessionId =
       requestAnonymousSessionId ||
-      (isTakeaway ? normalizeAnonymousSessionId(sessionToken || "") : "");
+      (isTakeaway
+        ? normalizeAnonymousSessionId(resolvedSessionToken || "")
+        : "");
 
     const orderData = {
       _id: orderId,
@@ -2768,7 +2854,7 @@ const createOrder = async (req, res) => {
             : "takeaway",
       // For takeaway/delivery orders, store session token to isolate each customer session
       // For dine-in orders, use the table session token
-      sessionToken: isTakeaway ? sessionToken || undefined : sessionToken,
+      sessionToken: resolvedSessionToken || undefined,
       sourceQrType: normalizedSourceQrType,
       sourceQrContext: normalizedSourceQrContext || undefined,
       anonymousSessionId: resolvedAnonymousSessionId || undefined,
@@ -2784,7 +2870,7 @@ const createOrder = async (req, res) => {
       kotLines: [kot],
       status: ORDER_STATUSES.NEW,
       paymentStatus: PAYMENT_STATUSES.PENDING,
-      paymentMode: null,
+      paymentMode: normalizedServiceType === "DINE_IN" ? "CASH" : null,
       paymentRequiredBeforeProceeding: shouldStartPendingForPayment,
       // Inventory tracking: Not yet deducted (will be deducted when status changes to Preparing)
       inventoryDeducted: false,
@@ -3402,71 +3488,83 @@ const createOrder = async (req, res) => {
       });
     }
 
-    // Emit socket event to cafe room (only for admin panel, not customer frontend)
-    // Orders awaiting mandatory payment should stay hidden until payment is complete.
-    const isOrderAwaitingPayment =
-      requiresPaymentBeforeProceeding(order) && !isPaymentMarkedPaid(order);
+    // Hold payment-first orders from app queues until payment is completed
+    // online or explicitly switched to COD.
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe && !isOrderAwaitingPayment) {
+    if (order.cartId && io && emitToCafe) {
       const payload = orderToPlainPayload(order);
       const cartIdStr = (payload?.cartId || order.cartId).toString();
 
-      // Emit for admin dashboards and printing clients.
-      emitToCafe(io, cartIdStr, "kot:created", payload || order);
-      emitToCafe(io, cartIdStr, "order:created", payload || order);
-      emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
-      emitOrderUpsert({
-        io,
-        emitToCafe,
-        order: payload || order,
-        cartId: cartIdStr,
-        sourceEvent: "createOrder",
-      });
+      const shouldDeferQueueVisibility =
+        requiresPaymentBeforeProceeding(payload || order) &&
+        !isCashOnDeliveryOrder(payload || order) &&
+        !(await isOrderPaymentComplete(payload || order));
 
-      writeOrderNotificationTrace("socket emits for order create", {
-        orderId: String(order._id || ""),
-        cartId: cartIdStr,
-        status: payload?.status || order.status || null,
-        lifecycleStatus: payload?.lifecycleStatus || null,
-      });
-
-      // Keep legacy explicit availability event for compatibility.
-      const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
-      const isActiveStatus = !FINAL_ORDER_STATUSES.includes(order.status);
-      if (isUnassigned && isActiveStatus) {
-        emitToCafe(
-          io,
-          cartIdStr,
-          "NEW_ORDER_AVAILABLE",
-          buildNewOrderAvailablePayload(order),
-        );
-      }
-
-      notifyNewOrder({
-        io,
-        emitToCafeFn: emitToCafe,
-        order: payload || order,
-      })
-        .then((pushResult) => {
-          writeOrderNotificationTrace("new-order push completed", {
-            orderId: String(order._id || ""),
-            cartId: cartIdStr,
-            success: !!pushResult?.success,
-            skipped: !!pushResult?.skipped,
-            reason: pushResult?.reason || null,
-            tokenCount: pushResult?.tokenCount || 0,
-            successCount: pushResult?.successCount || 0,
-            failureCount: pushResult?.failureCount || 0,
-          });
-        })
-        .catch((pushError) => {
-          writeOrderNotificationTrace("new-order push failed", {
-            orderId: String(order._id || ""),
-            cartId: cartIdStr,
-            error: pushError?.message || "unknown",
-          });
+      if (shouldDeferQueueVisibility) {
+        writeOrderNotificationTrace("socket emits deferred for payment-gated order", {
+          orderId: String(order._id || ""),
+          cartId: cartIdStr,
+          status: payload?.status || order.status || null,
+          paymentStatus: payload?.paymentStatus || order.paymentStatus || null,
         });
+      } else {
+        // Emit for admin dashboards and printing clients.
+        emitToCafe(io, cartIdStr, "kot:created", payload || order);
+        emitToCafe(io, cartIdStr, "order:created", payload || order);
+        emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
+        emitOrderUpsert({
+          io,
+          emitToCafe,
+          order: payload || order,
+          cartId: cartIdStr,
+          sourceEvent: "createOrder",
+        });
+
+        writeOrderNotificationTrace("socket emits for order create", {
+          orderId: String(order._id || ""),
+          cartId: cartIdStr,
+          status: payload?.status || order.status || null,
+          lifecycleStatus: payload?.lifecycleStatus || null,
+        });
+
+        // Keep legacy explicit availability event for compatibility.
+        const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
+        const isActiveStatus = !FINAL_ORDER_STATUSES.includes(order.status);
+        if (isUnassigned && isActiveStatus) {
+          emitToCafe(
+            io,
+            cartIdStr,
+            "NEW_ORDER_AVAILABLE",
+            buildNewOrderAvailablePayload(order),
+          );
+        }
+
+        notifyNewOrder({
+          io,
+          emitToCafeFn: emitToCafe,
+          order: payload || order,
+        })
+          .then((pushResult) => {
+            writeOrderNotificationTrace("new-order push completed", {
+              orderId: String(order._id || ""),
+              cartId: cartIdStr,
+              success: !!pushResult?.success,
+              skipped: !!pushResult?.skipped,
+              reason: pushResult?.reason || null,
+              tokenCount: pushResult?.tokenCount || 0,
+              successCount: pushResult?.successCount || 0,
+              failureCount: pushResult?.failureCount || 0,
+            });
+          })
+          .catch((pushError) => {
+            writeOrderNotificationTrace("new-order push failed", {
+              orderId: String(order._id || ""),
+              cartId: cartIdStr,
+              error: pushError?.message || "unknown",
+            });
+          });
+      }
     }
     // KOT printing is handled by print-claim/template clients.
     // Keep order creation side-effect free to avoid duplicate legacy prints.
@@ -4087,14 +4185,9 @@ const getOrders = async (req, res) => {
     if (!includeHistory) {
       query.$and = query.$and || [];
       query.$and.push(buildActiveOrderMongoFilter());
-      // Hide unpaid orders that require pre-payment from active queues.
-      query.$and.push({
-        $or: [
-          { paymentRequiredBeforeProceeding: { $ne: true } },
-          { paymentStatus: PAYMENT_STATUSES.PAID },
-          { status: { $ne: ORDER_STATUSES.NEW } },
-        ],
-      });
+      if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
+        query.$and.push(buildEmployeeVisibleQueueMongoFilter());
+      }
     }
 
     // Fetch ALL orders - no date filtering, no limits, permanent storage
@@ -4837,17 +4930,24 @@ const acceptOrder = async (req, res) => {
         cartId: updatedOrder.cartId.toString(),
         sourceEvent: "acceptOrder",
       });
+      const orderAcceptedPayload = {
+        orderId: updatedOrder._id,
+        status: updatedOrder.status,
+        assignedStaff,
+        assignmentDisplayType,
+        order: updatedOrderPayload,
+      };
       emitToCafe(
         io,
         updatedOrder.cartId.toString(),
         "ORDER_ACCEPTED",
-        {
-          orderId: updatedOrder._id,
-          status: updatedOrder.status,
-          assignedStaff,
-          assignmentDisplayType,
-          order: updatedOrderPayload,
-        },
+        orderAcceptedPayload,
+      );
+      emitToOrderAudienceRooms(
+        io,
+        updatedOrderPayload,
+        "ORDER_ACCEPTED",
+        orderAcceptedPayload,
       );
       emitOrderUpsert({
         io,
@@ -4877,10 +4977,14 @@ const updateOrderStatus = async (req, res) => {
     }
 
     const requestedStatus = normalizeOrderStatus(status, ORDER_STATUSES.NEW);
+    const requestedStatusToken = String(status || "").trim().toUpperCase();
+    const isPaidStatusRequest = requestedStatusToken === "PAID";
     const requestedPaymentStatus =
       paymentStatus !== undefined
         ? normalizePaymentStatus(paymentStatus, PAYMENT_STATUSES.PENDING)
-        : null;
+        : isPaidStatusRequest
+          ? PAYMENT_STATUSES.PAID
+          : null;
 
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
@@ -4929,17 +5033,23 @@ const updateOrderStatus = async (req, res) => {
       }
     }
 
-    // Payment-gated orders must stay in NEW until payment is complete.
+    // Payment-gated orders must not proceed to kitchen flow until online payment
+    // is confirmed or payment mode is switched to COD.
     const isProceedingStatus = [
       ORDER_STATUSES.PREPARING,
       ORDER_STATUSES.READY,
       ORDER_STATUSES.COMPLETED,
     ].includes(requestedStatus);
     if (requiresPaymentBeforeProceeding(order) && isProceedingStatus) {
-      const paymentComplete = await isOrderPaymentComplete(order);
+      const requestMarksOrderPaid =
+        requestedPaymentStatus === PAYMENT_STATUSES.PAID;
+      const paymentComplete =
+        requestMarksOrderPaid ||
+        isCashOnDeliveryOrder(order) ||
+        (await isOrderPaymentComplete(order));
       if (!paymentComplete) {
         return res.status(400).json({
-          message: "Payment must be completed before updating order status.",
+          message: "Payment must be completed or marked COD before updating order status.",
           currentStatus,
           requestedStatus,
           allowedTransitions: Array.from(allowedTransitions),
@@ -5073,6 +5183,23 @@ const updateOrderStatus = async (req, res) => {
         reason,
       }).catch((pushError) => {
         console.error("[UPDATE_STATUS] order_cancelled notification failed:", pushError);
+      });
+    }
+
+    const shouldSendGenericStatusPush =
+      !isReadyStatus(updatedOrder.status) &&
+      updateData.paymentStatus !== PAYMENT_STATUSES.PAID &&
+      !(reason && requestedStatus === ORDER_STATUSES.COMPLETED);
+
+    if (shouldSendGenericStatusPush) {
+      sendOrderStatusNotification(
+        updatedOrderPayload,
+        updatedOrderPayload?.status || requestedStatus,
+      ).catch((pushError) => {
+        console.error(
+          "[UPDATE_STATUS] generic order_status notification failed:",
+          pushError,
+        );
       });
     }
 

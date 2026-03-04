@@ -36,6 +36,14 @@ const normalizePlatform = (platform) => {
   return VALID_FCM_PLATFORMS.has(normalized) ? normalized : "unknown";
 };
 
+const readFirstEnvValue = (keys = []) => {
+  for (const key of keys) {
+    const value = String(process.env[key] || "").trim();
+    if (value) return value;
+  }
+  return "";
+};
+
 const toObjectIdString = (value) => {
   if (!value) return "";
   if (typeof value === "string") return value.trim();
@@ -305,6 +313,63 @@ const saveFcmToken = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message || "Failed to save FCM token.",
+    });
+  }
+};
+
+const getFirebaseWebConfig = async (_req, res) => {
+  try {
+    const projectId = readFirstEnvValue(["FIREBASE_PROJECT_ID"]);
+    const messagingSenderId = readFirstEnvValue([
+      "FIREBASE_WEB_MESSAGING_SENDER_ID",
+      "FIREBASE_MESSAGING_SENDER_ID",
+    ]);
+    const apiKey = readFirstEnvValue([
+      "FIREBASE_WEB_API_KEY",
+      "FIREBASE_API_KEY",
+    ]);
+    const appId = readFirstEnvValue(["FIREBASE_WEB_APP_ID"]);
+    const authDomain =
+      readFirstEnvValue(["FIREBASE_WEB_AUTH_DOMAIN"]) ||
+      (projectId ? `${projectId}.firebaseapp.com` : "");
+    const storageBucket =
+      readFirstEnvValue(["FIREBASE_WEB_STORAGE_BUCKET"]) ||
+      (projectId ? `${projectId}.firebasestorage.app` : "");
+    const vapidKey = readFirstEnvValue(["FIREBASE_WEB_VAPID_KEY"]);
+
+    const hasMessagingConfig =
+      !!projectId && !!messagingSenderId && !!apiKey && !!appId;
+
+    return res.json({
+      success: true,
+      enabled: hasMessagingConfig,
+      config: hasMessagingConfig
+        ? {
+            apiKey,
+            authDomain,
+            projectId,
+            storageBucket,
+            messagingSenderId,
+            appId,
+          }
+        : null,
+      vapidKey: vapidKey || null,
+      missing: hasMessagingConfig
+        ? []
+        : [
+            !projectId ? "FIREBASE_PROJECT_ID" : null,
+            !messagingSenderId
+              ? "FIREBASE_WEB_MESSAGING_SENDER_ID (or FIREBASE_MESSAGING_SENDER_ID)"
+              : null,
+            !apiKey ? "FIREBASE_WEB_API_KEY (or FIREBASE_API_KEY)" : null,
+            !appId ? "FIREBASE_WEB_APP_ID" : null,
+          ].filter(Boolean),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      enabled: false,
+      message: error.message || "Failed to load Firebase web config.",
     });
   }
 };
@@ -701,6 +766,7 @@ const getFcmTokensDebug = async (req, res) => {
 };
 
 module.exports = {
+  getFirebaseWebConfig,
   saveFcmToken,
   sendNotificationToUser,
   sendCartBroadcastNotification,
