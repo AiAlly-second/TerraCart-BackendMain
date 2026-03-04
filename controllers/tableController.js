@@ -28,58 +28,54 @@ const buildHierarchyQuery = async (user) => {
     user &&
     ["waiter", "cook", "captain", "manager"].includes(user.role)
   ) {
-    // Mobile users - these are direct User records with cafeId set during login
-    // First check if User has cafeId directly
-    if (user.cafeId) {
-      query.cartId = user.cafeId;
-      console.log(
-        "[TABLE] buildHierarchyQuery - Mobile user has direct cafeId:",
-        {
-          userId: user._id,
-          role: user.role,
-          cafeId: user.cafeId,
-          cartId: query.cartId,
-        }
-      );
-    } else {
-      // Fallback: try to find Employee record by userId or email
-      const employee = await Employee.findOne({
+    // Mobile users: always prefer latest Employee mapping (source of truth),
+    // then fallback to cartId/cafeId on the user document.
+    let employee = null;
+    if (user.employeeId) {
+      employee = await Employee.findById(user.employeeId).lean();
+    }
+    if (!employee) {
+      employee = await Employee.findOne({
         $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
       }).lean();
-      if (employee && employee.cartId) { // Changed from employee.cafeId to employee.cartId
-        query.cartId = employee.cartId;
-        console.log(
-          "[TABLE] buildHierarchyQuery - Mobile user employee found:",
-          {
-            userId: user._id,
-            email: user.email,
-            employeeId: employee._id,
-            cartId: employee.cartId, // Changed from cafeId to cartId
-            queryCartId: query.cartId,
-          }
-        );
-      } else {
-        console.log(
-          "[TABLE] buildHierarchyQuery - No cafeId found for mobile user:",
-          {
-            userId: user._id,
-            role: user.role,
-            email: user.email,
-          }
-        );
-      }
+    }
+
+    const employeeCartId = employee?.cartId || employee?.cafeId;
+    if (employeeCartId) {
+      query.cartId = employeeCartId;
+      console.log("[TABLE] buildHierarchyQuery - Mobile employee mapping:", {
+        userId: user._id,
+        role: user.role,
+        email: user.email,
+        employeeId: employee?._id,
+        employeeCartId,
+      });
+    } else if (user.cartId || user.cafeId) {
+      query.cartId = user.cartId || user.cafeId;
+      console.log("[TABLE] buildHierarchyQuery - Mobile user fallback:", {
+        userId: user._id,
+        role: user.role,
+        email: user.email,
+        userCartId: user.cartId || null,
+        userCafeId: user.cafeId || null,
+        queryCartId: query.cartId,
+      });
+    } else {
+      console.log("[TABLE] buildHierarchyQuery - No cart mapping for mobile user:", {
+        userId: user._id,
+        role: user.role,
+        email: user.email,
+      });
     }
   } else if (user && user.role === "employee") {
     // Legacy employee role - look up Employee by userId or email
-    if (user.cafeId) {
-      query.cartId = user.cafeId;
-    } else {
-      const employee = await Employee.findOne({
-        $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
-      }).lean();
-      if (employee && employee.cartId) { // Changed from employee.cafeId to employee.cartId
-        query.cartId = employee.cartId;
-      }
+    const employee = await Employee.findOne({
+      $or: [{ userId: user._id }, { email: user.email?.toLowerCase() }],
+    }).lean();
+    if (employee && (employee.cartId || employee.cafeId)) {
+      query.cartId = employee.cartId || employee.cafeId;
+    } else if (user.cartId || user.cafeId) {
+      query.cartId = user.cartId || user.cafeId;
     }
   }
   return query;
@@ -423,7 +419,7 @@ exports.listTables = async (req, res) => {
     // Populate mergedWith to ensure it's included in the response
     const tables = await Table.find(query)
       .populate("mergedWith", "number")
-      .sort({ number: 1 })
+      .sort({ number: 1, updatedAt: -1, createdAt: -1, _id: -1 })
       .lean();
 
     // Additional safety: Filter out any tables that don't match the cartId exactly
@@ -442,22 +438,47 @@ exports.listTables = async (req, res) => {
 
     // Found tables
 
-    // Deduplicate: If multiple tables have the same number, keep only the first one
-    // Group by table number and cartId, then take the first occurrence
-    const seen = new Map();
-    const uniqueTables = [];
+    const hasValidQrSlug = (table = {}) =>
+      String(table?.qrSlug || "").trim().length > 0;
+    const hasValidQrContext = (table = {}) =>
+      ["TABLE", "OFFICE"].includes(
+        String(table?.qrContextType || "").trim().toUpperCase(),
+      );
+    const tableFreshnessScore = (table = {}) => {
+      const ts = new Date(table?.updatedAt || table?.createdAt || 0).getTime();
+      return Number.isFinite(ts) ? ts : 0;
+    };
+    const tableQualityScore = (table = {}) => {
+      let score = 0;
+      if (hasValidQrSlug(table)) score += 3;
+      if (hasValidQrContext(table)) score += 2;
+      if (table?.cartId || table?.cafeId) score += 1;
+      // Recency acts as tie-breaker between duplicate logical tables.
+      score += tableFreshnessScore(table) / 1e15;
+      return score;
+    };
 
+    // Deduplicate by cart + table number and prefer new QR-system records.
+    const tableByLogicalKey = new Map();
     for (const table of filteredTables) {
+      // Old/invalid records without slug should never surface in modern QR flows.
+      if (!hasValidQrSlug(table)) continue;
+      if (!hasValidQrContext(table)) continue;
       const key = `${table.cartId || table.cafeId || "unknown"}-${
         table.number
       }`;
-      if (!seen.has(key)) {
-        seen.set(key, true);
-        uniqueTables.push(table);
-      } else {
-        // Skipping duplicate table
+      if (!tableByLogicalKey.has(key)) {
+        tableByLogicalKey.set(key, table);
+        continue;
+      }
+
+      const existing = tableByLogicalKey.get(key);
+      if (tableQualityScore(table) > tableQualityScore(existing)) {
+        tableByLogicalKey.set(key, table);
       }
     }
+
+    const uniqueTables = Array.from(tableByLogicalKey.values());
 
     // After deduplication
 
@@ -2563,25 +2584,73 @@ exports.unmergeTables = async (req, res) => {
 // Get table occupancy dashboard
 exports.getTableOccupancyDashboard = async (req, res) => {
   try {
-    // Filter tables based on admin role
-    const query = {};
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      query.cartId = req.user._id;
-    } else if (
-      req.user &&
-      req.user.role === "franchise_admin" &&
-      req.user._id
-    ) {
-      query.franchiseId = req.user._id;
+    await syncTableFields();
+
+    // Keep dashboard scoping consistent with listTables (admin/franchise/mobile roles).
+    const query = await buildHierarchyQuery(req.user);
+    if (Object.keys(query).length === 0 && req.user?.role !== "super_admin") {
+      return res.json([]);
+    }
+
+    if (query.cartId && mongoose.Types.ObjectId.isValid(query.cartId)) {
+      query.cartId = new mongoose.Types.ObjectId(query.cartId);
     }
 
     const tables = await Table.find(query)
       .populate("currentOrder")
       .populate("mergedTables", "number capacity status")
-      .sort({ number: 1 })
+      .sort({ number: 1, updatedAt: -1, createdAt: -1, _id: -1 })
       .lean();
 
-    const dashboard = tables.map((table) => {
+    // Extra safety: enforce exact cart match and keep only modern table QR records.
+    const scopedTables = tables.filter((table) => {
+      if (query.cartId) {
+        const tableCartId = table.cartId?.toString();
+        const queryCartId = query.cartId.toString();
+        if (!tableCartId || tableCartId !== queryCartId) {
+          return false;
+        }
+      }
+      return true;
+    });
+
+    const hasValidQrSlug = (table = {}) =>
+      String(table?.qrSlug || "").trim().length > 0;
+    const tableFreshnessScore = (table = {}) => {
+      const ts = new Date(table?.updatedAt || table?.createdAt || 0).getTime();
+      return Number.isFinite(ts) ? ts : 0;
+    };
+    const tableQualityScore = (table = {}) => {
+      let score = 0;
+      if (hasValidQrSlug(table)) score += 3;
+      if (table?.cartId || table?.cafeId) score += 1;
+      score += tableFreshnessScore(table) / 1e15;
+      return score;
+    };
+
+    // Deduplicate by cart + table number and prefer latest QR-system records.
+    const tableByLogicalKey = new Map();
+    for (const table of scopedTables) {
+      if (!hasValidQrSlug(table)) continue;
+      if (String(table?.qrContextType || "").trim().toUpperCase() !== "TABLE") {
+        continue;
+      }
+
+      const key = `${table.cartId || table.cafeId || table.franchiseId || "unknown"}-${table.number}`;
+      if (!tableByLogicalKey.has(key)) {
+        tableByLogicalKey.set(key, table);
+        continue;
+      }
+
+      const existing = tableByLogicalKey.get(key);
+      if (tableQualityScore(table) > tableQualityScore(existing)) {
+        tableByLogicalKey.set(key, table);
+      }
+    }
+
+    const uniqueTables = Array.from(tableByLogicalKey.values());
+
+    const dashboard = uniqueTables.map((table) => {
       const isOccupied = ["OCCUPIED", "RESERVED"].includes(table.status);
       const isMerged = table.status === "MERGED" || table.mergedWith;
 
@@ -2626,12 +2695,10 @@ exports.getTableOccupancyDashboard = async (req, res) => {
     });
 
     // Add waitlist length for each table
-    const enriched = await Promise.all(
-      dashboard.map(async (item) => ({
-        ...item,
-        waitlistLength: await countActiveWaitlist(item.id),
-      }))
-    );
+    const enriched = await Promise.all(dashboard.map(async (item) => ({
+      ...item,
+      waitlistLength: await countActiveWaitlist(item.id),
+    })));
 
     return res.json(enriched);
   } catch (err) {

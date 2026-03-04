@@ -13,9 +13,13 @@ const { consumeIngredientsForOrder } = require("../services/costing-v2/orderCons
 const {
   ORDER_STATUSES,
   PAYMENT_STATUSES: ORDER_PAYMENT_STATUSES,
+  toPublicOrderStatus,
   buildOrderStatusUpdatedPayload,
 } = require("../utils/orderContract");
-const { notifyPaymentReceived } = require("../services/notificationEventService");
+const {
+  notifyNewOrder,
+  notifyPaymentReceived,
+} = require("../services/notificationEventService");
 const { Jimp } = require("jimp");
 const jsQR = require("jsqr");
 
@@ -59,10 +63,9 @@ const buildOrderUpsertPayload = (order) => {
     (order && typeof order.toJSON === "function" && order.toJSON()) ||
     order ||
     {};
+  const statusPayload = buildOrderStatusUpdatedPayload(source);
   const orderId = toSocketIdString(source._id || source.id || source.orderId);
   const cartId = toSocketIdString(source.cartId || source.cafeId);
-  const statusRaw = String(source.status || "").trim();
-  const paymentStatusRaw = String(source.paymentStatus || "").trim();
   const orderTypeRaw = String(
     source.orderType || source.serviceType || "",
   ).trim();
@@ -70,12 +73,29 @@ const buildOrderUpsertPayload = (order) => {
   return {
     orderId: orderId || null,
     cartId: cartId || null,
-    updatedAt: normalizeOrderUpsertTimestamp(
-      source.updatedAt || source.createdAt,
-    ),
-    status: statusRaw || null,
-    paymentStatus: paymentStatusRaw || null,
+    updatedAt: normalizeOrderUpsertTimestamp(statusPayload.updatedAt),
+    status: statusPayload.status || null,
+    paymentStatus: statusPayload.paymentStatus || null,
     orderType: orderTypeRaw || null,
+  };
+};
+
+const toClientOrderPayload = (order) => {
+  const source =
+    (order && typeof order.toObject === "function" && order.toObject()) ||
+    (order && typeof order.toJSON === "function" && order.toJSON()) ||
+    order ||
+    {};
+  const statusPayload = buildOrderStatusUpdatedPayload(source);
+  const paymentStatus = statusPayload.paymentStatus || ORDER_PAYMENT_STATUSES.PENDING;
+  const status = statusPayload.status || toPublicOrderStatus(source.status);
+
+  return {
+    ...source,
+    status,
+    lifecycleStatus: status,
+    paymentStatus,
+    isPaid: paymentStatus === ORDER_PAYMENT_STATUSES.PAID,
   };
 };
 
@@ -85,6 +105,27 @@ const emitOrderUpsert = ({ io, emitToCafe, order, cartId = null }) => {
   const resolvedCartId = toSocketIdString(cartId || payload.cartId);
   if (!resolvedCartId || !payload.orderId) return;
   emitToCafe(io, resolvedCartId, "order:upsert", payload);
+};
+
+const emitOrderReleaseEvents = ({
+  io,
+  emitToCafe,
+  order,
+  source = "payment_flow",
+}) => {
+  if (!io || !emitToCafe || !order) return;
+  const cartId = toSocketIdString(order.cartId || order.cafeId);
+  if (!cartId) return;
+  const orderPayload = toClientOrderPayload(order);
+
+  emitToCafe(io, cartId, "kot:created", orderPayload);
+  emitToCafe(io, cartId, "order:created", orderPayload);
+  emitToCafe(io, cartId, "newOrder", orderPayload); // Legacy support
+  emitOrderUpsert({ io, emitToCafe, order: orderPayload, cartId });
+
+  console.log(
+    `[PAYMENT] emitted release events (${source}) for order ${toSocketIdString(order._id || order.id || "")} cart ${cartId}`,
+  );
 };
 
 const buildQrScopeOrFilter = (scopeId) => {
@@ -329,6 +370,30 @@ const buildUpiPayload = async (orderId, amount, cartScopeId = null) => {
 const isRazorpayConfigured = () =>
   Boolean(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
 
+const buildOnlineUpiFallbackFields = async ({
+  order,
+  orderId,
+  amount,
+  description,
+  fallbackReason = "",
+}) => {
+  const cartScopeId = order?.cartId || order?.cafeId || null;
+  const upiPayload = await buildUpiPayload(orderId, amount, cartScopeId);
+  const parsedUpi = parseUpiPayload(upiPayload);
+
+  return {
+    upiPayload,
+    paymentUrl: upiPayload,
+    description: description || `UPI payment for order ${orderId}`,
+    metadata: {
+      gateway: "UPI_QR",
+      fallbackReason: String(fallbackReason || "").slice(0, 300),
+      upiId: parsedUpi?.upiId || "",
+      upiPayeeName: parsedUpi?.payeeName || "",
+    },
+  };
+};
+
 const buildRazorpayReceipt = (orderId) => {
   const sanitizedOrderId = String(orderId || "")
     .replace(/[^a-zA-Z0-9._-]/g, "")
@@ -506,23 +571,43 @@ const requiresPaymentBeforeProceeding = (order) => {
   return false;
 };
 
-const formatPaymentResponse = (payment) => ({
-  id: payment._id,
-  orderId: payment.orderId,
-  amount: payment.amount,
-  method: payment.method,
-  status: payment.status,
-  description: payment.description,
-  upiPayload: payment.upiPayload,
-  paymentUrl: payment.paymentUrl,
-  providerReference: payment.providerReference,
-  metadata: payment.metadata,
-  createdAt: payment.createdAt,
-  updatedAt: payment.updatedAt,
-  paidAt: payment.paidAt,
-  cancelledAt: payment.cancelledAt,
-  cancellationReason: payment.cancellationReason,
-});
+const resolveOrderTokenNumber = (payment, order = null) => {
+  const directOrderToken = order?.takeawayToken;
+  if (directOrderToken !== undefined && directOrderToken !== null) {
+    return directOrderToken;
+  }
+
+  const metadataToken =
+    payment?.metadata?.takeawayToken ?? payment?.metadata?.tokenNumber;
+  if (metadataToken !== undefined && metadataToken !== null) {
+    return metadataToken;
+  }
+
+  return null;
+};
+
+const formatPaymentResponse = (payment, order = null) => {
+  const tokenNumber = resolveOrderTokenNumber(payment, order);
+  return {
+    id: payment._id,
+    orderId: payment.orderId,
+    amount: payment.amount,
+    method: payment.method,
+    status: payment.status,
+    description: payment.description,
+    upiPayload: payment.upiPayload,
+    paymentUrl: payment.paymentUrl,
+    providerReference: payment.providerReference,
+    metadata: payment.metadata,
+    tokenNumber,
+    takeawayToken: tokenNumber,
+    createdAt: payment.createdAt,
+    updatedAt: payment.updatedAt,
+    paidAt: payment.paidAt,
+    cancelledAt: payment.cancelledAt,
+    cancellationReason: payment.cancellationReason,
+  };
+};
 
 const ensurePaymentForOrder = async (order, options = {}) => {
   if (!order?._id) return { payment: null, created: false };
@@ -700,24 +785,47 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
 
   const io = req.app.get("io");
   const emitToCafe = req.app.get("emitToCafe");
+  const orderPayload = toClientOrderPayload(order);
   if (io) {
     io.emit("paymentUpdated", formatPaymentResponse(payment));
-    io.emit("orderUpdated", order);
+    io.emit("orderUpdated", orderPayload);
   }
   if (order.cartId && io && emitToCafe) {
     const cartId = order.cartId.toString();
-    const statusPayload = buildOrderStatusUpdatedPayload(order);
-    emitToCafe(io, cartId, "order:status:updated", order);
+    const statusPayload = buildOrderStatusUpdatedPayload(orderPayload);
+    emitToCafe(io, cartId, "order:status:updated", orderPayload);
     emitToCafe(io, cartId, "order_status_updated", statusPayload);
-    emitToCafe(io, cartId, "orderUpdated", order);
-    emitOrderUpsert({ io, emitToCafe, order, cartId });
+    emitToCafe(io, cartId, "orderUpdated", orderPayload);
+    emitOrderUpsert({ io, emitToCafe, order: orderPayload, cartId });
     notifyPaymentReceived({
       io,
       emitToCafeFn: emitToCafe,
-      order,
+      order: orderPayload,
     }).catch((pushError) => {
       console.error(
         "[PAYMENT] payment_received notification failed:",
+        pushError?.message || pushError,
+      );
+    });
+
+    if (isPaymentFirstOrder) {
+      emitOrderReleaseEvents({
+        io,
+        emitToCafe,
+        order,
+        source,
+      });
+    }
+  }
+
+  if (isPaymentFirstOrder) {
+    notifyNewOrder({
+      io,
+      emitToCafeFn: emitToCafe,
+      order: orderPayload,
+    }).catch((pushError) => {
+      console.error(
+        "[PAYMENT] new-order notification after payment release failed:",
         pushError?.message || pushError,
       );
     });
@@ -817,14 +925,6 @@ exports.createPaymentIntent = async (req, res) => {
       });
     }
 
-    if (method === "ONLINE" && !isRazorpayConfigured()) {
-      return res.status(503).json({
-        message:
-          "Online payment is temporarily unavailable. Razorpay is not configured.",
-        code: "RAZORPAY_NOT_CONFIGURED",
-      });
-    }
-
     await Payment.updateMany(
       {
         orderId,
@@ -846,17 +946,40 @@ exports.createPaymentIntent = async (req, res) => {
     };
 
     if (method === "ONLINE") {
-      const razorpayOrder = await createRazorpayOrder({ amount, orderId });
-      payload.providerReference = razorpayOrder.id;
-      payload.metadata = {
-        gateway: "RAZORPAY",
-        razorpayOrderId: razorpayOrder.id,
-        razorpayReceipt: razorpayOrder.receipt || "",
-        razorpayAmount: razorpayOrder.amount || Math.round(amount * 100),
-        razorpayCurrency: razorpayOrder.currency || "INR",
-        razorpayKeyId: process.env.RAZORPAY_KEY_ID,
-      };
-      payload.description = description || `Razorpay payment for order ${orderId}`;
+      if (isRazorpayConfigured()) {
+        try {
+          const razorpayOrder = await createRazorpayOrder({ amount, orderId });
+          payload.providerReference = razorpayOrder.id;
+          payload.metadata = {
+            gateway: "RAZORPAY",
+            razorpayOrderId: razorpayOrder.id,
+            razorpayReceipt: razorpayOrder.receipt || "",
+            razorpayAmount: razorpayOrder.amount || Math.round(amount * 100),
+            razorpayCurrency: razorpayOrder.currency || "INR",
+            razorpayKeyId: process.env.RAZORPAY_KEY_ID,
+          };
+          payload.description =
+            description || `Razorpay payment for order ${orderId}`;
+        } catch (razorpayErr) {
+          const upiFallbackFields = await buildOnlineUpiFallbackFields({
+            order,
+            orderId,
+            amount,
+            description,
+            fallbackReason: `Razorpay unavailable: ${razorpayErr.message}`,
+          });
+          Object.assign(payload, upiFallbackFields);
+        }
+      } else {
+        const upiFallbackFields = await buildOnlineUpiFallbackFields({
+          order,
+          orderId,
+          amount,
+          description,
+          fallbackReason: "Razorpay is not configured on server",
+        });
+        Object.assign(payload, upiFallbackFields);
+      }
     }
 
     const payment = await Payment.create(payload);
@@ -868,6 +991,8 @@ exports.createPaymentIntent = async (req, res) => {
       .toUpperCase();
     const isPickupOrder =
       normalizedOrderType === "PICKUP" || normalizedServiceType === "PICKUP";
+    const wasPaymentGatedBeforeCashSelection =
+      requiresPaymentBeforeProceeding(order);
     const shouldAdvanceOrderForCashSelection =
       method === "CASH" &&
       (Boolean(order.paymentRequiredBeforeProceeding) ||
@@ -884,24 +1009,47 @@ exports.createPaymentIntent = async (req, res) => {
     if (io) {
       io.emit("paymentCreated", formatPaymentResponse(payment));
       if (shouldAdvanceOrderForCashSelection) {
-        io.emit("orderUpdated", order);
+        io.emit("orderUpdated", toClientOrderPayload(order));
       }
     }
 
     if (shouldAdvanceOrderForCashSelection && order.cartId && io && emitToCafe) {
+      const orderPayload = toClientOrderPayload(order);
       emitToCafe(
         io,
         order.cartId.toString(),
         "order_status_updated",
-        buildOrderStatusUpdatedPayload(order),
+        buildOrderStatusUpdatedPayload(orderPayload),
       );
-      emitToCafe(io, order.cartId.toString(), "order:status:updated", order);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", order);
+      emitToCafe(io, order.cartId.toString(), "order:status:updated", orderPayload);
+      emitToCafe(io, order.cartId.toString(), "orderUpdated", orderPayload);
       emitOrderUpsert({
         io,
         emitToCafe,
-        order,
+        order: orderPayload,
         cartId: order.cartId.toString(),
+      });
+
+      if (wasPaymentGatedBeforeCashSelection) {
+        emitOrderReleaseEvents({
+          io,
+          emitToCafe,
+          order,
+          source: "cash_selection",
+        });
+      }
+    }
+
+    if (shouldAdvanceOrderForCashSelection && wasPaymentGatedBeforeCashSelection) {
+      notifyNewOrder({
+        io,
+        emitToCafeFn: emitToCafe,
+        order: toClientOrderPayload(order),
+      }).catch((pushError) => {
+        console.error(
+          "[PAYMENT] new-order notification after cash selection failed:",
+          pushError?.message || pushError,
+        );
       });
     }
 
@@ -947,7 +1095,29 @@ exports.listPayments = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(200)
       .lean();
-    return res.json(payments.map(formatPaymentResponse));
+
+    const paymentOrderIds = Array.from(
+      new Set(
+        payments
+          .map((payment) => payment?.orderId)
+          .filter((orderId) => Boolean(orderId)),
+      ),
+    );
+
+    const orders = paymentOrderIds.length
+      ? await Order.find({ _id: { $in: paymentOrderIds } })
+          .select("_id takeawayToken")
+          .lean()
+      : [];
+    const orderById = new Map(
+      orders.map((order) => [String(order._id), order]),
+    );
+
+    return res.json(
+      payments.map((payment) =>
+        formatPaymentResponse(payment, orderById.get(String(payment.orderId))),
+      ),
+    );
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -965,16 +1135,19 @@ exports.getPaymentById = async (req, res) => {
       return res.status(403).json({ message: "Not authorized to access this payment" });
     }
 
-    if (scope.type !== "super_admin") {
-      const order = await Order.findById(payment.orderId)
-        .select("cartId franchiseId")
-        .lean();
-      if (!order || !canAccessOrderByScope(scope, order)) {
-        return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
-      }
+    const order = await Order.findById(payment.orderId)
+      .select("_id takeawayToken cartId franchiseId")
+      .lean();
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found for this payment" });
     }
 
-    return res.json(formatPaymentResponse(payment));
+    if (scope.type !== "super_admin" && !canAccessOrderByScope(scope, order)) {
+      return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
+    }
+
+    return res.json(formatPaymentResponse(payment, order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -983,7 +1156,9 @@ exports.getPaymentById = async (req, res) => {
 exports.getPaymentsForOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const order = await Order.findById(orderId).select("cartId franchiseId").lean();
+    const order = await Order.findById(orderId)
+      .select("_id takeawayToken cartId franchiseId")
+      .lean();
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
     }
@@ -994,7 +1169,7 @@ exports.getPaymentsForOrder = async (req, res) => {
     }
 
     const payments = await Payment.find({ orderId }).sort({ createdAt: -1 }).lean();
-    return res.json(payments.map(formatPaymentResponse));
+    return res.json(payments.map((payment) => formatPaymentResponse(payment, order)));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1003,6 +1178,9 @@ exports.getPaymentsForOrder = async (req, res) => {
 exports.getLatestPaymentForOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
+    const orderForResponse = await Order.findById(orderId)
+      .select("_id takeawayToken cartId cafeId kotLines selectedAddons")
+      .lean();
     
     // Order._id is a String (order number like "ORD-xxxxx"), and Payment.orderId stores the same string
     // So we can directly use orderId to find the payment
@@ -1014,12 +1192,8 @@ exports.getLatestPaymentForOrder = async (req, res) => {
     }
 
     // Keep pending payment amount aligned with current order bill (all KOT lines + add-ons).
-    if (["PENDING", "PROCESSING", "CASH_PENDING"].includes(payment.status)) {
-      const order = await Order.findById(orderId).select(
-        "kotLines selectedAddons cartId cafeId",
-      );
-      if (order) {
-        const recalculatedAmount = getOrderAmount(order);
+    if (["PENDING", "PROCESSING", "CASH_PENDING"].includes(payment.status) && orderForResponse) {
+      const recalculatedAmount = getOrderAmount(orderForResponse);
         const currentAmount = Number(payment.amount) || 0;
         if (
           recalculatedAmount &&
@@ -1032,7 +1206,8 @@ exports.getLatestPaymentForOrder = async (req, res) => {
 
             // Legacy UPI payload updates are only for non-Razorpay online records.
             if (payment.method === "ONLINE") {
-              const cartScopeId = order.cartId || order.cafeId || null;
+              const cartScopeId =
+                orderForResponse.cartId || orderForResponse.cafeId || null;
               payment.upiPayload = await buildUpiPayload(
                 orderId,
                 recalculatedAmount,
@@ -1043,10 +1218,9 @@ exports.getLatestPaymentForOrder = async (req, res) => {
             await payment.save();
           }
         }
-      }
     }
 
-    return res.json(formatPaymentResponse(payment));
+    return res.json(formatPaymentResponse(payment, orderForResponse));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1061,18 +1235,20 @@ exports.cancelPayment = async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
 
+    const order = await Order.findById(payment.orderId)
+      .select("_id takeawayToken cartId franchiseId")
+      .lean();
+    if (!order) {
+      return res.status(404).json({ message: "Order not found for this payment" });
+    }
+
     if (req.user) {
       const scope = await resolvePaymentScope(req.user);
       if (scope.type === "none") {
         return res.status(403).json({ message: "Not authorized to cancel this payment" });
       }
-      if (scope.type !== "super_admin") {
-        const order = await Order.findById(payment.orderId)
-          .select("cartId franchiseId")
-          .lean();
-        if (!order || !canAccessOrderByScope(scope, order)) {
-          return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
-        }
+      if (scope.type !== "super_admin" && !canAccessOrderByScope(scope, order)) {
+        return res.status(403).json({ message: "Payment does not belong to your cart/franchise" });
       }
     }
 
@@ -1087,10 +1263,10 @@ exports.cancelPayment = async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.emit("paymentUpdated", formatPaymentResponse(payment));
+      io.emit("paymentUpdated", formatPaymentResponse(payment, order));
     }
 
-    return res.json(formatPaymentResponse(payment));
+    return res.json(formatPaymentResponse(payment, order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1119,7 +1295,7 @@ exports.markPaymentPaid = async (req, res) => {
     }
 
     if (payment.status === "PAID") {
-      return res.json(formatPaymentResponse(payment));
+      return res.json(formatPaymentResponse(payment, order));
     }
 
     payment.status = "PAID";
@@ -1133,7 +1309,7 @@ exports.markPaymentPaid = async (req, res) => {
       source: "markPaymentPaid",
     });
 
-    return res.json(formatPaymentResponse(payment));
+    return res.json(formatPaymentResponse(payment, order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1172,8 +1348,13 @@ exports.verifyRazorpayPayment = async (req, res) => {
       return res.status(400).json({ message: "This is not an online payment." });
     }
 
+    const order = await Order.findById(payment.orderId);
+    if (!order) {
+      return res.status(404).json({ message: "Order not found for this payment" });
+    }
+
     if (payment.status === "PAID") {
-      return res.json(formatPaymentResponse(payment));
+      return res.json(formatPaymentResponse(payment, order));
     }
 
     if (["CANCELLED", "FAILED"].includes(payment.status)) {
@@ -1205,15 +1386,10 @@ exports.verifyRazorpayPayment = async (req, res) => {
       await payment.save();
       const io = req.app.get("io");
       if (io) {
-        io.emit("paymentUpdated", formatPaymentResponse(payment));
+        io.emit("paymentUpdated", formatPaymentResponse(payment, order));
       }
 
       return res.status(400).json({ message: "Razorpay signature verification failed." });
-    }
-
-    const order = await Order.findById(payment.orderId);
-    if (!order) {
-      return res.status(404).json({ message: "Order not found for this payment" });
     }
 
     payment.status = "PAID";
@@ -1236,7 +1412,7 @@ exports.verifyRazorpayPayment = async (req, res) => {
       source: "razorpayVerification",
     });
 
-    return res.json(formatPaymentResponse(payment));
+    return res.json(formatPaymentResponse(payment, order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

@@ -99,6 +99,99 @@ const toObjectIdSafe = (id) => {
 };
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MS_PER_MINUTE = 60 * 1000;
+
+const parseOptionalDate = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const toFiniteNumberOrNull = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const formatRemainingShelfLife = (remainingMs) => {
+  if (remainingMs <= 0) return "Expired";
+
+  const minutes = Math.ceil(remainingMs / MS_PER_MINUTE);
+  if (minutes < 60) {
+    return `${minutes} min left`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  if (remainingMs < MS_PER_DAY) {
+    if (mins === 0) {
+      return `${hours} hr${hours !== 1 ? "s" : ""} left`;
+    }
+    return `${hours} hr${hours !== 1 ? "s" : ""} ${mins} min left`;
+  }
+
+  const days = Math.ceil(remainingMs / MS_PER_DAY);
+  return `${days} day${days !== 1 ? "s" : ""} left`;
+};
+
+const resolveShelfLifeState = ({
+  shelfTimeDays,
+  lastReceivedAt,
+  expiryDate,
+  now = new Date(),
+}) => {
+  const shelfDays = toFiniteNumberOrNull(shelfTimeDays);
+  const startDate = parseOptionalDate(lastReceivedAt);
+  const explicitExpiryDate = parseOptionalDate(expiryDate);
+
+  let resolvedExpiryDate = explicitExpiryDate;
+  if (!resolvedExpiryDate && shelfDays !== null && startDate) {
+    resolvedExpiryDate = new Date(startDate);
+    resolvedExpiryDate.setDate(resolvedExpiryDate.getDate() + shelfDays);
+  }
+
+  if (!resolvedExpiryDate) {
+    if (shelfDays !== null) {
+      return {
+        shelfDays,
+        shelfLifeText: `Shelf: ${shelfDays} day${shelfDays !== 1 ? "s" : ""}`,
+        shelfLifeStatus: "shelf_only",
+        remainingMs: null,
+        remainingMinutes: null,
+        daysRemaining: null,
+        expiryAt: null,
+      };
+    }
+    return {
+      shelfDays: null,
+      shelfLifeText: null,
+      shelfLifeStatus: null,
+      remainingMs: null,
+      remainingMinutes: null,
+      daysRemaining: null,
+      expiryAt: null,
+    };
+  }
+
+  const remainingMs = resolvedExpiryDate.getTime() - now.getTime();
+  const remainingMinutes = Math.ceil(remainingMs / MS_PER_MINUTE);
+  const daysRemaining = Math.ceil(remainingMs / MS_PER_DAY);
+  const isExpired = remainingMs <= 0;
+
+  return {
+    shelfDays,
+    shelfLifeText: formatRemainingShelfLife(remainingMs),
+    shelfLifeStatus: isExpired
+      ? "expired"
+      : daysRemaining <= 3
+      ? "near_expiry"
+      : "fresh",
+    remainingMs,
+    remainingMinutes,
+    daysRemaining,
+    expiryAt: resolvedExpiryDate,
+  };
+};
 
 const parseDateAtStartOfDay = (value) => {
   if (value == null || value === "") return null;
@@ -2296,12 +2389,21 @@ exports.createPurchase = async (req, res) => {
     for (const item of items) {
       const total = item.qty * item.unitPrice;
       totalAmount += total;
+      const hasExplicitExpiryDate =
+        item.expiryDate !== undefined &&
+        item.expiryDate !== null &&
+        item.expiryDate !== "";
+      const parsedExpiryDate = parseOptionalDate(item.expiryDate);
+      if (hasExplicitExpiryDate && !parsedExpiryDate) {
+        throw new Error(`Invalid expiryDate for ingredient ${item.ingredientId}`);
+      }
       purchaseItems.push({
         ingredientId: item.ingredientId,
         qty: item.qty,
         uom: item.uom,
         unitPrice: item.unitPrice,
         total,
+        expiryDate: parsedExpiryDate,
       });
     }
 
@@ -2357,6 +2459,15 @@ exports.receivePurchase = async (req, res) => {
       const ingredient = await Ingredient.findById(item.ingredientId);
       if (!ingredient) continue;
 
+      const hasExplicitExpiryDate =
+        item.expiryDate !== undefined &&
+        item.expiryDate !== null &&
+        item.expiryDate !== "";
+      const parsedExpiryDate = parseOptionalDate(item.expiryDate);
+      if (hasExplicitExpiryDate && !parsedExpiryDate) {
+        throw new Error(`Invalid expiryDate for ingredient ${ingredient.name}`);
+      }
+
       purchasedIngredientIds.push(item.ingredientId);
 
       // Convert to base unit
@@ -2402,6 +2513,15 @@ exports.receivePurchase = async (req, res) => {
       if (process.env.NODE_ENV === 'development') {
         console.log(`[PURCHASE RECEIVE] ${ingredient.name}: Stock updated - previousQty=${stockUpdateResult.previousQty}, previousAvgCost=₹${stockUpdateResult.previousAvgCost.toFixed(6)}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, weightedAvgCost=₹${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
       }
+
+      // Keep shelf-life source fields in sync with received purchases.
+      // If no explicit expiry date is provided, fallback logic uses shelfTimeDays + lastReceivedAt.
+      await Ingredient.findByIdAndUpdate(item.ingredientId, {
+        $set: {
+          lastReceivedAt: new Date(),
+          expiryDate: parsedExpiryDate || null,
+        },
+      });
 
       // Calculate cost allocated using the actual purchase cost (not weighted average)
       // The transaction should record the actual cost of this purchase
@@ -3119,7 +3239,7 @@ exports.getCostingInventory = async (req, res) => {
     // Get ingredients for this cart/cafe/kiosk
     let ingredients = await Ingredient.find(costingFilter)
       .select(
-        "name category uom baseUnit qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt shelfTimeDays lastReceivedAt isActive"
+        "name category uom baseUnit qtyOnHand reorderLevel currentCostPerBaseUnit storageLocation updatedAt shelfTimeDays lastReceivedAt expiryDate isActive"
       )
       .sort({ category: 1, name: 1 })
       .lean();
@@ -3231,37 +3351,11 @@ exports.getCostingInventory = async (req, res) => {
         ? qtyOnHand * weightedAvgCost
         : 0;
 
-      const shelfLifeDaysRaw =
-        ing.shelfTimeDays !== undefined && ing.shelfTimeDays !== null && ing.shelfTimeDays !== ""
-          ? Number(ing.shelfTimeDays)
-          : null;
-      const shelfLifeDays =
-        shelfLifeDaysRaw !== null && !Number.isNaN(shelfLifeDaysRaw)
-          ? shelfLifeDaysRaw
-          : null;
-
-      let shelfLifeText = null;
-      if (shelfLifeDays !== null && ing.lastReceivedAt) {
-        const startDate = new Date(ing.lastReceivedAt);
-        if (!Number.isNaN(startDate.getTime())) {
-          const expiry = new Date(startDate);
-          expiry.setDate(expiry.getDate() + shelfLifeDays);
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          expiry.setHours(0, 0, 0, 0);
-          const msPerDay = 24 * 60 * 60 * 1000;
-          const daysRemaining = Math.floor((expiry - today) / msPerDay);
-          if (daysRemaining < 0) {
-            shelfLifeText = "Expired";
-          } else if (daysRemaining === 0) {
-            shelfLifeText = "Expires today";
-          } else {
-            shelfLifeText = `${daysRemaining} day${daysRemaining !== 1 ? "s" : ""} left`;
-          }
-        }
-      } else if (shelfLifeDays !== null) {
-        shelfLifeText = `Shelf: ${shelfLifeDays} day${shelfLifeDays !== 1 ? "s" : ""}`;
-      }
+      const shelfLife = resolveShelfLifeState({
+        shelfTimeDays: ing.shelfTimeDays,
+        lastReceivedAt: ing.lastReceivedAt,
+        expiryDate: ing.expiryDate,
+      });
 
       return {
         _id: ing._id,
@@ -3284,9 +3378,15 @@ exports.getCostingInventory = async (req, res) => {
         currentCostPerBaseUnit: weightedAvgCost,
         totalValue: Number(totalValue.toFixed(2)),
         totalValueDisplay: `₹${Math.round(totalValue)}`,
-        shelfLifeDays: shelfLifeDays,
-        shelfTimeDays: shelfLifeDays,
-        shelfLifeText: shelfLifeText,
+        shelfLifeDays: shelfLife.shelfDays,
+        shelfTimeDays: shelfLife.shelfDays,
+        shelfLifeText: shelfLife.shelfLifeText,
+        shelfLifeStatus: shelfLife.shelfLifeStatus,
+        shelfLifeRemainingMs: shelfLife.remainingMs,
+        shelfLifeRemainingMinutes: shelfLife.remainingMinutes,
+        shelfLifeDaysRemaining: shelfLife.daysRemaining,
+        expiryAt: shelfLife.expiryAt ? shelfLife.expiryAt.toISOString() : null,
+        expiryDate: ing.expiryDate || null,
         lastReceivedAt: ing.lastReceivedAt || null,
         location: ing.storageLocation || "Main Storage",
         storageLocation: ing.storageLocation || "Main Storage",

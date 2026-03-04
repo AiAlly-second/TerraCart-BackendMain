@@ -5,6 +5,13 @@ const ORDER_STATUSES = Object.freeze({
   COMPLETED: "COMPLETED",
 });
 
+const PUBLIC_ORDER_STATUSES = Object.freeze({
+  NEW: "NEW",
+  PREPARING: "PREPARING",
+  READY: "READY",
+  SERVED: "SERVED",
+});
+
 const PAYMENT_STATUSES = Object.freeze({
   PENDING: "PENDING",
   PAID: "PAID",
@@ -57,6 +64,23 @@ const normalizeOrderStatus = (value, fallback = ORDER_STATUSES.NEW) => {
   const token = normalizeToken(value);
   if (!token) return fallback;
   return ORDER_STATUS_ALIASES.get(token) || fallback;
+};
+
+const toPublicOrderStatus = (value, fallback = PUBLIC_ORDER_STATUSES.NEW) => {
+  const normalized = normalizeOrderStatus(value, ORDER_STATUSES.NEW);
+  if (normalized === ORDER_STATUSES.COMPLETED) {
+    return PUBLIC_ORDER_STATUSES.SERVED;
+  }
+  if (normalized === ORDER_STATUSES.PREPARING) {
+    return PUBLIC_ORDER_STATUSES.PREPARING;
+  }
+  if (normalized === ORDER_STATUSES.READY) {
+    return PUBLIC_ORDER_STATUSES.READY;
+  }
+  if (normalized === ORDER_STATUSES.NEW) {
+    return PUBLIC_ORDER_STATUSES.NEW;
+  }
+  return fallback;
 };
 
 const normalizePaymentStatus = (
@@ -133,7 +157,7 @@ const buildOrderStatusUpdatedPayload = (orderLike) => {
 
   return {
     orderId: orderId ? String(orderId) : null,
-    status: normalizeOrderStatus(orderLike.status, ORDER_STATUSES.NEW),
+    status: toPublicOrderStatus(orderLike.status, PUBLIC_ORDER_STATUSES.NEW),
     paymentStatus: normalizePaymentStatus(
       orderLike.paymentStatus,
       PAYMENT_STATUSES.PENDING,
@@ -147,17 +171,19 @@ const buildOrderStatusUpdatedPayload = (orderLike) => {
 
 const buildActiveOrderMongoFilter = () => ({
   $or: [
-    { status: { $ne: ORDER_STATUSES.COMPLETED } },
+    { status: { $nin: [ORDER_STATUSES.COMPLETED, PUBLIC_ORDER_STATUSES.SERVED] } },
     { paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
   ],
 });
 
 module.exports = {
   ORDER_STATUSES,
+  PUBLIC_ORDER_STATUSES,
   PAYMENT_STATUSES,
   ORDER_STATUS_VALUES,
   PAYMENT_STATUS_VALUES,
   normalizeOrderStatus,
+  toPublicOrderStatus,
   normalizePaymentStatus,
   applyCanonicalOrderState,
   isOrderSettled,

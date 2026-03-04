@@ -8,8 +8,14 @@ const printerConfigSchema = new mongoose.Schema(
       required: true,
       unique: true,
     },
-    printerIp: { type: String, required: true },
+    // Legacy/default printer fields (kept for backward compatibility)
+    printerIp: { type: String, default: "" },
     printerPort: { type: Number, default: 9100 },
+    // Dedicated printer endpoints for simultaneous KOT + BILL printing
+    kotPrinterIp: { type: String, default: "" },
+    kotPrinterPort: { type: Number, default: 9100 },
+    billPrinterIp: { type: String, default: "" },
+    billPrinterPort: { type: Number, default: 9100 },
     businessName: { type: String, default: "TERRA CART" },
     kotHeaderText: { type: String, default: "" },
     billHeaderText: { type: String, default: "" },

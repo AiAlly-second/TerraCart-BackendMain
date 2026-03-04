@@ -1,0 +1,196 @@
+const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const MAX_MENU_ITEMS = 300;
+const MAX_RESULT_ITEMS = 12;
+
+const normalizeText = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const normalizeAction = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (["ADD_ITEMS", "PLACE_ORDER", "SHOW_CART", "CLEAR_CART", "NONE"].includes(normalized)) {
+    return normalized;
+  }
+  if (normalized === "ADD") return "ADD_ITEMS";
+  if (normalized === "CHECKOUT") return "PLACE_ORDER";
+  if (normalized === "OPEN_CART") return "SHOW_CART";
+  return "NONE";
+};
+
+const parseJsonSafely = (value) => {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  if (typeof value !== "string") return null;
+
+  try {
+    return JSON.parse(value);
+  } catch (_error) {
+    const jsonMatch = value.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return null;
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (_innerError) {
+      return null;
+    }
+  }
+};
+
+const buildFallbackReply = ({ action, addedCount, notFoundCount }) => {
+  if (action === "CLEAR_CART") return "I cleared your cart.";
+  if (action === "SHOW_CART") return "Opening your cart.";
+  if (action === "PLACE_ORDER") return "Placing your order now.";
+  if (action === "ADD_ITEMS") {
+    if (addedCount > 0 && notFoundCount > 0) {
+      return `I added ${addedCount} item${addedCount > 1 ? "s" : ""}. Some items were not found.`;
+    }
+    if (addedCount > 0) {
+      return `I added ${addedCount} item${addedCount > 1 ? "s" : ""} to your cart.`;
+    }
+    if (notFoundCount > 0) {
+      return "I could not match those items in the menu. Please try again.";
+    }
+  }
+  return "Please tell me what you want to order.";
+};
+
+exports.parseTapToOrderVoice = async (req, res) => {
+  try {
+    const transcript = String(req.body?.transcript || "").trim();
+    const locale = String(req.body?.locale || "en-IN").trim();
+    const rawMenuItems = Array.isArray(req.body?.menuItems) ? req.body.menuItems : [];
+
+    if (!transcript) {
+      return res.status(400).json({ message: "transcript is required" });
+    }
+    if (!rawMenuItems.length) {
+      return res.status(400).json({ message: "menuItems are required" });
+    }
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({ message: "OPENAI_API_KEY is not configured" });
+    }
+
+    const menuItems = rawMenuItems
+      .map((entry) =>
+        typeof entry === "string" ? entry : String(entry?.name || "").trim(),
+      )
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .slice(0, MAX_MENU_ITEMS);
+
+    if (!menuItems.length) {
+      return res.status(400).json({ message: "menuItems are required" });
+    }
+
+    const menuLookup = new Map();
+    menuItems.forEach((name) => {
+      menuLookup.set(normalizeText(name), name);
+    });
+
+    const systemPrompt = [
+      "You are a restaurant voice-order parser for a Tap to Order button.",
+      "Return JSON only with keys: action, items, notFound, assistantReply.",
+      "Allowed action values: ADD_ITEMS, PLACE_ORDER, SHOW_CART, CLEAR_CART, NONE.",
+      "If user asks to place/confirm/checkout then action is PLACE_ORDER.",
+      "If user asks to open/show cart then action is SHOW_CART.",
+      "If user asks to clear/reset cart then action is CLEAR_CART.",
+      "Otherwise action is ADD_ITEMS when food items are requested.",
+      "items must contain objects: {\"name\": string, \"quantity\": integer >= 1}.",
+      "Use only item names from the provided menu list. If uncertain, put item text in notFound.",
+      "assistantReply must be short, polite, and easy to speak out loud.",
+      "Do not include markdown.",
+    ].join(" ");
+
+    const openAiResponse = await fetch(OPENAI_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: JSON.stringify({
+              transcript,
+              locale,
+              menuItems,
+            }),
+          },
+        ],
+      }),
+    });
+
+    if (!openAiResponse.ok) {
+      const details = await openAiResponse.text();
+      console.error(
+        `[VOICE_ORDER] OpenAI request failed status=${openAiResponse.status} body=${details.slice(0, 400)}`,
+      );
+      return res.status(502).json({ message: "Failed to process voice command" });
+    }
+
+    const responseBody = await openAiResponse.json();
+    const rawContent = responseBody?.choices?.[0]?.message?.content || "";
+    const parsed = parseJsonSafely(rawContent);
+    if (!parsed || typeof parsed !== "object") {
+      return res.status(502).json({ message: "Unable to parse voice command" });
+    }
+
+    const action = normalizeAction(parsed.action);
+    const responseItems = Array.isArray(parsed.items) ? parsed.items.slice(0, MAX_RESULT_ITEMS) : [];
+    const notFoundSet = new Set(
+      (Array.isArray(parsed.notFound) ? parsed.notFound : [])
+        .map((entry) => String(entry || "").trim())
+        .filter(Boolean),
+    );
+
+    const items = [];
+    responseItems.forEach((entry) => {
+      const requestedName = String(entry?.name || "").trim();
+      if (!requestedName) return;
+      const quantityRaw = Number(entry?.quantity);
+      const quantity = Number.isFinite(quantityRaw)
+        ? Math.max(1, Math.min(20, Math.round(quantityRaw)))
+        : 1;
+
+      const canonicalName = menuLookup.get(normalizeText(requestedName));
+      if (!canonicalName) {
+        notFoundSet.add(requestedName);
+        return;
+      }
+
+      items.push({ name: canonicalName, quantity });
+    });
+
+    const assistantReplyCandidate = String(parsed.assistantReply || "").trim();
+    const assistantReply = assistantReplyCandidate
+      ? assistantReplyCandidate.slice(0, 220)
+      : buildFallbackReply({
+          action,
+          addedCount: items.length,
+          notFoundCount: notFoundSet.size,
+        });
+
+    return res.json({
+      action,
+      items,
+      notFound: Array.from(notFoundSet).slice(0, 8),
+      assistantReply,
+    });
+  } catch (error) {
+    console.error("[VOICE_ORDER] parseTapToOrderVoice error:", error);
+    return res.status(500).json({ message: "Voice parsing failed" });
+  }
+};

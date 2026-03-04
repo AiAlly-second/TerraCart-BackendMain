@@ -96,6 +96,11 @@ const ingredientSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /** Optional explicit expiry date from purchase. If set, takes precedence over shelfTimeDays. */
+    expiryDate: {
+      type: Date,
+      default: null,
+    },
     preferredSupplierId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Supplier",
@@ -266,4 +271,3 @@ ingredientSchema.methods.convertFromBaseUnit = function (qty, toUom) {
 };
 
 module.exports = mongoose.model("IngredientV2", ingredientSchema);
-
