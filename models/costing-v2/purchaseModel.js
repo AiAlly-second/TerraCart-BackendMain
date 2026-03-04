@@ -42,6 +42,8 @@ const purchaseSchema = new mongoose.Schema(
         uom: { type: String, required: true },
         unitPrice: { type: Number, required: true, min: 0 },
         total: { type: Number, required: true, min: 0 },
+        // Optional explicit expiry date for this purchase line.
+        expiryDate: { type: Date, default: null },
       },
     ],
     totalAmount: {
@@ -94,4 +96,3 @@ purchaseSchema.pre("save", async function (next) {
 });
 
 module.exports = mongoose.model("Purchase", purchaseSchema);
-

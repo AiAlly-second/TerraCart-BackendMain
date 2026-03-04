@@ -187,6 +187,7 @@ class WeightedAverageService {
       if (cartId && ingredient.cartId.toString() === cartId.toString()) {
         ingredient.qtyOnHand = totalQty;
         ingredient.currentCostPerBaseUnit = newAverageCost; // Use weighted average cost
+        ingredient.lastReceivedAt = new Date();
         if (process.env.NODE_ENV === 'development') {
           console.log(`[Weighted Average] Cart-specific ingredient ${ingredient.name}: ${existingQty} → ${totalQty} ${ingredient.baseUnit}, existing cost=₹${existingAvgCost.toFixed(6)}, new purchase cost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}, weighted avg=₹${newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
         }
@@ -205,6 +206,7 @@ class WeightedAverageService {
         // Global purchase (no cartId) - update global stock
         ingredient.qtyOnHand = totalQty;
         ingredient.currentCostPerBaseUnit = newAverageCost; // Use weighted average cost
+        ingredient.lastReceivedAt = new Date();
         if (process.env.NODE_ENV === 'development') {
           console.log(`[Weighted Average] Shared ingredient ${ingredient.name}: Global purchase - ${existingQty} → ${totalQty} ${ingredient.baseUnit}, existing cost=₹${existingAvgCost.toFixed(6)}, new purchase cost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}, weighted avg=₹${newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
         }
@@ -214,6 +216,7 @@ class WeightedAverageService {
         // Note: For shared ingredients with cartId, we store the weighted average in the ingredient
         // but stock is calculated from transactions
         ingredient.currentCostPerBaseUnit = newAverageCost; // Use weighted average cost
+        ingredient.lastReceivedAt = new Date();
         if (process.env.NODE_ENV === 'development') {
           console.log(`[Weighted Average] Shared ingredient ${ingredient.name}: Outlet-specific purchase (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions. Existing: ${existingQty}, New purchase: ${newPurchaseQty}, Total: ${totalQty}, existing cost=₹${existingAvgCost.toFixed(6)}, new purchase cost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}, weighted avg=₹${newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
         }
@@ -543,4 +546,3 @@ class WeightedAverageService {
 }
 
 module.exports = WeightedAverageService;
-

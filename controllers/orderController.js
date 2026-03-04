@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const net = require("net");
 const Order = require("../models/orderModel");
 const PrintJob = require("../models/printJobModel");
 const PrinterConfig = require("../models/printerConfigModel");
@@ -1472,6 +1473,37 @@ function formatPaymentPayload(payment) {
 }
 
 const printerIpRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+const DEFAULT_PRINTER_PORT = 9100;
+const BILL_PRINT_MAX_RETRIES = 1;
+const BILL_PRINT_RETRY_DELAY_MS = 3000;
+
+const parsePrinterPort = (value, fallback = DEFAULT_PRINTER_PORT) => {
+  if (value == null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1 || parsed > 65535) return NaN;
+  return parsed;
+};
+
+const resolvePrinterTargetsFromConfig = (config = {}) => {
+  const legacyIp = String(config?.printerIp || "").trim();
+  const legacyPort = parsePrinterPort(config?.printerPort, DEFAULT_PRINTER_PORT);
+
+  const kotPrinterIp = String(config?.kotPrinterIp || "").trim() || legacyIp;
+  const kotPrinterPort = parsePrinterPort(config?.kotPrinterPort, legacyPort);
+
+  const billPrinterIp =
+    String(config?.billPrinterIp || "").trim() || legacyIp || kotPrinterIp;
+  const billPrinterPort = parsePrinterPort(config?.billPrinterPort, legacyPort);
+
+  return {
+    printerIp: legacyIp || kotPrinterIp || billPrinterIp || "",
+    printerPort: legacyPort,
+    kotPrinterIp: kotPrinterIp || "",
+    kotPrinterPort,
+    billPrinterIp: billPrinterIp || "",
+    billPrinterPort,
+  };
+};
 
 const buildEscPosPayloadFromKotLines = ({ lines = [], centerAlign = true }) => {
   const safeLines = Array.isArray(lines) ? lines : [];
@@ -1562,6 +1594,263 @@ const setKotPrintKeyAndEmitPending = async ({ req, order, kotIndex }) => {
 const PRINT_MODE = String(process.env.PRINT_MODE || "AGENT_ONLY").toUpperCase();
 const isAgentOnlyPrint = PRINT_MODE === "AGENT_ONLY";
 
+const sendRawPrintToNetworkPrinter = ({ printerIP, printerPort, data }) =>
+  new Promise((resolve, reject) => {
+    const client = new net.Socket();
+    const responseChunks = [];
+    let settled = false;
+    let timeout;
+
+    const finish = (callback, payload) => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      callback(payload);
+    };
+
+    timeout = setTimeout(() => {
+      client.destroy();
+      finish(reject, new Error("Connection timeout"));
+    }, 5000);
+
+    client.connect(printerPort, printerIP, () => {
+      if (timeout) clearTimeout(timeout);
+      client.write(data, "binary", (err) => {
+        if (err) {
+          client.destroy();
+          finish(reject, err);
+          return;
+        }
+
+        setTimeout(() => {
+          if (!settled) client.end();
+        }, 1000);
+      });
+    });
+
+    client.on("data", (chunk) => {
+      responseChunks.push(Buffer.from(chunk));
+    });
+
+    client.on("close", (hadError) => {
+      if (hadError || settled) return;
+      const printerResponse = responseChunks.length
+        ? Buffer.concat(responseChunks).toString("utf8")
+        : "";
+      finish(resolve, {
+        success: true,
+        message: "Print job sent successfully",
+        printerResponse,
+      });
+    });
+
+    client.on("error", (err) => {
+      finish(reject, err);
+    });
+  });
+
+const sleepForPrintRetry = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const executeRawPrintWithRetry = async ({ printerIP, printerPort, data }) => {
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt <= BILL_PRINT_MAX_RETRIES) {
+    attempt += 1;
+    try {
+      const result = await sendRawPrintToNetworkPrinter({
+        printerIP,
+        printerPort,
+        data,
+      });
+      return {
+        ...result,
+        attempts: attempt,
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt <= BILL_PRINT_MAX_RETRIES) {
+        console.warn(
+          `[BILL_PRINT_TRIGGER] Attempt ${attempt} failed for ${printerIP}:${printerPort}. Retrying in ${BILL_PRINT_RETRY_DELAY_MS}ms`
+        );
+        await sleepForPrintRetry(BILL_PRINT_RETRY_DELAY_MS);
+      }
+    }
+  }
+
+  const wrapped = new Error(lastError?.message || "Failed to print bill");
+  wrapped.attempts = attempt;
+  throw wrapped;
+};
+
+const buildOrderBillRows = (order = {}) => {
+  const rows = [];
+  const kotLines = Array.isArray(order?.kotLines) ? order.kotLines : [];
+  for (const kotLine of kotLines) {
+    const items = Array.isArray(kotLine?.items) ? kotLine.items : [];
+    for (const item of items) {
+      if (!item || item.returned === true) continue;
+      const itemName = sanitizeKotText(item.name || "Item");
+      const qtyRaw = Number(item.quantity);
+      const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
+      const priceInPaise = Number(item.price);
+      if (!Number.isFinite(priceInPaise) || priceInPaise < 0) continue;
+
+      const unitPrice = Number((priceInPaise / 100).toFixed(2));
+      const total = Number((unitPrice * quantity).toFixed(2));
+      rows.push({
+        name: itemName,
+        quantity,
+        unitPrice,
+        total,
+      });
+    }
+  }
+
+  const addons = Array.isArray(order?.selectedAddons) ? order.selectedAddons : [];
+  for (const addon of addons) {
+    if (!addon) continue;
+    const addonName = sanitizeKotText(addon.name || "Add-on");
+    const qtyRaw = Number(addon.quantity);
+    const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.floor(qtyRaw) : 1;
+    const unitPrice = Number(addon.price);
+    if (!Number.isFinite(unitPrice) || unitPrice < 0) continue;
+
+    const total = Number((unitPrice * quantity).toFixed(2));
+    rows.push({
+      name: `+ ${addonName}`,
+      quantity,
+      unitPrice: Number(unitPrice.toFixed(2)),
+      total,
+    });
+  }
+
+  return rows;
+};
+
+const formatRupeesForPrint = (value) => `Rs ${Number(value || 0).toFixed(2)}`;
+
+const buildBillPrintTemplate = async ({
+  order,
+  printerConfig = {},
+  paperWidth = "58mm",
+}) => {
+  const safePaperWidth = paperWidth === "80mm" ? "80mm" : "58mm";
+  const maxChars = safePaperWidth === "80mm" ? 42 : 32;
+  const separator = "-".repeat(maxChars);
+  const centerAlign = printerConfig?.centerAlign !== false;
+  const lineAlign = centerAlign ? "center" : "left";
+  const resolvedOutletName = await resolveOutletNameForKot(order);
+  const outletName = sanitizeKotText(printerConfig?.businessName || resolvedOutletName);
+  const customHeaderLines = String(printerConfig?.billHeaderText || "")
+    .split(/\r?\n/g)
+    .map((line) => sanitizeKotText(line))
+    .filter(Boolean);
+  const serviceLabel = resolveKotTypeLabel(order);
+  const orderRef = getOrderRefForKot(order);
+  const isTakeawayLike = isTakeawayLikeForKot(order);
+  const tableLabel = sanitizeKotText(order.tableNumber || order?.table?.number || "");
+  const hasTable = !isTakeawayLike && tableLabel;
+  const tokenLabel =
+    isTakeawayLike && order?.takeawayToken
+      ? sanitizeKotText(order.takeawayToken)
+      : "";
+  const timestamp = order?.updatedAt || order?.createdAt || new Date();
+  const parsedPrintDate = new Date(timestamp);
+  const printDate =
+    parsedPrintDate instanceof Date && !Number.isNaN(parsedPrintDate.getTime())
+      ? parsedPrintDate
+      : new Date();
+  const datePart = printDate.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "Asia/Kolkata",
+  });
+  const timePart = printDate
+    .toLocaleTimeString("en-IN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "Asia/Kolkata",
+    })
+    .toUpperCase();
+  const rows = buildOrderBillRows(order);
+  const itemTotal = rows.reduce((sum, row) => sum + Number(row.total || 0), 0);
+  const deliveryChargeRaw = Number(order?.officeDeliveryCharge);
+  const deliveryCharge =
+    Number.isFinite(deliveryChargeRaw) && deliveryChargeRaw > 0
+      ? Number(deliveryChargeRaw.toFixed(2))
+      : 0;
+  const totalAmount = getOrderBillAmount(order);
+
+  const lines = [
+    buildLine(outletName || "TERRA CART", { align: lineAlign, bold: true }),
+    ...customHeaderLines.map((line) => buildLine(line, { align: lineAlign })),
+    buildLine("INVOICE", { align: lineAlign, bold: true }),
+    buildLine(`${datePart}, ${timePart}`, { align: lineAlign }),
+    buildLine(separator, { separator: true }),
+    ...(hasTable ? [buildLine(`Table: ${tableLabel}`, { align: lineAlign })] : []),
+    ...(tokenLabel && !hasTable ? [buildLine(`Token: ${tokenLabel}`, { align: lineAlign })] : []),
+    ...(orderRef ? [buildLine(`Ref: ${orderRef}`, { align: lineAlign })] : []),
+    buildLine(`Type: ${serviceLabel}`, { align: lineAlign }),
+    buildLine(separator, { separator: true }),
+  ];
+
+  if (!rows.length) {
+    lines.push(buildLine("No billable items", { align: "left" }));
+  } else {
+    for (const row of rows) {
+      const nameQty = `${row.name} x${row.quantity}`;
+      lines.push(
+        buildLine(
+          formatRow(nameQty, formatRupeesForPrint(row.total), maxChars),
+          { align: "left" }
+        )
+      );
+    }
+  }
+
+  lines.push(buildLine(separator, { separator: true }));
+  lines.push(
+      buildLine(
+      formatRow("Sub Total", formatRupeesForPrint(itemTotal), maxChars),
+      { align: "left" }
+    )
+  );
+  if (deliveryCharge > 0) {
+    lines.push(
+      buildLine(
+        formatRow("Delivery", formatRupeesForPrint(deliveryCharge), maxChars),
+        { align: "left" }
+      )
+    );
+  }
+  lines.push(
+    buildLine(formatRow("TOTAL", formatRupeesForPrint(totalAmount), maxChars), {
+      align: "left",
+      bold: true,
+    })
+  );
+  lines.push(buildLine(separator, { separator: true }));
+  lines.push(buildLine("Thank you!", { align: lineAlign, bold: true }));
+
+  return {
+    paperWidth: safePaperWidth,
+    lines,
+    orderMeta: {
+      orderId: String(order?._id || ""),
+      orderRef,
+      serviceType: serviceLabel,
+      itemCount: rows.length,
+      totalAmount,
+    },
+  };
+};
+
 const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
   if (!order || !Array.isArray(order.kotLines)) return null;
   if (kotIndex < 0 || kotIndex >= order.kotLines.length) return null;
@@ -1607,11 +1896,13 @@ const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
   }
 
   const printerConfig = await PrinterConfig.findOne({ cartId: orderCartId })
-    .select("printerIp printerPort centerAlign")
+    .select(
+      "printerIp printerPort kotPrinterIp kotPrinterPort billPrinterIp billPrinterPort centerAlign"
+    )
     .lean();
-
-  const printerIp = String(printerConfig?.printerIp || "").trim();
-  const printerPort = Number(printerConfig?.printerPort || 9100);
+  const printerTargets = resolvePrinterTargetsFromConfig(printerConfig || {});
+  const printerIp = printerTargets.kotPrinterIp;
+  const printerPort = printerTargets.kotPrinterPort;
 
   if (!printerIp || !printerIpRegex.test(printerIp) || !Number.isFinite(printerPort)) {
     console.warn(
@@ -1692,13 +1983,172 @@ const triggerKotPrintAfterSave = async ({ req, order, kotIndex }) => {
   return printResult;
 };
 
+const triggerBillPrintAfterSave = async ({ req, order }) => {
+  if (!order) return null;
+
+  const orderId = String(order._id || "").trim();
+  const billId = `${orderId}:BILL`;
+  const senderRole = resolveSenderRoleForPrint(req);
+  const employeeId = await resolveEmployeeIdForPrintLog(req, senderRole);
+  const orderCartId = order.cartId || order.cafeId || null;
+
+  if (!orderCartId) {
+    console.warn(
+      `[BILL_PRINT_TRIGGER] ${JSON.stringify({
+        billId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "missing_cart_id",
+      })}`
+    );
+    return null;
+  }
+
+  if (isAgentOnlyPrint) {
+    const io = req?.app?.get("io");
+    const emitToCafe = req?.app?.get("emitToCafe");
+    if (io && emitToCafe) {
+      emitToCafe(io, orderCartId.toString(), "printer:bill:triggered", {
+        orderId,
+        billId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        skipped: true,
+        success: false,
+      });
+    }
+    return { success: false, skipped: true };
+  }
+
+  const printerConfig = await PrinterConfig.findOne({ cartId: orderCartId })
+    .select(
+      "printerIp printerPort kotPrinterIp kotPrinterPort billPrinterIp billPrinterPort businessName billHeaderText centerAlign"
+    )
+    .lean();
+  const printerTargets = resolvePrinterTargetsFromConfig(printerConfig || {});
+  const printerIp = printerTargets.billPrinterIp;
+  const printerPort = printerTargets.billPrinterPort;
+
+  if (!printerIp || !printerIpRegex.test(printerIp) || !Number.isFinite(printerPort)) {
+    console.warn(
+      `[BILL_PRINT_TRIGGER] ${JSON.stringify({
+        billId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "invalid_printer_config",
+        printerIp,
+      })}`
+    );
+    return null;
+  }
+
+  const template = await buildBillPrintTemplate({
+    order,
+    printerConfig: printerConfig || {},
+    paperWidth: "58mm",
+  });
+
+  const payload = buildEscPosPayloadFromKotLines({
+    lines: template?.lines || [],
+    centerAlign: printerConfig?.centerAlign !== false,
+  });
+
+  if (!payload) {
+    console.warn(
+      `[BILL_PRINT_TRIGGER] ${JSON.stringify({
+        billId,
+        senderRole,
+        employeeId,
+        printTriggered: false,
+        reason: "empty_bill_template",
+      })}`
+    );
+    return null;
+  }
+
+  const printResult = await executeRawPrintWithRetry({
+    printerIP: printerIp,
+    printerPort,
+    data: payload,
+  });
+
+  await Order.findByIdAndUpdate(orderId, {
+    $set: {
+      "printStatus.billPrinted": true,
+    },
+  });
+
+  console.log(
+    `[BILL_PRINT_TRIGGER] ${JSON.stringify({
+      billId,
+      senderRole,
+      employeeId,
+      printTriggered: true,
+      success: !!printResult?.success,
+      attempts: printResult?.attempts,
+    })}`
+  );
+
+  const io = req?.app?.get("io");
+  const emitToCafe = req?.app?.get("emitToCafe");
+  if (io && emitToCafe && orderCartId) {
+    emitToCafe(io, orderCartId.toString(), "printer:bill:triggered", {
+      orderId,
+      billId,
+      senderRole,
+      employeeId,
+      printTriggered: true,
+      success: !!printResult?.success,
+      attempts: printResult?.attempts,
+    });
+  }
+
+  return printResult;
+};
+
+const triggerKotAndBillPrintAfterSave = async ({ req, order, kotIndex }) => {
+  const [kotResult, billResult] = await Promise.allSettled([
+    triggerKotPrintAfterSave({ req, order, kotIndex }),
+    triggerBillPrintAfterSave({ req, order }),
+  ]);
+
+  if (kotResult.status === "rejected") {
+    console.error(
+      `[ORDER] KOT print trigger failed for order ${order?._id}:`,
+      kotResult.reason?.message || kotResult.reason,
+    );
+  }
+  if (billResult.status === "rejected") {
+    console.error(
+      `[ORDER] BILL print trigger failed for order ${order?._id}:`,
+      billResult.reason?.message || billResult.reason,
+    );
+  }
+
+  return {
+    kot:
+      kotResult.status === "fulfilled"
+        ? kotResult.value
+        : null,
+    bill:
+      billResult.status === "fulfilled"
+        ? billResult.value
+        : null,
+  };
+};
+
 // Order status transitions
-// UNIFIED flow for both DINE_IN and TAKEAWAY:
-// Pending → Confirmed → Preparing → Ready → Completed → Paid
-// Legacy statuses (Served, Finalized, Accepted, Being Prepared) still supported for backward compatibility
+// Simplified flow for both DINE_IN and TAKEAWAY:
+// Preparing → Ready → Served → Paid
+// Legacy statuses are still supported for backward compatibility.
 const transitions = {
   // Unified flow statuses
-  Pending: new Set(["Confirmed", "Cancelled", "Accepted"]), // Accepted for legacy takeaway accept flow
+  New: new Set(["Preparing", "Cancelled"]),
+  NEW: new Set(["Preparing", "Cancelled"]),
+  Pending: new Set(["Preparing", "Confirmed", "Cancelled", "Accepted"]), // Keep legacy entries for compatibility
   Confirmed: new Set(["Preparing", "Cancelled"]),
   Preparing: new Set(["Ready", "Cancelled"]),
   Ready: new Set(["Completed", "Served", "Cancelled"]), // Served for legacy dine-in
@@ -2829,7 +3279,7 @@ const createOrder = async (req, res) => {
       if (Array.isArray(order.kotLines) && order.kotLines.length > 0) {
         const kotIndex = order.kotLines.length - 1;
         await setKotPrintKeyAndEmitPending({ req, order, kotIndex });
-        await triggerKotPrintAfterSave({
+        await triggerKotAndBillPrintAfterSave({
           req,
           order,
           kotIndex,
@@ -2837,7 +3287,7 @@ const createOrder = async (req, res) => {
       }
     } catch (printTriggerError) {
       console.error(
-        `[ORDER] KOT print trigger failed for order ${order._id}:`,
+        `[ORDER] Auto print trigger failed for order ${order._id}:`,
         printTriggerError.message
       );
     }
@@ -3185,37 +3635,15 @@ const createOrder = async (req, res) => {
     }
 
     // Emit socket event to cafe room (only for admin panel, not customer frontend)
-<<<<<<< HEAD
     // Orders awaiting mandatory payment should stay hidden until payment is complete.
     const isOrderAwaitingPayment =
       requiresPaymentBeforeProceeding(order) && order.status === "Pending";
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId && io && emitToCafe && !isOrderAwaitingPayment) {
-      // Only emit to admin panel - customer frontend uses polling
-      emitToCafe(io, order.cartId.toString(), "order:created", order);
-      emitToCafe(io, order.cartId.toString(), "newOrder", order); // Legacy support
-      emitToCafe(io, order.cartId.toString(), "kot:created", order); // KOT created
-=======
-    // PICKUP/DELIVERY: do NOT notify admin list until payment is complete (order will appear when status becomes Paid)
-    /*
-    const isPickupOrDeliveryOrder =
-      order.orderType === "PICKUP" ||
-      order.orderType === "DELIVERY" ||
-      order.serviceType === "PICKUP" ||
-      order.serviceType === "DELIVERY";
-    const isTakeawayAwaitingPayment =
-      isPickupOrDeliveryOrder && order.status === "Pending";
-    */
-    const io = req.app.get("io");
-    const emitToCafe = req.app.get("emitToCafe");
-    if (order.cartId && io && emitToCafe) {
       const payload = orderToPlainPayload(order);
       const cartIdStr = (payload?.cartId || order.cartId).toString();
-      // Always emit kot:created so KOT prints (app PrintService / local agent) even for web customer PICKUP/DELIVERY Pending orders
       emitToCafe(io, cartIdStr, "kot:created", payload || order);
-      // Always emit order:created/newOrder for immediate realtime visibility
-      // across waiter/captain/manager dashboards in both local and production.
       emitToCafe(io, cartIdStr, "order:created", payload || order);
       emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
       emitOrderUpsert({
@@ -3225,7 +3653,6 @@ const createOrder = async (req, res) => {
         cartId: cartIdStr,
         sourceEvent: "createOrder",
       });
->>>>>>> 00bc039ce86ed4f62b178adfa852c5f30ebce437
 
       // Keep legacy explicit availability event for compatibility.
       const isUnassigned = !order.acceptedBy || !order.acceptedBy.employeeId;
@@ -3239,20 +3666,10 @@ const createOrder = async (req, res) => {
         );
       }
     }
-<<<<<<< HEAD
-
-    // Print KOT to printer (non-blocking). Skip for takeaway awaiting payment – print when payment is done.
-    if (!isOrderAwaitingPayment) {
-      printKOT(order, kot, 0).catch((err) => {
-        console.error("[ORDER] Failed to print KOT:", err);
-      });
-    }
 
 
-=======
     // KOT printing is handled by print-claim/template clients.
     // Keep order creation side-effect free to avoid duplicate legacy prints.
->>>>>>> 00bc039ce86ed4f62b178adfa852c5f30ebce437
     return res.status(201).json(order);
   } catch (err) {
     console.error("[ORDER] createOrder - Unhandled error:", err);
@@ -3530,10 +3947,10 @@ const addKot = async (req, res) => {
     const newKotIndex = order.kotLines.length - 1;
     try {
       await setKotPrintKeyAndEmitPending({ req, order, kotIndex: newKotIndex });
-      await triggerKotPrintAfterSave({ req, order, kotIndex: newKotIndex });
+      await triggerKotAndBillPrintAfterSave({ req, order, kotIndex: newKotIndex });
     } catch (printTriggerError) {
       console.error(
-        `[ORDER] addKot - KOT print trigger failed for order ${order._id}:`,
+        `[ORDER] addKot - Auto print trigger failed for order ${order._id}:`,
         printTriggerError.message
       );
     }
@@ -4287,14 +4704,14 @@ const addItemsToOrder = async (req, res) => {
     const newKotIndex = order.kotLines.length - 1;
     try {
       await setKotPrintKeyAndEmitPending({ req, order, kotIndex: newKotIndex });
-      await triggerKotPrintAfterSave({
+      await triggerKotAndBillPrintAfterSave({
         req,
         order,
         kotIndex: newKotIndex,
       });
     } catch (printTriggerError) {
       console.error(
-        `[ORDER] addItemsToOrder - KOT print trigger failed for order ${order._id}:`,
+        `[ORDER] addItemsToOrder - Auto print trigger failed for order ${order._id}:`,
         printTriggerError.message
       );
     }
@@ -6277,3 +6694,4 @@ module.exports = {
   completePrintJob,
   getPendingKots,
 };
+
