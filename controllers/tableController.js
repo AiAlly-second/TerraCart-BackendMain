@@ -1512,9 +1512,26 @@ exports.createTable = async (req, res) => {
     if (cartId) {
       existing = await Table.findOne({ number: numericNumber, cartId: cartId });
       if (existing) {
-        return res
-          .status(409)
-          .json({ message: "Table number already exists for this cafe" });
+        const existingContext = String(existing.qrContextType || "TABLE")
+          .trim()
+          .toUpperCase();
+        const requestedContext = normalizedContext.qrContextType;
+
+        if (existingContext !== requestedContext) {
+          return res.status(409).json({
+            message:
+              existingContext === "OFFICE"
+                ? `Number ${numericNumber} is already used by an Office QR. Use a different number or edit it in Offices.`
+                : `Number ${numericNumber} is already used by a Table QR. Use a different number or edit it in Tables.`,
+          });
+        }
+
+        return res.status(409).json({
+          message:
+            existingContext === "OFFICE"
+              ? "Office QR number already exists for this cafe"
+              : "Table number already exists for this cafe",
+        });
       }
     } else {
       // For non-cafe admins (super_admin, franchise_admin), check if any table exists with this number
