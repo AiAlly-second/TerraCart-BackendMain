@@ -82,13 +82,6 @@ const toPaise = (n) => Math.round(Number(n) * 100);
 const toRupees = (p) => Number((p / 100).toFixed(2));
 
 const FINAL_ORDER_STATUSES = [ORDER_STATUSES.COMPLETED];
-const ACTIVE_TAKEAWAY_TOKEN_STATUSES = [
-  ORDER_STATUSES.NEW,
-  ORDER_STATUSES.PREPARING,
-  ORDER_STATUSES.READY,
-  ORDER_STATUSES.COMPLETED,
-];
-
 const isCanonicalStatus = (status, expectedStatus) =>
   normalizeOrderStatus(status, ORDER_STATUSES.NEW) === expectedStatus;
 
@@ -217,6 +210,29 @@ const normalizeObjectId = (value) => {
         : "";
   if (!asString || !mongoose.Types.ObjectId.isValid(asString)) return null;
   return new mongoose.Types.ObjectId(asString);
+};
+
+const buildCartOwnershipFilter = (cartOwnerId) => {
+  const candidates = new Set();
+  const normalizedString = String(cartOwnerId || "").trim();
+  const normalizedObjectId = normalizeObjectId(cartOwnerId);
+
+  if (normalizedString) {
+    candidates.add(normalizedString);
+  }
+  if (normalizedObjectId) {
+    candidates.add(normalizedObjectId);
+  }
+
+  const candidateValues = Array.from(candidates);
+  if (candidateValues.length === 0) return null;
+
+  return {
+    $or: [
+      { cartId: { $in: candidateValues } },
+      { cafeId: { $in: candidateValues } }, // Legacy compatibility
+    ],
+  };
 };
 
 const normalizeSourceQrType = (value) => {
@@ -520,8 +536,23 @@ const getActiveTakeawayTokenQuery = (cartId) => ({
   cartId,
   serviceType: "TAKEAWAY",
   orderType: { $ne: "DELIVERY" },
-  status: { $in: ACTIVE_TAKEAWAY_TOKEN_STATUSES },
   takeawayToken: { $ne: null },
+  $or: [
+    // In-progress takeaway tokens remain reserved.
+    { status: { $in: [ORDER_STATUSES.NEW, ORDER_STATUSES.PREPARING, ORDER_STATUSES.READY] } },
+    // COMPLETED but unpaid and not cancelled/returned should still reserve token
+    // (e.g. served counter order waiting for cash).
+    {
+      status: ORDER_STATUSES.COMPLETED,
+      paymentStatus: { $ne: PAYMENT_STATUSES.PAID },
+      returnedAt: null,
+      $or: [
+        { cancellationReason: { $exists: false } },
+        { cancellationReason: null },
+        { cancellationReason: "" },
+      ],
+    },
+  ],
 });
 
 const findExistingTakeawayTokenForSession = async ({ cartId, sessionToken }) => {
@@ -4589,6 +4620,7 @@ const finalizeOrder = async (req, res) => {
 const getOrders = async (req, res) => {
   try {
     const query = {};
+    let requiredCartScope = null;
 
     // Filter orders based on user role:
     // - Cart admin (admin): ONLY see orders from their cart (cartId matches their _id) - CRITICAL FOR DATA ISOLATION
@@ -4598,7 +4630,13 @@ const getOrders = async (req, res) => {
     if (req.user && req.user.role === "admin" && req.user._id) {
       // CRITICAL: Cart admin - ONLY see orders from their own cart
       // This ensures complete data isolation between carts
-      query.cartId = req.user._id;
+      requiredCartScope = buildCartOwnershipFilter(req.user._id);
+      if (!requiredCartScope) {
+        console.warn(
+          `[GET_ORDERS] Cart admin ${req.user._id} has invalid scope - returning empty array`,
+        );
+        return res.json([]);
+      }
       console.log(
         `[GET_ORDERS] Cart admin ${req.user._id} - filtering by cartId: ${req.user._id}`,
       );
@@ -4617,7 +4655,13 @@ const getOrders = async (req, res) => {
       // Prefer cartId, fallback to cafeId for backward compatibility.
       const mobileCartId = await resolveMobileCartId(req.user);
       if (mobileCartId) {
-        query.cartId = mobileCartId;
+        requiredCartScope = buildCartOwnershipFilter(mobileCartId);
+        if (!requiredCartScope) {
+          console.warn(
+            `[GET_ORDERS] Mobile user ${req.user._id} has invalid scope - returning empty array`,
+          );
+          return res.json([]);
+        }
         console.log(
           `[GET_ORDERS] Mobile user ${req.user._id} (${req.user.role}) - filtering by cartId: ${mobileCartId}`,
         );
@@ -4630,6 +4674,11 @@ const getOrders = async (req, res) => {
       }
     }
     // For super_admin, no query-level restriction (see all orders)
+
+    if (requiredCartScope) {
+      query.$and = query.$and || [];
+      query.$and.push(requiredCartScope);
+    }
 
     const includeHistory =
       String(req.query?.includeHistory || "").trim().toLowerCase() === "true";
@@ -5691,20 +5740,71 @@ const cancelOrderByCustomer = async (req, res) => {
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const sessionToken = extractSessionTokenFromRequest(req);
-    const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
-    const sessionAccess = await verifyPublicOrderSessionAccess(
-      order,
-      sessionToken,
-      {
-        allowPendingTakeawayWithoutToken: isCancelAction,
-        anonymousSessionId,
+    const resolveOrderCartScopeId = async (orderDoc) => {
+      const directCartId = toSocketIdString(orderDoc?.cartId || orderDoc?.cafeId);
+      if (directCartId) return directCartId;
+
+      if (!orderDoc?.table) return "";
+      const tableDoc = await Table.findById(orderDoc.table)
+        .select("cartId cafeId")
+        .lean();
+      return toSocketIdString(tableDoc?.cartId || tableDoc?.cafeId);
+    };
+
+    const orderCartScopeId = await resolveOrderCartScopeId(order);
+
+    const requesterRole = String(req?.user?.role || "").toLowerCase();
+    const isStaffRequester = [
+      "admin",
+      "franchise_admin",
+      "super_admin",
+      "waiter",
+      "cook",
+      "captain",
+      "manager",
+    ].includes(requesterRole);
+
+    if (isStaffRequester) {
+      if (requesterRole === "admin" && req.user?._id) {
+        const requesterCartId = toSocketIdString(req.user._id);
+        if (order.serviceType !== "TAKEAWAY" && order.serviceType !== "DELIVERY") {
+          if (!orderCartScopeId || orderCartScopeId !== requesterCartId) {
+            return res.status(403).json({ message: "Order does not belong to your cafe" });
+          }
+        }
+      } else if (requesterRole === "franchise_admin" && req.user?._id) {
+        if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ message: "Order does not belong to your franchise" });
+        }
+      } else if (["waiter", "cook", "captain", "manager"].includes(requesterRole)) {
+        const userCartId = (req.user?.cartId || req.user?.cafeId)?.toString();
+        if (!userCartId) {
+          return res
+            .status(403)
+            .json({ message: "No cart/kiosk assigned to your account" });
+        }
+        if (!orderCartScopeId || orderCartScopeId !== userCartId) {
+          return res
+            .status(403)
+            .json({ message: "Order does not belong to your cart/kiosk" });
+        }
       }
-    );
-    if (!sessionAccess.ok) {
-      return res
-        .status(sessionAccess.status)
-        .json({ message: sessionAccess.message });
+    } else {
+      const sessionToken = extractSessionTokenFromRequest(req);
+      const anonymousSessionId = extractAnonymousSessionIdFromRequest(req);
+      const sessionAccess = await verifyPublicOrderSessionAccess(
+        order,
+        sessionToken,
+        {
+          allowPendingTakeawayWithoutToken: isCancelAction,
+          anonymousSessionId,
+        }
+      );
+      if (!sessionAccess.ok) {
+        return res
+          .status(sessionAccess.status)
+          .json({ message: sessionAccess.message });
+      }
     }
 
     const currentStatus = normalizeOrderStatus(order.status, ORDER_STATUSES.NEW);

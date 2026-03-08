@@ -840,6 +840,8 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   order.paymentMode = payment.method === "ONLINE" ? "ONLINE" : "CASH";
 
   if (isPaymentFirstOrder) {
+    // Payment gate is satisfied after successful payment.
+    order.paymentRequiredBeforeProceeding = false;
   } else {
     order.status = ORDER_STATUSES.COMPLETED;
     needsFallbackConsumption = !order.inventoryDeducted;

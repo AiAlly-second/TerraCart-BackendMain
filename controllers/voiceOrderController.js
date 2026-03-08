@@ -1,7 +1,10 @@
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
+const OPENAI_TRANSCRIPT_API_URL = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
 const MAX_MENU_ITEMS = 300;
 const MAX_RESULT_ITEMS = 12;
+const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 
 const normalizeText = (value) =>
   String(value || "")
@@ -60,6 +63,76 @@ const buildFallbackReply = ({ action, addedCount, notFoundCount }) => {
     }
   }
   return "Please tell me what you want to order.";
+};
+
+const resolveWhisperLanguage = (locale = "") => {
+  const normalized = String(locale || "").trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized.startsWith("hi")) return "hi";
+  if (normalized.startsWith("mr")) return "mr";
+  if (normalized.startsWith("gu")) return "gu";
+  if (normalized.startsWith("en")) return "en";
+  return null;
+};
+
+exports.transcribeTapToOrderAudio = async (req, res) => {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(503).json({ message: "OPENAI_API_KEY is not configured" });
+    }
+
+    const file = req.file;
+    if (!file || !file.buffer || !file.buffer.length) {
+      return res.status(400).json({ message: "audio file is required" });
+    }
+    if (file.size > MAX_AUDIO_BYTES) {
+      return res.status(413).json({ message: "audio file is too large" });
+    }
+
+    const mimeType = String(file.mimetype || "audio/webm");
+    const fileName = String(file.originalname || "tap-to-order.webm");
+    const locale = String(req.body?.locale || "en-IN").trim();
+    const whisperLanguage = resolveWhisperLanguage(locale);
+
+    const formData = new FormData();
+    formData.append("model", OPENAI_WHISPER_MODEL);
+    formData.append(
+      "file",
+      new Blob([file.buffer], { type: mimeType }),
+      fileName,
+    );
+    if (whisperLanguage) {
+      formData.append("language", whisperLanguage);
+    }
+    formData.append("response_format", "json");
+
+    const openAiResponse = await fetch(OPENAI_TRANSCRIPT_API_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: formData,
+    });
+
+    if (!openAiResponse.ok) {
+      const details = await openAiResponse.text();
+      console.error(
+        `[VOICE_ORDER] Whisper transcription failed status=${openAiResponse.status} body=${details.slice(0, 400)}`,
+      );
+      return res.status(502).json({ message: "Failed to transcribe audio" });
+    }
+
+    const payload = await openAiResponse.json().catch(() => ({}));
+    const transcript = String(payload?.text || "").trim();
+    if (!transcript) {
+      return res.status(502).json({ message: "No speech detected in audio" });
+    }
+
+    return res.json({ transcript });
+  } catch (error) {
+    console.error("[VOICE_ORDER] transcribeTapToOrderAudio error:", error);
+    return res.status(500).json({ message: "Voice transcription failed" });
+  }
 };
 
 exports.parseTapToOrderVoice = async (req, res) => {
