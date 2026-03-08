@@ -669,8 +669,8 @@ const MOBILE_PAYMENT_ROLES = new Set([
 const resolveMobileCartId = async (user) => {
   if (!user) return null;
 
-  if (user.cartId || user.cafeId) {
-    return user.cartId || user.cafeId;
+  if (user.cartId) {
+    return user.cartId;
   }
 
   let employee = null;
@@ -692,7 +692,7 @@ const resolveMobileCartId = async (user) => {
       .lean();
   }
 
-  return employee?.cartId || employee?.cafeId || null;
+  return employee?.cartId || employee?.cafeId || user.cafeId || null;
 };
 
 const resolvePaymentScope = async (user) => {
@@ -721,6 +721,64 @@ const resolvePaymentScope = async (user) => {
   return { type: "none" };
 };
 
+const buildIdVariants = (value) => {
+  if (!value) return [];
+
+  const variants = [value];
+  const normalized = toSocketIdString(value);
+  const objectIdVariant = normalized ? toObjectIdIfValid(normalized) : null;
+
+  if (
+    objectIdVariant &&
+    !variants.some((variant) => toSocketIdString(variant) === normalized)
+  ) {
+    variants.push(objectIdVariant);
+  }
+
+  if (
+    normalized &&
+    !variants.some((variant) => toSocketIdString(variant) === normalized)
+  ) {
+    variants.push(normalized);
+  }
+
+  return variants;
+};
+
+const buildIdCondition = (value) => {
+  const variants = buildIdVariants(value);
+  if (!variants.length) return null;
+  return variants.length === 1 ? variants[0] : { $in: variants };
+};
+
+const buildCartOrderScopeQuery = (cartId) => {
+  const cartCondition = buildIdCondition(cartId);
+  if (!cartCondition) return null;
+
+  return {
+    $or: [
+      { cartId: cartCondition },
+      {
+        $and: [
+          {
+            $or: [{ cartId: { $exists: false } }, { cartId: null }],
+          },
+          { cafeId: cartCondition },
+        ],
+      },
+    ],
+  };
+};
+
+const hasQueryContent = (query) =>
+  Boolean(query && typeof query === "object" && Object.keys(query).length > 0);
+
+const mergeQueriesWithAnd = (left, right) => {
+  if (!hasQueryContent(left)) return right || {};
+  if (!hasQueryContent(right)) return left;
+  return { $and: [left, right] };
+};
+
 const canAccessOrderByScope = (scope, order) => {
   if (!scope || !order) return false;
 
@@ -735,11 +793,16 @@ const canAccessOrderByScope = (scope, order) => {
   }
 
   if (scope.type === "cart") {
-    return (
-      scope.cartId &&
-      order.cartId &&
-      order.cartId.toString() === scope.cartId.toString()
-    );
+    const scopeCartId = toSocketIdString(scope.cartId);
+    if (!scopeCartId) return false;
+
+    const orderCartId = toSocketIdString(order.cartId);
+    if (orderCartId) {
+      return orderCartId === scopeCartId;
+    }
+
+    const legacyCafeId = toSocketIdString(order.cafeId);
+    return Boolean(legacyCafeId) && legacyCafeId === scopeCartId;
   }
 
   return false;
@@ -753,7 +816,11 @@ const buildOrderScopeQuery = (scope, baseQuery = {}) => {
   }
 
   if (scope.type === "cart") {
-    query.cartId = toObjectIdIfValid(scope.cartId);
+    const cartScopeQuery = buildCartOrderScopeQuery(scope.cartId);
+    if (!cartScopeQuery) {
+      return null;
+    }
+    return mergeQueriesWithAnd(query, cartScopeQuery);
   } else if (scope.type === "franchise") {
     query.franchiseId = toObjectIdIfValid(scope.franchiseId);
   }
@@ -1064,6 +1131,7 @@ exports.createPaymentIntent = async (req, res) => {
 exports.listPayments = async (req, res) => {
   try {
     const { status, method } = req.query;
+    const requestedCartId = toSocketIdString(req.query?.cartId);
     const filter = {};
     if (status && PAYMENT_STATUSES.includes(status)) {
       filter.status = status;
@@ -1078,9 +1146,28 @@ exports.listPayments = async (req, res) => {
       return res.json([]);
     }
 
-    if (scope.type !== "super_admin") {
-      const scopedOrderQuery = buildOrderScopeQuery(scope);
-      const scopedOrders = await Order.find(scopedOrderQuery)
+    if (requestedCartId && scope.type === "cart") {
+      const scopeCartId = toSocketIdString(scope.cartId);
+      if (!scopeCartId || scopeCartId !== requestedCartId) {
+        return res
+          .status(403)
+          .json({ message: "Requested cartId does not match your current cart access." });
+      }
+    }
+
+    const requestedCartScopeQuery = requestedCartId
+      ? buildCartOrderScopeQuery(requestedCartId)
+      : null;
+    const scopedOrderQuery = buildOrderScopeQuery(scope);
+    const shouldScopeByOrders =
+      scope.type !== "super_admin" || Boolean(requestedCartScopeQuery);
+
+    if (shouldScopeByOrders) {
+      const effectiveOrderQuery = mergeQueriesWithAnd(
+        scopedOrderQuery || {},
+        requestedCartScopeQuery,
+      );
+      const scopedOrders = await Order.find(effectiveOrderQuery)
         .select("_id")
         .limit(10000)
         .lean();
@@ -1138,7 +1225,7 @@ exports.getPaymentById = async (req, res) => {
     }
 
     const order = await Order.findById(payment.orderId)
-      .select("_id takeawayToken cartId franchiseId")
+      .select("_id takeawayToken cartId cafeId franchiseId")
       .lean();
 
     if (!order) {
@@ -1159,7 +1246,7 @@ exports.getPaymentsForOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
     const order = await Order.findById(orderId)
-      .select("_id takeawayToken cartId franchiseId")
+      .select("_id takeawayToken cartId cafeId franchiseId")
       .lean();
     if (!order) {
       return res.status(404).json({ message: "Order not found" });
@@ -1238,7 +1325,7 @@ exports.cancelPayment = async (req, res) => {
     }
 
     const order = await Order.findById(payment.orderId)
-      .select("_id takeawayToken cartId franchiseId")
+      .select("_id takeawayToken cartId cafeId franchiseId")
       .lean();
     if (!order) {
       return res.status(404).json({ message: "Order not found for this payment" });

@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Order = require("../models/orderModel");
 const { Table } = require("../models/tableModel");
 const InventoryItem = require("../models/inventoryModel");
@@ -8,51 +9,140 @@ const Task = require("../models/taskModel");
 const {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
-  buildActiveOrderMongoFilter,
 } = require("../utils/orderContract");
+
+const normalizeIdString = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
+  if (typeof value === "object") {
+    const nested = value._id || value.id || value.cartId || value.cafeId || null;
+    if (nested && nested !== value) return normalizeIdString(nested);
+  }
+  if (typeof value?.toString === "function") return value.toString().trim();
+  return "";
+};
+
+const idsMatch = (left, right) => {
+  const leftId = normalizeIdString(left);
+  const rightId = normalizeIdString(right);
+  return Boolean(leftId) && Boolean(rightId) && leftId === rightId;
+};
+
+const buildIdVariants = (value) => {
+  if (!value) return [];
+
+  const variants = [value];
+  const normalized = normalizeIdString(value);
+  const objectIdVariant =
+    normalized && mongoose.Types.ObjectId.isValid(normalized)
+      ? new mongoose.Types.ObjectId(normalized)
+      : null;
+
+  if (
+    objectIdVariant &&
+    !variants.some((variant) => normalizeIdString(variant) === normalized)
+  ) {
+    variants.push(objectIdVariant);
+  }
+
+  if (
+    normalized &&
+    !variants.some((variant) => normalizeIdString(variant) === normalized)
+  ) {
+    variants.push(normalized);
+  }
+
+  return variants;
+};
+
+const buildIdCondition = (value) => {
+  const variants = buildIdVariants(value);
+  if (!variants.length) return null;
+  return variants.length === 1 ? variants[0] : { $in: variants };
+};
+
+const buildCartScopeWithLegacyFallback = (cartId) => {
+  const cartCondition = buildIdCondition(cartId);
+  if (!cartCondition) return null;
+
+  return {
+    $or: [
+      { cartId: cartCondition },
+      {
+        $and: [
+          {
+            $or: [{ cartId: { $exists: false } }, { cartId: null }],
+          },
+          { cafeId: cartCondition },
+        ],
+      },
+    ],
+  };
+};
 
 // Helper to get cartId based on user role (returns cartId, not cafeId)
 const getCafeId = async (user) => {
   if (user.role === "admin") {
     return user._id; // Cart admin's _id is the cartId
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - prioritize cartId, fallback to cafeId for backward compatibility
+    // Mobile users - prioritize cartId, then Employee mapping, then legacy cafeId.
     if (user.cartId) {
       return user.cartId;
     }
-    if (user.cafeId) {
-      // Fallback for backward compatibility
-      return user.cafeId;
+
+    let employee = null;
+    if (user.employeeId) {
+      employee = await Employee.findById(user.employeeId).lean();
     }
-    // Fallback: try to find Employee record by email or userId
-    const employee = await Employee.findOne({
-      $or: [
-        { email: user.email?.toLowerCase() },
-        { userId: user._id }
-      ]
-    }).lean();
+    if (!employee && user._id) {
+      employee = await Employee.findOne({ userId: user._id }).lean();
+    }
+    if (!employee && user.email) {
+      employee = await Employee.findOne({
+        email: String(user.email).toLowerCase(),
+      }).lean();
+    }
+
     if (employee) {
       // Prioritize cartId, fallback to cafeId
       const cartId = employee.cartId || employee.cafeId;
       if (cartId) {
-        console.log('[DASHBOARD] getCafeId - Found employee by email/userId:', {
+        console.log("[DASHBOARD] getCafeId - Found employee by lookup:", {
           userId: user._id,
           email: user.email,
           employeeId: employee._id,
-          cartId: cartId
+          cartId,
         });
         return cartId;
       }
     }
-    console.log('[DASHBOARD] getCafeId - No employee found for mobile user:', {
+
+    if (user.cafeId) {
+      // Legacy fallback for older mobile user records.
+      return user.cafeId;
+    }
+
+    console.log("[DASHBOARD] getCafeId - No employee found for mobile user:", {
       userId: user._id,
       email: user.email,
-      role: user.role
+      role: user.role,
     });
     return null;
   } else if (user.role === "employee") {
-    // Legacy employee role - look up Employee by email
-    const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+    // Legacy employee role - look up Employee by userId first, then email.
+    let employee = null;
+    if (user.employeeId) {
+      employee = await Employee.findById(user.employeeId).lean();
+    }
+    if (!employee && user._id) {
+      employee = await Employee.findOne({ userId: user._id }).lean();
+    }
+    if (!employee && user.email) {
+      employee = await Employee.findOne({
+        email: String(user.email).toLowerCase(),
+      }).lean();
+    }
     return employee?.cartId || employee?.cafeId; // Prioritize cartId, fallback to cafeId
   }
   return null;
@@ -61,21 +151,30 @@ const getCafeId = async (user) => {
 // Get dashboard statistics
 exports.getDashboardStats = async (req, res) => {
   try {
-    const cafeId = await getCafeId(req.user);
-    if (!cafeId) {
+    const resolvedCafeId = await getCafeId(req.user);
+    if (!resolvedCafeId) {
       return res.status(403).json({ message: "Access denied. No cafe associated with this user." });
+    }
+
+    const requestedCartId = normalizeIdString(req.query?.cartId);
+    if (requestedCartId && !idsMatch(requestedCartId, resolvedCafeId)) {
+      return res
+        .status(403)
+        .json({ message: "Requested cartId does not match your current cart access." });
+    }
+
+    const cafeId = requestedCartId || resolvedCafeId;
+    const cartCondition = buildIdCondition(cafeId);
+    const orderScope = buildCartScopeWithLegacyFallback(cafeId);
+    if (!cartCondition || !orderScope) {
+      return res.status(403).json({ message: "Access denied. Invalid cart context." });
     }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
-    const orderScope = {
-      $or: [
-        { cartId: cafeId },
-        { cafeId: cafeId }, // Backward compatibility for old records
-      ],
-    };
+
     /*
     const normalizedRole = String(req.user?.role || "").toLowerCase();
     const requireAcceptedKotAssignment =
@@ -125,10 +224,16 @@ exports.getDashboardStats = async (req, res) => {
       totalTables,
       pendingTasks,
     ] = await Promise.all([
-      // Active orders (real-time, excluding terminal statuses)
+      // Active orders: terminal-specific open kitchen flow (exclude completed/cancelled).
       Order.countDocuments({
         ...orderScope,
-        ...buildActiveOrderMongoFilter(),
+        status: {
+          $in: [
+            ORDER_STATUSES.NEW,
+            ORDER_STATUSES.PREPARING,
+            ORDER_STATUSES.READY,
+          ],
+        },
       }),
 
       // Today's revenue orders - use aggregation for faster calculation
@@ -184,15 +289,11 @@ exports.getDashboardStats = async (req, res) => {
       }),
 
       // Low stock items (threshold can be configured)
-      // InventoryItem model uses cartId, support cafeId for backward compatibility
+      // InventoryItem model uses cartId. Fall back to cafeId only for legacy docs
+      // that still do not have cartId.
       InventoryItem.countDocuments({
         $and: [
-          {
-            $or: [
-              { cartId: cafeId },
-              { cafeId: cafeId } // Fallback for backward compatibility
-            ]
-          },
+          buildCartScopeWithLegacyFallback(cafeId),
           {
             $or: [
               { quantity: { $lt: 10 } }, // Use 'quantity' field, not 'stockQuantity'
@@ -203,30 +304,28 @@ exports.getDashboardStats = async (req, res) => {
       }),
 
       // Today's attendance count
-      // EmployeeAttendance model uses cartId, support cafeId for backward compatibility
+      // EmployeeAttendance uses cartId. Fall back to cafeId only for legacy docs
+      // that still do not have cartId.
       EmployeeAttendance.countDocuments({
-        $or: [
-          { cartId: cafeId },
-          { cafeId: cafeId } // Fallback for backward compatibility
-        ],
+        ...buildCartScopeWithLegacyFallback(cafeId),
         date: { $gte: today, $lt: tomorrow },
         "checkIn.time": { $exists: true },
       }),
 
       // Occupied tables (Table model uses cartId)
       Table.countDocuments({
-        cartId: cafeId,
+        cartId: cartCondition,
         isOccupied: true,
       }),
 
       // Total tables
       Table.countDocuments({
-        cartId: cafeId,
+        cartId: cartCondition,
       }),
 
       // Pending tasks (not completed or cancelled)
       Task.countDocuments({
-        cartId: cafeId,
+        cartId: cartCondition,
         status: { $nin: ["completed", "cancelled"] },
       }),
     ]);
