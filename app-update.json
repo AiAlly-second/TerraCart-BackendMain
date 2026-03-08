@@ -1,9 +1,9 @@
 {
-    "latestVersion":  "1.0.9",
+    "latestVersion":  "1.0.10",
     "minimumSupportedVersion":  "1.0.2",
     "apkUrl":  "",
-    "releaseNotes":  "In app update Added",
-    "sha256":  "ec9e6498ce7446faaaf5a7a8c9a0ffe1ff00a58b8293c33a240e1fd22affe235",
+    "releaseNotes":  "In app update Added\n- Bug fixes and performance improvements.",
+    "sha256":  "75a46a2e8bbeabb8313a4a3f70ab16fb3a71958e82f387a2f1f89cf951f570a9",
     "forceUpdate":  false,
     "updateUrl":  ""
 }
