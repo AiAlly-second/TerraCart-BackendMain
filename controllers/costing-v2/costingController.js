@@ -274,6 +274,35 @@ const flattenCartIdFilterValues = (ids = []) =>
     return filter.$in ? filter.$in : [filter];
   });
 
+/**
+ * Sales-recognized order clause:
+ * - Supports current canonical model (`paymentStatus: PAID`, `isPaid`)
+ * - Keeps legacy status compatibility for older records.
+ */
+const buildSalesRecognizedOrderClause = () => ({
+  $or: [
+    { paymentStatus: "PAID" },
+    { isPaid: true },
+    {
+      status: {
+        $in: [
+          "PAID",
+          "Paid",
+          "FINALIZED",
+          "Finalized",
+          "EXIT",
+          "Exit",
+          "COMPLETED",
+          "Completed",
+          "SERVED",
+          "Served",
+        ],
+      },
+    },
+    { lifecycleStatus: { $in: ["COMPLETED", "SERVED"] } },
+  ],
+});
+
 const sumProratedPeriodAmount = (rows = [], fromDate = null, toDate = null) =>
   Number(
     rows
@@ -4939,9 +4968,7 @@ exports.getHierarchicalCosting = async (req, res) => {
 
         // Get sales from orders (use cartId, not cafeId)
         // Include "Exit" status for takeaway orders that are completed
-        const orderFilter = {
-          status: { $in: ["Paid", "Finalized", "Exit", "Completed"] },
-        };
+        const orderFilter = buildSalesRecognizedOrderClause();
         if (kioskCartIdFilter) {
           orderFilter.cartId = kioskCartIdFilter;
         }
@@ -5319,8 +5346,8 @@ exports.getFoodCostReport = async (req, res) => {
       }
     }
 
-    // Include Paid/Finalized/Exit and Completed (takeaway) so sales match orders that have food cost
-    orderFilter.status = { $in: ["Paid", "Finalized", "Exit", "Completed"] };
+    // Include canonical PAID lifecycle + legacy paid/completed statuses for compatibility.
+    Object.assign(orderFilter, buildSalesRecognizedOrderClause());
 
     // Calculate sales from kotLines (orders don't have top-level totalAmount)
     const salesData = await Order.aggregate([
@@ -5408,7 +5435,7 @@ exports.getMenuEngineeringReport = async (req, res) => {
       if (from) orderFilter.createdAt.$gte = new Date(from);
       if (to) orderFilter.createdAt.$lte = new Date(to);
     }
-    orderFilter.status = { $in: ["Paid", "Finalized"] };
+    Object.assign(orderFilter, buildSalesRecognizedOrderClause());
 
     // Build order filter based on role
     if (req.user.role === "admin") {
@@ -5765,8 +5792,8 @@ exports.getPnLReport = async (req, res) => {
       }
     }
 
-    // Include Paid/Finalized/Exit and Completed (takeaway) for consistent sales
-    orderFilter.status = { $in: ["Paid", "Finalized", "Exit", "Completed"] };
+    // Include canonical PAID lifecycle + legacy paid/completed statuses for compatibility.
+    Object.assign(orderFilter, buildSalesRecognizedOrderClause());
     const salesData = await Order.aggregate([
       { $match: orderFilter },
       {
