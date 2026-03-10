@@ -1,9 +1,9 @@
 {
-    "latestVersion":  "1.0.10",
+    "latestVersion":  "1.0.11",
     "minimumSupportedVersion":  "1.0.2",
     "apkUrl":  "",
-    "releaseNotes":  "In app update Added\n- Bug fixes and performance improvements.",
-    "sha256":  "75a46a2e8bbeabb8313a4a3f70ab16fb3a71958e82f387a2f1f89cf951f570a9",
+    "releaseNotes":  " Ai Tap to order added \n Inventory can be added from voice now",
+    "sha256":  "9a374edc0cc6f5c00ffd88434230be55cae14404a33e4f38989b2686efb004fb",
     "forceUpdate":  false,
     "updateUrl":  ""
 }
