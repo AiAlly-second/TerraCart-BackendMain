@@ -1,0 +1,34 @@
+﻿{
+  "tea": "Tea",
+  "chai": "Tea",
+  "चाय": "Tea",
+  "चहा": "Tea",
+
+  "milk": "Milk",
+  "दूध": "Milk",
+
+  "onion": "Onion",
+  "onions": "Onion",
+  "pyaaz": "Onion",
+  "pyaz": "Onion",
+  "प्याज": "Onion",
+  "कांदा": "Onion",
+
+  "potato": "Potato",
+  "potatoes": "Potato",
+  "batata": "Potato",
+  "बटाटा": "Potato",
+  "आलू": "Potato",
+
+  "bisleri": "Bisleri",
+  "bislery": "Bisleri",
+  "bislary": "Bisleri",
+  "bislri": "Bisleri",
+  "बिसलेरी": "Bisleri",
+  "बिस्लेरी": "Bisleri",
+  "मिनरल वाटर": "Bisleri",
+  "mineral water": "Bisleri",
+  "water bottle": "Bisleri",
+  "bottle water": "Bisleri",
+  "drinking water": "Bisleri"
+}

@@ -12,12 +12,45 @@ const {
 
 router.use(protect); // All routes require authentication
 
-router.get("/", getAllEmployees);
-router.get("/hierarchy", getHierarchy); // Get hierarchical structure (filtered by role)
-router.get("/:id", getEmployee);
-router.post("/", createEmployee);
-router.put("/:id", updateEmployee);
-router.delete("/:id", deleteEmployee);
+router.get(
+  "/",
+  authorize(["super_admin", "franchise_admin", "admin", "manager", "captain"]),
+  getAllEmployees
+);
+router.get(
+  "/hierarchy",
+  authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  getHierarchy
+); // Get hierarchical structure (filtered by role)
+router.get(
+  "/:id",
+  authorize([
+    "super_admin",
+    "franchise_admin",
+    "admin",
+    "manager",
+    "captain",
+    "waiter",
+    "cook",
+    "employee",
+  ]),
+  getEmployee
+);
+router.post(
+  "/",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  createEmployee
+);
+router.put(
+  "/:id",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  updateEmployee
+);
+router.delete(
+  "/:id",
+  authorize(["super_admin", "franchise_admin", "admin"]),
+  deleteEmployee
+);
 
 module.exports = router;
 

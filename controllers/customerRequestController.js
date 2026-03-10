@@ -14,20 +14,21 @@ const buildHierarchyQuery = async (user) => {
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their cartId from user or employee record
-    if (user.cafeId) {
-      query.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for CustomerRequest.cartId
-    } else if (user.employeeId) {
-      const employee = await Employee.findById(user.employeeId).lean();
-      if (employee && employee.cartId) {
-        query.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
-      }
-    } else {
-      // Fallback: find by email
-      const employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
-      if (employee && employee.cartId) {
-        query.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
-      }
+    // Mobile users - always prefer current Employee mapping to avoid stale
+    // user cart/cafe fields after reassignment.
+    let employee = null;
+    if (user.employeeId) {
+      employee = await Employee.findById(user.employeeId).lean();
+    }
+    if (!employee && user._id) {
+      employee = await Employee.findOne({ userId: user._id }).lean();
+    }
+    if (!employee && user.email) {
+      employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+    }
+    const cartScope = employee?.cartId || employee?.cafeId || user.cartId || user.cafeId;
+    if (cartScope) {
+      query.cartId = cartScope;
     }
   } else if (user.role === "employee") {
     // Legacy employee role
@@ -135,14 +136,18 @@ exports.createRequest = async (req, res) => {
       } else if (user.role === "franchise_admin") {
         requestData.franchiseId = user._id;
       } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-        if (user.cafeId) {
-          requestData.cartId = user.cafeId; // User.cafeId links to cart admin, which is what we need for CustomerRequest.cartId
-        } else if (user.employeeId) {
-          const employee = await Employee.findById(user.employeeId).lean();
-          if (employee && employee.cartId) {
-            requestData.cartId = employee.cartId; // CustomerRequest model uses cartId, not cafeId
-          }
+        let employee = null;
+        if (user.employeeId) {
+          employee = await Employee.findById(user.employeeId).lean();
         }
+        if (!employee && user._id) {
+          employee = await Employee.findOne({ userId: user._id }).lean();
+        }
+        if (!employee && user.email) {
+          employee = await Employee.findOne({ email: user.email?.toLowerCase() }).lean();
+        }
+        requestData.cartId =
+          employee?.cartId || employee?.cafeId || user.cartId || user.cafeId;
         if (user.franchiseId) {
           requestData.franchiseId = user.franchiseId;
         }

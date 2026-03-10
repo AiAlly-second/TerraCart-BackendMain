@@ -31,12 +31,12 @@ router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "mana
 // Get task by ID
 router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTaskById);
 
-// Create task - allow all roles
-router.post("/", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, createTask);
+// Create task - supervisory roles only
+router.post("/", authorize(["admin", "franchise_admin", "super_admin", "captain", "manager"]), blockActionsIfCheckedOut, createTask);
 
-// Update task - allow all roles
-router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, updateTask);
-router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager", "employee"]), blockActionsIfCheckedOut, updateTask);
+// Update task - supervisory roles only
+router.put("/:id", authorize(["admin", "franchise_admin", "super_admin", "captain", "manager"]), blockActionsIfCheckedOut, updateTask);
+router.patch("/:id", authorize(["admin", "franchise_admin", "super_admin", "captain", "manager"]), blockActionsIfCheckedOut, updateTask);
 
 // Complete task
 router.post("/:id/complete", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), blockActionsIfCheckedOut, completeTask);

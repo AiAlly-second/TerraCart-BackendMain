@@ -1,27 +1,74 @@
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 const Employee = require("../models/employeeModel");
 
+const SELF_ONLY_ROLES = new Set(["waiter", "cook", "employee"]);
+const CART_SCOPED_ROLES = new Set(["manager", "captain"]);
+
+const buildNoAccessQuery = () => ({ employeeId: { $in: [] } });
+
+const resolveEmployeeForUser = async (user) => {
+  if (!user) return null;
+
+  if (user.employeeId) {
+    const byId = await Employee.findById(user.employeeId).lean();
+    if (byId) return byId;
+  }
+
+  const byUserId = await Employee.findOne({ userId: user._id }).lean();
+  if (byUserId) return byUserId;
+
+  if (!user.email) return null;
+  return Employee.findOne({ email: String(user.email).toLowerCase() }).lean();
+};
+
+const applyCartScope = (query, cartId) => {
+  if (!cartId) return false;
+  query.$or = [{ cartId }, { cafeId: cartId }];
+  return true;
+};
+
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
+  if (!user?.role) return buildNoAccessQuery();
+
+  const role = String(user.role).toLowerCase();
   const query = {};
-  if (user.role === "admin") {
-    query.cartId = user._id; // EmployeeSchedule model uses cartId, not cafeId
-  } else if (user.role === "franchise_admin") {
-    query.franchiseId = user._id;
-  } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their employee record to find cartId
-    const employee = await Employee.findOne({ userId: user._id }).lean();
-    if (employee) {
-      query.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
-    }
-  } else if (user.role === "employee") {
-    // Legacy employee role - look up Employee
-    const employee = await Employee.findOne({ userId: user._id }).lean();
-    if (employee) {
-      query.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
-    }
+
+  if (role === "super_admin") {
+    return query;
   }
-  return query;
+
+  if (role === "admin") {
+    if (applyCartScope(query, user._id)) {
+      return query;
+    }
+    return buildNoAccessQuery();
+  }
+
+  if (role === "franchise_admin") {
+    query.franchiseId = user._id;
+    return query;
+  }
+
+  if (CART_SCOPED_ROLES.has(role)) {
+    const employee = await resolveEmployeeForUser(user);
+    const employeeCartId = employee?.cartId || employee?.cafeId || null;
+    if (applyCartScope(query, employeeCartId)) {
+      return query;
+    }
+    return buildNoAccessQuery();
+  }
+
+  if (SELF_ONLY_ROLES.has(role)) {
+    const employee = await resolveEmployeeForUser(user);
+    if (employee) {
+      query.employeeId = employee._id;
+      return query;
+    }
+    return buildNoAccessQuery();
+  }
+
+  return buildNoAccessQuery();
 };
 
 // Get all schedules
@@ -41,28 +88,41 @@ exports.getAllSchedules = async (req, res) => {
 exports.getEmployeeSchedule = async (req, res) => {
   try {
     const { employeeId } = req.params;
-    
-    // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
-    const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
-    if (!employee) {
+    const role = String(req.user?.role || "").toLowerCase();
+
+    const targetEmployee = await Employee.findById(employeeId).lean();
+    if (!targetEmployee) {
       return res.status(404).json({ message: "Employee not found" });
     }
-    
+
+    if (SELF_ONLY_ROLES.has(role)) {
+      const selfEmployee = await resolveEmployeeForUser(req.user);
+      if (!selfEmployee || selfEmployee._id.toString() !== targetEmployee._id.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else {
+      // Verify employee belongs to user's hierarchy
+      const hierarchyQuery = await buildHierarchyQuery(req.user);
+      const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery }).lean();
+      if (!employee) {
+        return res.status(404).json({ message: "Employee not found" });
+      }
+    }
+
     let schedule = await EmployeeSchedule.findOne({ employeeId })
       .populate("employeeId", "name employeeRole mobile");
-    
+
     if (!schedule) {
       // Create default schedule if doesn't exist
       schedule = await EmployeeSchedule.create({
         employeeId,
         weeklySchedule: [],
-        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
-        franchiseId: employee.franchiseId,
+        cartId: targetEmployee.cartId || targetEmployee.cafeId,
+        franchiseId: targetEmployee.franchiseId,
       });
       await schedule.populate("employeeId", "name employeeRole mobile");
     }
-    
+
     return res.json(schedule);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -72,36 +132,20 @@ exports.getEmployeeSchedule = async (req, res) => {
 // Get current user's schedule (for mobile app)
 exports.getMySchedule = async (req, res) => {
   try {
-    const user = req.user;
-    
-    // For mobile users, get their employee record
-    let employee;
-    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
-      if (user.employeeId) {
-        employee = await Employee.findById(user.employeeId);
-      } else {
-        employee = await Employee.findOne({
-          $or: [
-            { userId: user._id },
-            { email: user.email?.toLowerCase() }
-          ]
-        });
-      }
-    }
-    
+    const employee = await resolveEmployeeForUser(req.user);
     if (!employee) {
       return res.status(404).json({ message: "Employee record not found for this user" });
     }
-    
+
     let schedule = await EmployeeSchedule.findOne({ employeeId: employee._id })
       .populate("employeeId", "name employeeRole mobile");
-    
+
     if (!schedule) {
       // Create default schedule if doesn't exist
       schedule = await EmployeeSchedule.create({
         employeeId: employee._id,
         weeklySchedule: [],
-        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
+        cartId: employee.cartId || employee.cafeId,
         franchiseId: employee.franchiseId,
       });
       await schedule.populate("employeeId", "name employeeRole mobile");
@@ -118,39 +162,37 @@ exports.upsertSchedule = async (req, res) => {
   try {
     const { employeeId } = req.body;
     const user = req.user;
-    
-    // Verify employee belongs to user's hierarchy OR is the current user's employee record
-    const hierarchyQuery = await buildHierarchyQuery(user);
-    let employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
-    
-    // If not found in hierarchy, check if it's the current user's own employee record
-    if (!employee && ["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
-      const userEmployee = await Employee.findOne({
-        _id: employeeId,
-        $or: [
-          { userId: user._id },
-          { email: user.email?.toLowerCase() }
-        ]
-      });
-      if (userEmployee) {
-        employee = userEmployee;
-      }
-    }
-    
-    if (!employee) {
+    const role = String(user?.role || "").toLowerCase();
+
+    const targetEmployee = await Employee.findById(employeeId).lean();
+    if (!targetEmployee) {
       return res.status(404).json({ message: "Employee not found" });
     }
-    
+
+    if (SELF_ONLY_ROLES.has(role)) {
+      const selfEmployee = await resolveEmployeeForUser(user);
+      if (!selfEmployee || selfEmployee._id.toString() !== targetEmployee._id.toString()) {
+        return res.status(403).json({ message: "Access denied" });
+      }
+    } else {
+      // Verify employee belongs to user's hierarchy OR is the current user's employee record
+      const hierarchyQuery = await buildHierarchyQuery(user);
+      const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery }).lean();
+      if (!employee) {
+        return res.status(404).json({ message: "Employee not found" });
+      }
+    }
+
     // Set hierarchy from employee
-    req.body.cartId = employee.cartId; // EmployeeSchedule model uses cartId, not cafeId
-    req.body.franchiseId = employee.franchiseId;
-    
+    req.body.cartId = targetEmployee.cartId || targetEmployee.cafeId;
+    req.body.franchiseId = targetEmployee.franchiseId;
+
     const schedule = await EmployeeSchedule.findOneAndUpdate(
       { employeeId },
       req.body,
       { new: true, upsert: true }
     ).populate("employeeId", "name employeeRole mobile");
-    
+
     // Emit socket event for real-time updates
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
@@ -158,7 +200,7 @@ exports.upsertSchedule = async (req, res) => {
     if (io && emitToCafe && scheduleCartId) {
       emitToCafe(io, scheduleCartId.toString(), "schedule:updated", schedule);
     }
-    
+
     return res.json(schedule);
   } catch (err) {
     return res.status(500).json({ message: err.message });
@@ -170,21 +212,22 @@ exports.updateTodayState = async (req, res) => {
   try {
     const { employeeId } = req.params;
     const { todayState } = req.body;
-    
+    const user = req.user;
+
     // Verify employee belongs to user's hierarchy
-    const hierarchyQuery = await buildHierarchyQuery(req.user);
+    const hierarchyQuery = await buildHierarchyQuery(user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
     }
-    
+
     let schedule = await EmployeeSchedule.findOne({ employeeId });
     if (!schedule) {
       schedule = await EmployeeSchedule.create({
         employeeId,
         weeklySchedule: [],
         todayState,
-        cartId: employee.cartId, // EmployeeSchedule model uses cartId, not cafeId
+        cartId: employee.cartId || employee.cafeId,
         franchiseId: employee.franchiseId,
       });
     } else {
@@ -203,7 +246,7 @@ exports.updateTodayState = async (req, res) => {
 exports.deleteSchedule = async (req, res) => {
   try {
     const { employeeId } = req.params;
-    
+
     // Verify employee belongs to user's hierarchy
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const employee = await Employee.findOne({ _id: employeeId, ...hierarchyQuery });

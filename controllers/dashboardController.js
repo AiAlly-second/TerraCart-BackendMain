@@ -6,10 +6,12 @@ const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 const Task = require("../models/taskModel");
+const CustomerRequest = require("../models/customerRequestModel");
 const {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
 } = require("../utils/orderContract");
+const { getISTDateRange } = require("../utils/istDateTime");
 
 const normalizeIdString = (value) => {
   if (!value) return "";
@@ -81,16 +83,85 @@ const buildCartScopeWithLegacyFallback = (cartId) => {
   };
 };
 
+const buildPaidDayRangeClause = (startDate, endDate) => ({
+  $or: [
+    {
+      paidAt: {
+        $gte: startDate,
+        $lt: endDate,
+      },
+    },
+    {
+      $and: [
+        {
+          $or: [{ paidAt: { $exists: false } }, { paidAt: null }],
+        },
+        {
+          createdAt: {
+            $gte: startDate,
+            $lt: endDate,
+          },
+        },
+      ],
+    },
+  ],
+});
+
+const toFiniteNumber = (value) => {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+};
+
+const toRupeesFromPaise = (value) => Number((toFiniteNumber(value) / 100).toFixed(2));
+
+const calculateOrderRevenue = (order) => {
+  const kotLines = Array.isArray(order?.kotLines) ? order.kotLines : [];
+  const selectedAddons = Array.isArray(order?.selectedAddons)
+    ? order.selectedAddons
+    : [];
+
+  let kotTotal = kotLines.reduce((sum, kotLine) => {
+    return sum + toFiniteNumber(kotLine?.totalAmount);
+  }, 0);
+
+  // Fallback for legacy/incomplete KOT totals.
+  if (kotTotal <= 0) {
+    const kotTotalInPaise = kotLines.reduce((sum, kotLine) => {
+      const items = Array.isArray(kotLine?.items) ? kotLine.items : [];
+      return (
+        sum +
+        items.reduce((itemSum, item) => {
+          if (!item || item.returned) return itemSum;
+          const quantity = Math.max(0, Math.floor(toFiniteNumber(item?.quantity) || 0));
+          const priceInPaise = toFiniteNumber(item?.price);
+          return itemSum + quantity * priceInPaise;
+        }, 0)
+      );
+    }, 0);
+    kotTotal = toRupeesFromPaise(kotTotalInPaise);
+  }
+
+  const addonTotal = selectedAddons.reduce((sum, addon) => {
+    const quantity = Math.max(0, Math.floor(toFiniteNumber(addon?.quantity) || 1));
+    return sum + toFiniteNumber(addon?.price) * quantity;
+  }, 0);
+
+  const officeChargeRaw = toFiniteNumber(order?.officeDeliveryCharge);
+  const officeDeliveryCharge = officeChargeRaw > 0 ? officeChargeRaw : 0;
+
+  return kotTotal + addonTotal + officeDeliveryCharge;
+};
+
+const calculateRevenueFromOrders = (orders) =>
+  orders.reduce((sum, order) => sum + calculateOrderRevenue(order), 0);
+
 // Helper to get cartId based on user role (returns cartId, not cafeId)
 const getCafeId = async (user) => {
   if (user.role === "admin") {
     return user._id; // Cart admin's _id is the cartId
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - prioritize cartId, then Employee mapping, then legacy cafeId.
-    if (user.cartId) {
-      return user.cartId;
-    }
-
+    // Mobile users - always prefer current Employee mapping to avoid stale
+    // user.cafeId/cartId after reassignment.
     let employee = null;
     if (user.employeeId) {
       employee = await Employee.findById(user.employeeId).lean();
@@ -116,6 +187,10 @@ const getCafeId = async (user) => {
         });
         return cartId;
       }
+    }
+
+    if (user.cartId) {
+      return user.cartId;
     }
 
     if (user.cafeId) {
@@ -170,10 +245,7 @@ exports.getDashboardStats = async (req, res) => {
       return res.status(403).json({ message: "Access denied. Invalid cart context." });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { startUTC: today, endUTC: tomorrow } = getISTDateRange();
 
     /*
     const normalizedRole = String(req.user?.role || "").toLowerCase();
@@ -212,7 +284,7 @@ exports.getDashboardStats = async (req, res) => {
     // Run all queries in parallel for faster response
     const [
       activeOrders,
-      todayOrders,
+      todayPaidOrders,
       pendingKOTs,
       preparingKOTs,
       readyKOTs,
@@ -223,6 +295,7 @@ exports.getDashboardStats = async (req, res) => {
       occupiedTables,
       totalTables,
       pendingTasks,
+      pendingRequests,
     ] = await Promise.all([
       // Active orders: terminal-specific open kitchen flow (exclude completed/cancelled).
       Order.countDocuments({
@@ -236,34 +309,16 @@ exports.getDashboardStats = async (req, res) => {
         },
       }),
 
-      // Today's revenue orders - use aggregation for faster calculation
-      Order.aggregate([
-        {
-          $match: {
-            ...orderScope,
-            createdAt: { $gte: today, $lt: tomorrow },
-            status: ORDER_STATUSES.COMPLETED,
-            paymentStatus: PAYMENT_STATUSES.PAID,
-          },
-        },
-        {
-          $project: {
-            revenue: {
-              $reduce: {
-                input: { $ifNull: ["$kotLines", []] },
-                initialValue: 0,
-                in: { $add: ["$$value", { $ifNull: ["$$this.totalAmount", 0] }] },
-              },
-            },
-          },
-        },
-        {
-          $group: {
-            _id: null,
-            totalRevenue: { $sum: "$revenue" },
-          },
-        },
-      ]),
+      // Today's paid orders for revenue (cart-scoped, paidAt-first date filter).
+      Order.find({
+        $and: [
+          orderScope,
+          { paymentStatus: PAYMENT_STATUSES.PAID },
+          buildPaidDayRangeClause(today, tomorrow),
+        ],
+      })
+        .select("kotLines selectedAddons officeDeliveryCharge")
+        .lean(),
 
       // Pending KOTs (orders waiting for kitchen start).
       Order.countDocuments(buildKotStatusQuery(pendingKotStatuses)),
@@ -328,10 +383,15 @@ exports.getDashboardStats = async (req, res) => {
         cartId: cartCondition,
         status: { $nin: ["completed", "cancelled"] },
       }),
+
+      // Pending customer requests
+      CustomerRequest.countDocuments({
+        ...buildCartScopeWithLegacyFallback(cafeId),
+        status: "pending",
+      }),
     ]);
 
-    // Extract revenue from aggregation result
-    const todayRevenue = todayOrders.length > 0 ? todayOrders[0].totalRevenue || 0 : 0;
+    const todayRevenue = Number(calculateRevenueFromOrders(todayPaidOrders).toFixed(2));
 
     res.json({
       success: true,
@@ -349,6 +409,7 @@ exports.getDashboardStats = async (req, res) => {
         occupiedTables,
         totalTables,
         availableTables: totalTables - occupiedTables,
+        pendingRequests,
       },
     });
   } catch (error) {

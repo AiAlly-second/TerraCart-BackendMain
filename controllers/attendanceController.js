@@ -714,13 +714,14 @@ exports.getTodayAttendance = async (req, res) => {
     const now = new Date();
 
     let hierarchyQuery = await buildHierarchyQuery(req.user);
-    // Manager sees all employees' attendance in their cart (not just their own)
-    if (req.user.role === "manager") {
+    // Captain and manager see all employees' attendance in their cart (not just their own)
+    if (["manager", "captain"].includes(req.user.role)) {
       const employee = await Employee.findOne({ userId: req.user._id }).lean()
         || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
-      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
-      if (managerCartId) {
-        hierarchyQuery = { $or: [{ cartId: managerCartId }, { cafeId: managerCartId }] };
+      const supervisorCartId =
+        employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      if (supervisorCartId) {
+        hierarchyQuery = { $or: [{ cartId: supervisorCartId }, { cafeId: supervisorCartId }] };
       }
     }
     const query = {
@@ -743,16 +744,17 @@ exports.getTodayAttendance = async (req, res) => {
 
     // Get all employees in the hierarchy to check for absent employees
     let employeeQuery = await buildHierarchyQuery(req.user);
-    if (req.user.role === "manager") {
+    if (["manager", "captain"].includes(req.user.role)) {
       const employee = await Employee.findOne({ userId: req.user._id }).lean()
         || await Employee.findOne({ email: req.user.email?.toLowerCase() }).lean();
-      const managerCartId = employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
-      if (managerCartId) {
-        employeeQuery = { $or: [{ cartId: managerCartId }, { cafeId: managerCartId }] };
+      const supervisorCartId =
+        employee?.cartId || employee?.cafeId || req.user.cartId || req.user.cafeId;
+      if (supervisorCartId) {
+        employeeQuery = { $or: [{ cartId: supervisorCartId }, { cafeId: supervisorCartId }] };
       }
     }
     const employees = await Employee.find(employeeQuery)
-      .select("_id name employeeRole cafeId franchiseId")
+      .select("_id name employeeRole cartId cafeId franchiseId")
       .lean();
     const employeeIds = employees.map((emp) => emp._id);
     const approvedLeaveMap = await getApprovedLeaveMapForDate({
@@ -2238,8 +2240,21 @@ exports.updateAttendanceStatus = async (req, res) => {
 
     await attendance.save();
     await attendance.populate("employeeId", "name mobile employeeRole");
+    const normalizedAttendance = normalizeAttendanceRecord(attendance);
 
-    return res.json(normalizeAttendanceRecord(attendance));
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    const attendanceCartId = attendance.cartId || attendance.cafeId;
+    if (io && emitToCafe && attendanceCartId) {
+      emitToCafe(
+        io,
+        attendanceCartId.toString(),
+        "attendance:updated",
+        normalizedAttendance
+      );
+    }
+
+    return res.json(normalizedAttendance);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -2266,7 +2281,31 @@ exports.deleteAttendance = async (req, res) => {
       return res.status(403).json({ message: "Access denied" });
     }
 
+    const attendanceCartId = attendance.cartId || attendance.cafeId;
     await EmployeeAttendance.findByIdAndDelete(id);
+
+    const io = req.app.get("io");
+    const emitToCafe = req.app.get("emitToCafe");
+    if (io && emitToCafe && attendanceCartId) {
+      const deletedPayload = {
+        _id: id,
+        employeeId: attendance.employeeId,
+        deleted: true,
+      };
+      emitToCafe(
+        io,
+        attendanceCartId.toString(),
+        "attendance:deleted",
+        deletedPayload
+      );
+      emitToCafe(
+        io,
+        attendanceCartId.toString(),
+        "attendance:updated",
+        deletedPayload
+      );
+    }
+
     return res.json({ message: "Attendance record deleted" });
   } catch (err) {
     return res.status(500).json({ message: err.message });
