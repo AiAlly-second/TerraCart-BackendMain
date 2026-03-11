@@ -107,6 +107,17 @@ const parseOptionalDate = (value) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+const parseBooleanish = (value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const token = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y"].includes(token)) return true;
+    if (["false", "0", "no", "n"].includes(token)) return false;
+  }
+  return null;
+};
+
 const toFiniteNumberOrNull = (value) => {
   if (value === undefined || value === null || value === "") return null;
   const parsed = Number(value);
@@ -2404,9 +2415,215 @@ exports.getPurchases = async (req, res) => {
  * @route   POST /api/costing-v2/purchases
  * @desc    Create purchase order
  */
+const processPurchaseReceipt = async ({ purchase, userId }) => {
+  const purchasedIngredientIds = [];
+
+  for (const item of purchase.items) {
+    const ingredient = await Ingredient.findById(item.ingredientId);
+    if (!ingredient) continue;
+
+    const hasExplicitExpiryDate =
+      item.expiryDate !== undefined &&
+      item.expiryDate !== null &&
+      item.expiryDate !== "";
+    const parsedExpiryDate = parseOptionalDate(item.expiryDate);
+    if (hasExplicitExpiryDate && !parsedExpiryDate) {
+      throw new Error(`Invalid expiryDate for ingredient ${ingredient.name}`);
+    }
+
+    purchasedIngredientIds.push(item.ingredientId);
+
+    const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, item.qty, item.uom);
+    const conversionFactor = safeConvertToBaseUnit(ingredient, 1, item.uom);
+    const unitCostInBaseUnit = item.unitPrice / conversionFactor;
+
+    if (
+      (ingredient.baseUnit === "g" || ingredient.baseUnit === "ml") &&
+      unitCostInBaseUnit > 100
+    ) {
+      console.error(
+        `[PURCHASE COST ERROR] ${ingredient.name}: cost per ${ingredient.baseUnit} seems high (${unitCostInBaseUnit.toFixed(6)}).`,
+      );
+    }
+
+    console.log(
+      `[PURCHASE] ${ingredient.name}: unitPrice=${item.unitPrice}/${item.uom}, baseUnit=${ingredient.baseUnit}, conversionFactor=${conversionFactor}, unitCostInBaseUnit=${unitCostInBaseUnit.toFixed(6)}/${ingredient.baseUnit}`,
+    );
+
+    const cartId = purchase.cartId || null;
+
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[PURCHASE RECEIVE] ${ingredient.name}: updating stock - qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, pricePerBase=${unitCostInBaseUnit.toFixed(6)}, cartId=${cartId}`,
+      );
+    }
+
+    const stockUpdateResult = await WeightedAverageService.updateWeightedAverage(
+      item.ingredientId,
+      qtyInBaseUnit,
+      unitCostInBaseUnit,
+      cartId,
+    );
+
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[PURCHASE RECEIVE] ${ingredient.name}: stock updated - previousQty=${stockUpdateResult.previousQty}, previousAvgCost=${stockUpdateResult.previousAvgCost.toFixed(6)}, updatedQtyOnHand=${stockUpdateResult.updatedQtyOnHand} ${ingredient.baseUnit}, weightedAvgCost=${stockUpdateResult.newAverageCost.toFixed(6)}/${ingredient.baseUnit}`,
+      );
+    }
+
+    await Ingredient.findByIdAndUpdate(item.ingredientId, {
+      $set: {
+        lastReceivedAt: new Date(),
+        expiryDate: parsedExpiryDate || null,
+      },
+    });
+
+    const costAllocated = qtyInBaseUnit * unitCostInBaseUnit;
+
+    if (process.env.NODE_ENV === "development") {
+      const expectedCost = item.unitPrice * item.qty;
+      if (Math.abs(expectedCost - costAllocated) > 0.01) {
+        console.warn(
+          `[PURCHASE] ${ingredient.name}: cost mismatch! expected=${expectedCost.toFixed(2)}, calculated=${costAllocated.toFixed(2)}`,
+        );
+      }
+    }
+
+    let transactionCartId = purchase.cartId || null;
+    if (
+      transactionCartId &&
+      mongoose.Types.ObjectId.isValid(transactionCartId)
+    ) {
+      transactionCartId = new mongoose.Types.ObjectId(transactionCartId);
+    }
+
+    const transaction = new InventoryTransaction({
+      ingredientId: item.ingredientId,
+      type: "IN",
+      qty: item.qty,
+      uom: item.uom,
+      qtyInBaseUnit,
+      refType: "purchase",
+      refId: purchase._id,
+      date: new Date(),
+      costAllocated,
+      unitPrice: item.unitPrice,
+      recordedBy: userId,
+      cartId: transactionCartId,
+    });
+
+    if (qtyInBaseUnit <= 0) {
+      throw new Error(
+        `Invalid qtyInBaseUnit for ${ingredient.name}: ${qtyInBaseUnit}. Original qty: ${item.qty} ${item.uom}`,
+      );
+    }
+    if (costAllocated < 0) {
+      throw new Error(`Invalid costAllocated for ${ingredient.name}: ${costAllocated}`);
+    }
+
+    await transaction.save();
+
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[PURCHASE RECEIVE] ${ingredient.name}: transaction created - qty=${item.qty} ${item.uom}, qtyInBaseUnit=${qtyInBaseUnit} ${ingredient.baseUnit}, costAllocated=${costAllocated.toFixed(2)}, unitPrice=${item.unitPrice}/${item.uom}, cartId=${transactionCartId ? transactionCartId.toString() : "null"}`,
+      );
+    }
+
+    // #region agent log
+    logDebug(
+      "costingController.js:776",
+      "Inventory transaction created",
+      {
+        transactionId: transaction._id,
+        ingredientId: item.ingredientId,
+        ingredientName: ingredient.name,
+        cartId: purchase.cartId,
+        purchaseId: purchase._id,
+        qty: qtyInBaseUnit,
+        costAllocated: transaction.costAllocated,
+      },
+      "B",
+    );
+    // #endregion
+  }
+
+  purchase.status = "received";
+  purchase.receivedDate = new Date();
+  purchase.receivedBy = userId;
+  await purchase.save();
+
+  if (purchasedIngredientIds.length > 0) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // #region agent log
+    logDebug(
+      "costingController.js:760",
+      "Recalculating BOMs after purchase",
+      {
+        purchaseId: purchase._id,
+        cartId: purchase.cartId,
+        ingredientIds: purchasedIngredientIds,
+      },
+      "B",
+    );
+    // #endregion
+    const recipeFilter = {
+      "ingredients.ingredientId": { $in: purchasedIngredientIds },
+    };
+
+    if (purchase.cartId) {
+      recipeFilter.$or = [
+        { cartId: purchase.cartId },
+        { cartId: null },
+        { cartId: { $exists: false } },
+      ];
+    }
+
+    const affectedRecipes = await Recipe.find(recipeFilter);
+
+    // #region agent log
+    logDebug(
+      "costingController.js:768",
+      "Found affected BOMs",
+      {
+        recipeCount: affectedRecipes.length,
+        recipeIds: affectedRecipes.map((r) => r._id),
+      },
+      "B",
+    );
+    // #endregion
+
+    for (const recipe of affectedRecipes) {
+      const cartIdForRecalc = purchase.cartId || null;
+      await recipe.calculateCost(cartIdForRecalc);
+      await recipe.save();
+      // #region agent log
+      logDebug(
+        "costingController.js:777",
+        "BOM cost updated after purchase",
+        {
+          recipeId: recipe._id,
+          recipeName: recipe.name,
+          totalCost: recipe.totalCostCached,
+          costPerPortion: recipe.costPerPortion,
+          cartId: cartIdForRecalc,
+        },
+        "B",
+      );
+      // #endregion
+    }
+  }
+};
+
 exports.createPurchase = async (req, res) => {
   try {
-    const { items, ...purchaseData } = req.body;
+    const { items, autoReceive, ...purchaseData } = req.body;
+
+    const requestedAutoReceive = parseBooleanish(autoReceive);
+    // Cart admin flow in Finances expects stock to be added immediately on create.
+    const defaultAutoReceive =
+      String(req.user?.role || "").trim().toLowerCase() === "admin";
+    const shouldAutoReceive =
+      requestedAutoReceive === null ? defaultAutoReceive : requestedAutoReceive;
 
     // Set outlet context based on user role
     const data = await setOutletContext(req.user, purchaseData);
@@ -2444,6 +2661,14 @@ exports.createPurchase = async (req, res) => {
     });
 
     await purchase.save();
+
+    if (shouldAutoReceive) {
+      await processPurchaseReceipt({
+        purchase,
+        userId: req.user._id,
+      });
+    }
+
     await purchase.populate("supplierId", "name");
     await purchase.populate("items.ingredientId", "name uom");
     await purchase.populate("cartId", "name cafeName");
