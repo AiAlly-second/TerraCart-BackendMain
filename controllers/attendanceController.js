@@ -769,6 +769,48 @@ exports.getTodayAttendance = async (req, res) => {
     const attendanceEmployeeIds = new Set(
       attendance.map((a) => a.employeeId?._id?.toString() || a.employeeId?.toString())
     );
+    const employeeById = new Map(
+      employees.map((emp) => [emp._id?.toString(), emp])
+    );
+
+    // Recovery path for legacy/misaligned rows:
+    // If a same-day record exists for an in-scope employee but was filtered out
+    // due to stale/missing cart linkage, include it and backfill cartId.
+    if (employeeIds.length > 0) {
+      const fallbackRows = await EmployeeAttendance.find({
+        employeeId: { $in: employeeIds },
+        date: { $gte: today, $lt: tomorrow },
+      })
+        .populate("employeeId", "name mobile employeeRole")
+        .sort({ "checkIn.time": -1, updatedAt: -1, createdAt: -1 });
+
+      for (const row of fallbackRows) {
+        const rowEmployeeId =
+          row?.employeeId?._id?.toString() || row?.employeeId?.toString() || null;
+        if (!rowEmployeeId || attendanceEmployeeIds.has(rowEmployeeId)) {
+          continue;
+        }
+
+        const employeeMeta = employeeById.get(rowEmployeeId);
+        const resolvedCartId =
+          employeeMeta?.cartId ||
+          employeeMeta?.cafeId ||
+          req.user?.cafeId ||
+          req.user?.cartId ||
+          null;
+
+        if (!row.cartId && resolvedCartId) {
+          row.cartId = resolvedCartId;
+          if (!row.franchiseId && employeeMeta?.franchiseId) {
+            row.franchiseId = employeeMeta.franchiseId;
+          }
+          await row.save();
+        }
+
+        attendance.push(row.toObject ? row.toObject() : row);
+        attendanceEmployeeIds.add(rowEmployeeId);
+      }
+    }
 
     for (const employee of employees) {
       const employeeId = employee._id.toString();
@@ -1011,8 +1053,12 @@ exports.checkIn = async (req, res) => {
       return res.status(404).json({ message: "Employee not found" });
     }
 
+    // Resolve cart linkage robustly for mixed legacy/new data:
+    // Employee.cartId (current) -> Employee.cafeId (legacy) -> User.cafeId (mobile token context).
+    const employeeCartId = employee.cartId || employee.cafeId || user.cafeId || user.cartId || null;
+
     // Check hierarchy access
-    if (user.role === "admin" && employee.cartId?.toString() !== user._id.toString()) {
+    if (user.role === "admin" && employeeCartId?.toString() !== user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
     if (user.role === "franchise_admin" && employee.franchiseId?.toString() !== user._id.toString()) {
@@ -1029,7 +1075,7 @@ exports.checkIn = async (req, res) => {
       // Manager can manual check-in for employees in their cart
       const managerEmployee = await Employee.findOne({ userId: user._id }).lean();
       const managerCartId = managerEmployee?.cartId || managerEmployee?.cafeId || user.cartId || user.cafeId;
-      const empCartId = employee.cartId || employee.cafeId;
+      const empCartId = employeeCartId;
       if (!managerCartId || !empCartId || empCartId.toString() !== managerCartId.toString()) {
         return res.status(403).json({ message: "Access denied. Employee must be in your cart." });
       }
@@ -1052,7 +1098,7 @@ exports.checkIn = async (req, res) => {
         employeeId: targetEmployeeId,
         date: { $gte: today, $lt: tomorrow },
       };
-      const cartClause = buildCartMatchClause(employee.cartId);
+      const cartClause = buildCartMatchClause(employeeCartId);
       if (cartClause) {
         duplicateQuery.$and = [cartClause];
       }
@@ -1087,7 +1133,7 @@ exports.checkIn = async (req, res) => {
       employeeId: targetEmployeeId,
       today,
       tomorrow,
-      cartId: employee.cartId,
+      cartId: employeeCartId,
     });
     const existingActiveSession = await EmployeeAttendance.findOne(activeSessionQuery)
       .sort({ date: -1, updatedAt: -1, createdAt: -1 });
@@ -1121,9 +1167,9 @@ exports.checkIn = async (req, res) => {
       date: { $gte: today, $lt: tomorrow },
     };
     
-    // Add cartId filter if employee has cartId (should always have it)
-    if (employee.cartId) {
-      attendanceQuery.cartId = employee.cartId;
+    // Add cartId filter if we could resolve a cart id from employee/user context.
+    if (employeeCartId) {
+      attendanceQuery.$or = [{ cartId: employeeCartId }, { cafeId: employeeCartId }];
     }
     
     console.log('[ATTENDANCE] checkIn query:', JSON.stringify(attendanceQuery, null, 2));
@@ -1131,20 +1177,21 @@ exports.checkIn = async (req, res) => {
     console.log('[ATTENDANCE] checkIn found record:', attendance ? 'YES' : 'NO');
     
     // If no record found with cartId, check for old records without cartId (migration fix)
-    if (!attendance && employee.cartId) {
+    if (!attendance && employeeCartId) {
       const fallbackQuery = {
         employeeId: targetEmployeeId,
         date: { $gte: today, $lt: tomorrow },
         $or: [
           { cartId: { $exists: false } },
           { cartId: null },
+          { cafeId: employeeCartId },
         ],
       };
       console.log('[ATTENDANCE] checkIn fallback query (no cartId):', JSON.stringify(fallbackQuery, null, 2));
       attendance = await EmployeeAttendance.findOne(fallbackQuery);
       if (attendance) {
         console.log('[ATTENDANCE] checkIn - Found old record without cartId, updating...');
-        attendance.cartId = employee.cartId;
+        attendance.cartId = employeeCartId;
         await attendance.save();
         console.log('[ATTENDANCE] checkIn - Updated cartId on old record');
       }
@@ -1221,6 +1268,12 @@ exports.checkIn = async (req, res) => {
       .sort({ updatedAt: -1, createdAt: -1 });
 
     if (checkedInToday) {
+      // Backfill missing cart linkage on legacy records so admin/web filters can see them.
+      if (!checkedInToday.cartId && employeeCartId) {
+        checkedInToday.cartId = employeeCartId;
+        checkedInToday.franchiseId = employee.franchiseId;
+        await checkedInToday.save();
+      }
       const alreadyCheckedOut = checkedInToday.isCheckedOut || checkedInToday.checkOut?.time;
 
       logAttendanceEvent({
@@ -1298,7 +1351,7 @@ exports.checkIn = async (req, res) => {
         attendance.breakStart = null;
         attendance.breaks = [];
         attendance.breakDuration = 0;
-        attendance.cartId = employee.cartId; // EmployeeAttendance model uses cartId, not cafeId
+        attendance.cartId = employeeCartId; // Keep cart linkage stable for admin/web queries.
         attendance.franchiseId = employee.franchiseId;
         await attendance.save();
       } else {
@@ -1320,7 +1373,7 @@ exports.checkIn = async (req, res) => {
           isOnBreak: false,
           breakDuration: 0,
           breaks: [],
-          cartId: employee.cartId, // EmployeeAttendance model uses cartId, not cafeId
+          cartId: employeeCartId, // EmployeeAttendance model uses cartId, not cafeId
           franchiseId: employee.franchiseId,
         });
       }
