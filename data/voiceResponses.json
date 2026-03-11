@@ -1,0 +1,122 @@
+{
+  "add_to_cart": {
+    "en": "{qty} {item} added to cart",
+    "hi": "{qty} {item} \u0915\u093e\u0930\u094d\u091f \u092e\u0947\u0902 \u091c\u094b\u095c \u0926\u0940 \u0917\u0908",
+    "mr": "{qty} {item} \u0915\u093e\u0930\u094d\u091f\u092e\u0927\u094d\u092f\u0947 \u091c\u094b\u0921\u0932\u0947"
+  },
+  "add_to_cart_multi": {
+    "en": "{count} items with total {qty} quantity added to cart",
+    "hi": "{count} आइटम, कुल {qty} मात्रा, कार्ट में जोड़ दी गई",
+    "mr": "{count} आयटम, एकूण {qty} प्रमाण, कार्टमध्ये जोडले"
+  },
+  "remove_from_cart": {
+    "en": "{qty} {item} removed from cart",
+    "hi": "{qty} {item} कार्ट से हटाई गई",
+    "mr": "{qty} {item} कार्टमधून काढले"
+  },
+  "inventory_added": {
+    "en": "{qty} {item} added to inventory",
+    "hi": "{qty} {item} इन्वेंटरी में जोड़ दिया गया",
+    "mr": "{qty} {item} इन्व्हेंटरीमध्ये जोडले"
+  },
+  "inventory_deducted": {
+    "en": "{qty} {item} deducted from inventory",
+    "hi": "{qty} {item} इन्वेंटरी से घटा दिया गया",
+    "mr": "{qty} {item} इन्व्हेंटरीमधून वजा केले"
+  },
+  "inventory_set": {
+    "en": "{item} stock set to {qty}",
+    "hi": "{item} का स्टॉक {qty} पर सेट किया गया",
+    "mr": "{item} साठा {qty} वर सेट केला"
+  },
+  "inventory_deleted": {
+    "en": "{item} removed from inventory",
+    "hi": "{item} इन्वेंटरी से हटाया गया",
+    "mr": "{item} इन्व्हेंटरीमधून काढले"
+  },
+  "show_cart": {
+    "en": "Opening your cart",
+    "hi": "आपका कार्ट खोल रहा हूँ",
+    "mr": "तुमचा कार्ट उघडत आहे"
+  },
+  "clear_cart": {
+    "en": "Cart cleared",
+    "hi": "कार्ट साफ कर दिया गया",
+    "mr": "कार्ट साफ केले"
+  },
+  "place_order": {
+    "en": "Placing your order now",
+    "hi": "आपका ऑर्डर अभी प्लेस कर रहा हूँ",
+    "mr": "तुमचा ऑर्डर आता प्लेस करत आहे"
+  },
+  "item_not_found": {
+    "en": "{item} not found",
+    "hi": "{item} नहीं मिला",
+    "mr": "{item} सापडले नाही"
+  },
+  "some_items_not_found": {
+    "en": "{count} item(s) were not found",
+    "hi": "{count} आइटम नहीं मिले",
+    "mr": "{count} आयटम सापडले नाहीत"
+  },
+  "command_not_recognized": {
+    "en": "Command not recognized. Please try again.",
+    "hi": "कमांड समझ नहीं आया। कृपया फिर से बोलें।",
+    "mr": "कमांड समजला नाही. कृपया पुन्हा बोला."
+  },
+  "nav_dashboard": {
+    "en": "Opened dashboard",
+    "hi": "डैशबोर्ड खोल दिया गया",
+    "mr": "डॅशबोर्ड उघडला"
+  },
+  "nav_inventory": {
+    "en": "Opened inventory",
+    "hi": "इन्वेंटरी खोल दी गई",
+    "mr": "इन्व्हेंटरी उघडली"
+  },
+  "nav_orders": {
+    "en": "Opened orders",
+    "hi": "ऑर्डर पेज खोल दिया गया",
+    "mr": "ऑर्डर पेज उघडले"
+  },
+  "nav_tables": {
+    "en": "Opened tables",
+    "hi": "टेबल पेज खोल दिया गया",
+    "mr": "टेबल पेज उघडले"
+  },
+  "nav_requests": {
+    "en": "Opened requests",
+    "hi": "रिक्वेस्ट पेज खोल दिया गया",
+    "mr": "रिक्वेस्ट पेज उघडले"
+  },
+  "nav_settings": {
+    "en": "Opened settings",
+    "hi": "सेटिंग्स खोल दी गई",
+    "mr": "सेटिंग्स उघडल्या"
+  },
+  "nav_billing": {
+    "en": "Opened billing",
+    "hi": "बिलिंग खोल दी गई",
+    "mr": "बिलिंग उघडली"
+  },
+  "nav_kot": {
+    "en": "Opened KOT",
+    "hi": "केओटी खोल दिया गया",
+    "mr": "केओटी उघडले"
+  },
+  "nav_employees": {
+    "en": "Opened employees",
+    "hi": "कर्मचारी पेज खोल दिया गया",
+    "mr": "कर्मचारी पेज उघडले"
+  },
+  "nav_add_item": {
+    "en": "Opened add item",
+    "hi": "आइटम जोड़ने का पेज खोल दिया गया",
+    "mr": "आयटम जोडण्याचे पेज उघडले"
+  },
+  "nav_back": {
+    "en": "Going back",
+    "hi": "पिछले पेज पर जा रहा हूँ",
+    "mr": "मागील पेजवर जात आहे"
+  }
+}

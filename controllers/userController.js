@@ -1331,11 +1331,19 @@ exports.getMe = async (req, res) => {
     };
 
     if (user.role === "employee") {
-      const employee = await Employee.findOne({ userId: user._id }).lean();
+      const employee =
+        (await Employee.findOne({ userId: user._id }).lean()) ||
+        (user.email
+          ? await Employee.findOne({
+              email: String(user.email).toLowerCase(),
+            }).lean()
+          : null);
       if (employee) {
         userResponse.role = employee.employeeRole; // waiter, cook, captain, manager
         userResponse.cafeId = employee.cartId || employee.cafeId;
+        userResponse.cartId = employee.cartId || employee.cafeId;
         userResponse.franchiseId = employee.franchiseId;
+        userResponse.employeeId = employee._id;
       }
     }
 

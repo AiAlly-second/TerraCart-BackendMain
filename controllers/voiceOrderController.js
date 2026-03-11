@@ -5,6 +5,29 @@ const OPENAI_WHISPER_MODEL = process.env.OPENAI_WHISPER_MODEL || "whisper-1";
 const MAX_MENU_ITEMS = 300;
 const MAX_RESULT_ITEMS = 12;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const { preprocessVoiceText } = require("../services/voiceParserService");
+const { detectVoiceLanguage } = require("../utils/languageDetector");
+const {
+  generateVoiceResponse,
+  combineVoiceResponses,
+  getTtsLocaleForLanguage,
+} = require("../services/voiceResponseService");
+
+const hasExplicitPlaceOrderIntent = (value) => {
+  const normalized = normalizeText(value);
+  if (!normalized) return false;
+
+  const phrases = [
+    "place order",
+    "confirm order",
+    "checkout",
+    "confirm",
+    "submit order",
+    "pay now",
+    "order now",
+  ];
+  return phrases.some((phrase) => normalized.includes(phrase));
+};
 
 const normalizeText = (value) =>
   String(value || "")
@@ -47,22 +70,76 @@ const parseJsonSafely = (value) => {
   }
 };
 
-const buildFallbackReply = ({ action, addedCount, notFoundCount }) => {
-  if (action === "CLEAR_CART") return "I cleared your cart.";
-  if (action === "SHOW_CART") return "Opening your cart.";
-  if (action === "PLACE_ORDER") return "Placing your order now.";
+const responseKeyFromOrderAction = (action) => {
+  if (action === "CLEAR_CART") return "clear_cart";
+  if (action === "SHOW_CART") return "show_cart";
+  if (action === "PLACE_ORDER") return "place_order";
+  return "command_not_recognized";
+};
+
+const buildLocalizedOrderReply = ({
+  action,
+  items,
+  notFound,
+  language,
+}) => {
+  const responseParts = [];
+  const safeItems = Array.isArray(items) ? items : [];
+  const safeNotFound = Array.isArray(notFound) ? notFound : [];
+
   if (action === "ADD_ITEMS") {
-    if (addedCount > 0 && notFoundCount > 0) {
-      return `I added ${addedCount} item${addedCount > 1 ? "s" : ""}. Some items were not found.`;
+    if (safeItems.length > 0) {
+      safeItems.forEach((entry) => {
+        const itemName = String(entry?.name || "").trim();
+        if (!itemName) return;
+        const quantity = Number(entry?.quantity) || 1;
+        const addedSingle = generateVoiceResponse({
+          action: "add_to_cart",
+          language,
+          qty: quantity,
+          item: itemName,
+        }).text;
+        if (addedSingle) responseParts.push(addedSingle);
+      });
     }
-    if (addedCount > 0) {
-      return `I added ${addedCount} item${addedCount > 1 ? "s" : ""} to your cart.`;
-    }
-    if (notFoundCount > 0) {
-      return "I could not match those items in the menu. Please try again.";
-    }
+  } else {
+    const actionReply = generateVoiceResponse({
+      action: responseKeyFromOrderAction(action),
+      language,
+    }).text;
+    if (actionReply) responseParts.push(actionReply);
   }
-  return "Please tell me what you want to order.";
+
+  if (safeNotFound.length === 1) {
+    const notFoundSingle = generateVoiceResponse({
+      action: "item_not_found",
+      language,
+      item: safeNotFound[0],
+    }).text;
+    if (notFoundSingle) responseParts.push(notFoundSingle);
+  } else if (safeNotFound.length > 1) {
+    const notFoundMany = generateVoiceResponse({
+      action: "some_items_not_found",
+      language,
+      count: safeNotFound.length,
+    }).text;
+    if (notFoundMany) responseParts.push(notFoundMany);
+  }
+
+  if (responseParts.length === 0) {
+    const fallback = generateVoiceResponse({
+      action: "command_not_recognized",
+      language,
+    }).text;
+    if (fallback) responseParts.push(fallback);
+  }
+
+  return combineVoiceResponses({
+    responses: responseParts,
+    language,
+    separator: " ",
+    maxParts: 6,
+  }).text;
 };
 
 const resolveWhisperLanguage = (locale = "") => {
@@ -139,6 +216,7 @@ exports.parseTapToOrderVoice = async (req, res) => {
   try {
     const transcript = String(req.body?.transcript || "").trim();
     const locale = String(req.body?.locale || "en-IN").trim();
+    const language = detectVoiceLanguage(transcript, { locale });
     const rawMenuItems = Array.isArray(req.body?.menuItems) ? req.body.menuItems : [];
 
     if (!transcript) {
@@ -150,6 +228,15 @@ exports.parseTapToOrderVoice = async (req, res) => {
     if (!process.env.OPENAI_API_KEY) {
       return res.status(503).json({ message: "OPENAI_API_KEY is not configured" });
     }
+
+    const preprocessedTranscript = preprocessVoiceText(transcript, {
+      applyDictionary: false,
+      removeFillerWords: true,
+    });
+    const normalizedTranscript =
+      String(preprocessedTranscript.finalText || "").trim() || transcript;
+    console.log(`[VOICE_ORDER] raw voice text: ${transcript}`);
+    console.log(`[VOICE_ORDER] normalized text: ${normalizedTranscript}`);
 
     const menuItems = rawMenuItems
       .map((entry) =>
@@ -197,7 +284,8 @@ exports.parseTapToOrderVoice = async (req, res) => {
           {
             role: "user",
             content: JSON.stringify({
-              transcript,
+              transcript: normalizedTranscript,
+              rawTranscript: transcript,
               locale,
               menuItems,
             }),
@@ -221,7 +309,7 @@ exports.parseTapToOrderVoice = async (req, res) => {
       return res.status(502).json({ message: "Unable to parse voice command" });
     }
 
-    const action = normalizeAction(parsed.action);
+    let action = normalizeAction(parsed.action);
     const responseItems = Array.isArray(parsed.items) ? parsed.items.slice(0, MAX_RESULT_ITEMS) : [];
     const notFoundSet = new Set(
       (Array.isArray(parsed.notFound) ? parsed.notFound : [])
@@ -247,19 +335,44 @@ exports.parseTapToOrderVoice = async (req, res) => {
       items.push({ name: canonicalName, quantity });
     });
 
-    const assistantReplyCandidate = String(parsed.assistantReply || "").trim();
-    const assistantReply = assistantReplyCandidate
-      ? assistantReplyCandidate.slice(0, 220)
-      : buildFallbackReply({
-          action,
-          addedCount: items.length,
-          notFoundCount: notFoundSet.size,
-        });
+    if (
+      action === "PLACE_ORDER" &&
+      !hasExplicitPlaceOrderIntent(transcript) &&
+      !hasExplicitPlaceOrderIntent(normalizedTranscript)
+    ) {
+      action = items.length > 0 ? "ADD_ITEMS" : "NONE";
+    }
 
-    return res.json({
+    const notFound = Array.from(notFoundSet).slice(0, 8);
+    const assistantReply = buildLocalizedOrderReply({
       action,
       items,
-      notFound: Array.from(notFoundSet).slice(0, 8),
+      notFound,
+      language,
+    }).slice(0, 220);
+
+    console.log(
+      `[VOICE_ORDER] parsed output: ${JSON.stringify({
+        action,
+        language,
+        itemCount: items.length,
+        notFoundCount: notFoundSet.size,
+      })}`,
+    );
+    console.log("[VOICE_ORDER] ai fallback usage: false");
+
+    return res.json({
+      originalText: transcript,
+      language,
+      ttsLocale: getTtsLocaleForLanguage(language),
+      parsedCommand: {
+        action,
+        items,
+        notFound,
+      },
+      action,
+      items,
+      notFound,
       assistantReply,
     });
   } catch (error) {

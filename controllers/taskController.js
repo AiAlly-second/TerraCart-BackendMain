@@ -99,18 +99,22 @@ const buildHierarchyQuery = async (user) => {
   } else if (user.role === "franchise_admin") {
     query.franchiseId = user._id;
   } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
-    // Mobile users - get their cartId from user or employee record
-    let cartScope = user.cartId || user.cafeId;
-    if (!cartScope && user.employeeId) {
-      const employee = await Employee.findById(user.employeeId).lean();
-      cartScope = employee?.cartId || employee?.cafeId;
+    // Mobile users - always prefer Employee cart mapping to avoid stale
+    // user cart/cafe fields after reassignment.
+    let employee = null;
+    if (user.employeeId) {
+      employee = await Employee.findById(user.employeeId).lean();
     }
-    if (!cartScope && user.email) {
-      const employee = await Employee.findOne({
+    if (!employee && user._id) {
+      employee = await Employee.findOne({ userId: user._id }).lean();
+    }
+    if (!employee && user.email) {
+      employee = await Employee.findOne({
         email: user.email.toLowerCase(),
       }).lean();
-      cartScope = employee?.cartId || employee?.cafeId;
     }
+    const cartScope =
+      employee?.cartId || employee?.cafeId || user.cartId || user.cafeId;
     if (cartScope) {
       applyTaskCartScope(query, cartScope);
     } else {

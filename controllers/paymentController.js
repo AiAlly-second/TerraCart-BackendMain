@@ -586,9 +586,12 @@ const resolveOrderTokenNumber = (payment, order = null) => {
   return null;
 };
 
-const formatPaymentResponse = (payment, order = null) => {
+const formatPaymentResponse = (payment, order = null, extraPayload = null) => {
   const tokenNumber = resolveOrderTokenNumber(payment, order);
-  return {
+  const cartId = toSocketIdString(order?.cartId || order?.cafeId) || null;
+  const cafeId = toSocketIdString(order?.cafeId || order?.cartId) || null;
+
+  const payload = {
     id: payment._id,
     orderId: payment.orderId,
     amount: payment.amount,
@@ -606,7 +609,18 @@ const formatPaymentResponse = (payment, order = null) => {
     paidAt: payment.paidAt,
     cancelledAt: payment.cancelledAt,
     cancellationReason: payment.cancellationReason,
+    cartId,
+    cafeId,
   };
+
+  if (extraPayload && typeof extraPayload === "object") {
+    return {
+      ...payload,
+      ...extraPayload,
+    };
+  }
+
+  return payload;
 };
 
 const ensurePaymentForOrder = async (order, options = {}) => {
@@ -669,10 +683,6 @@ const MOBILE_PAYMENT_ROLES = new Set([
 const resolveMobileCartId = async (user) => {
   if (!user) return null;
 
-  if (user.cartId) {
-    return user.cartId;
-  }
-
   let employee = null;
   if (user.employeeId) {
     employee = await Employee.findById(user.employeeId).select("cartId cafeId").lean();
@@ -692,7 +702,11 @@ const resolveMobileCartId = async (user) => {
       .lean();
   }
 
-  return employee?.cartId || employee?.cafeId || user.cafeId || null;
+  if (employee?.cartId || employee?.cafeId) {
+    return employee.cartId || employee.cafeId;
+  }
+
+  return user.cartId || user.cafeId || null;
 };
 
 const resolvePaymentScope = async (user) => {
@@ -855,12 +869,15 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   const io = req.app.get("io");
   const emitToCafe = req.app.get("emitToCafe");
   const orderPayload = toClientOrderPayload(order);
+  const paymentPayload = formatPaymentResponse(payment, order);
   if (io) {
-    io.emit("paymentUpdated", formatPaymentResponse(payment));
+    io.emit("paymentUpdated", paymentPayload);
     io.emit("orderUpdated", orderPayload);
   }
-  if (order.cartId && io && emitToCafe) {
-    const cartId = order.cartId.toString();
+  const orderScopeCartId = toSocketIdString(order?.cartId || order?.cafeId);
+  if (orderScopeCartId && io && emitToCafe) {
+    const cartId = orderScopeCartId;
+    emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
     const statusPayload = buildOrderStatusUpdatedPayload(orderPayload);
     emitToCafe(io, cartId, "order:status:updated", orderPayload);
     emitToCafe(io, cartId, "order_status_updated", statusPayload);
@@ -1075,11 +1092,31 @@ exports.createPaymentIntent = async (req, res) => {
 
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
+    const isOnlinePendingRequest =
+      method === "ONLINE" &&
+      ["PENDING", "PROCESSING"].includes(String(payload.status || "").toUpperCase());
+    const orderReference =
+      order.takeawayToken != null && order.takeawayToken !== ""
+        ? `Token ${order.takeawayToken}`
+        : `Order ${orderId}`;
+    const paymentCreatedPayload = isOnlinePendingRequest
+      ? formatPaymentResponse(payment, order, {
+          notificationType: "payment_request",
+          title: "Payment Request",
+          body: `New online payment request for ${orderReference}.`,
+        })
+      : formatPaymentResponse(payment, order);
+
     if (io) {
-      io.emit("paymentCreated", formatPaymentResponse(payment));
+      io.emit("paymentCreated", paymentCreatedPayload);
       if (shouldAdvanceOrderForCashSelection) {
         io.emit("orderUpdated", toClientOrderPayload(order));
       }
+    }
+
+    const paymentCreatedCartId = toSocketIdString(order?.cartId || order?.cafeId);
+    if (paymentCreatedCartId && io && emitToCafe) {
+      emitToCafe(io, paymentCreatedCartId, "paymentCreated", paymentCreatedPayload);
     }
 
     if (shouldAdvanceOrderForCashSelection && order.cartId && io && emitToCafe) {
@@ -1122,7 +1159,7 @@ exports.createPaymentIntent = async (req, res) => {
       });
     }
 
-    return res.status(201).json(formatPaymentResponse(payment));
+    return res.status(201).json(formatPaymentResponse(payment, order));
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -1195,7 +1232,7 @@ exports.listPayments = async (req, res) => {
 
     const orders = paymentOrderIds.length
       ? await Order.find({ _id: { $in: paymentOrderIds } })
-          .select("_id takeawayToken")
+          .select("_id takeawayToken cartId cafeId")
           .lean()
       : [];
     const orderById = new Map(
@@ -1352,7 +1389,13 @@ exports.cancelPayment = async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.emit("paymentUpdated", formatPaymentResponse(payment, order));
+      const paymentPayload = formatPaymentResponse(payment, order);
+      io.emit("paymentUpdated", paymentPayload);
+      const emitToCafe = req.app.get("emitToCafe");
+      const cartId = toSocketIdString(order?.cartId || order?.cafeId);
+      if (emitToCafe && cartId) {
+        emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
+      }
     }
 
     return res.json(formatPaymentResponse(payment, order));
@@ -1475,7 +1518,13 @@ exports.verifyRazorpayPayment = async (req, res) => {
       await payment.save();
       const io = req.app.get("io");
       if (io) {
-        io.emit("paymentUpdated", formatPaymentResponse(payment, order));
+        const paymentPayload = formatPaymentResponse(payment, order);
+        io.emit("paymentUpdated", paymentPayload);
+        const emitToCafe = req.app.get("emitToCafe");
+        const cartId = toSocketIdString(order?.cartId || order?.cafeId);
+        if (emitToCafe && cartId) {
+          emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
+        }
       }
 
       return res.status(400).json({ message: "Razorpay signature verification failed." });

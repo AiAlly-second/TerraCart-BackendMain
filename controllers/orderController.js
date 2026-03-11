@@ -317,10 +317,8 @@ const buildEmployeeVisibleQueueMongoFilter = () => ({
 const resolveMobileCartId = async (user) => {
   if (!user) return null;
 
-  if (user.cartId || user.cafeId) {
-    return user.cartId || user.cafeId;
-  }
-
+  // Always prefer current Employee mapping to avoid stale user cart/cafe
+  // fields after staff reassignment.
   let employee = null;
   if (user.employeeId) {
     employee = await Employee.findById(user.employeeId).select("cartId cafeId").lean();
@@ -340,7 +338,12 @@ const resolveMobileCartId = async (user) => {
       .lean();
   }
 
-  return employee?.cartId || employee?.cafeId || null;
+  const employeeCartId = employee?.cartId || employee?.cafeId || null;
+  if (employeeCartId) {
+    return employeeCartId;
+  }
+
+  return user.cartId || user.cafeId || null;
 };
 
 const hasPrivilegedOrderAccess = async (user, order) => {
@@ -555,6 +558,44 @@ const getActiveTakeawayTokenQuery = (cartId) => ({
   ],
 });
 
+const TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES = Number.isFinite(
+  Number(process.env.TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES),
+)
+  ? Number(process.env.TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES)
+  : 330; // IST default
+
+const getTakeawayTokenBusinessDayRange = (referenceDate = new Date()) => {
+  const offsetMs = TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES * 60 * 1000;
+  // Shift timestamp into business timezone, truncate day, then shift back to UTC.
+  const shifted = new Date(referenceDate.getTime() + offsetMs);
+  const startShiftedUtcMs = Date.UTC(
+    shifted.getUTCFullYear(),
+    shifted.getUTCMonth(),
+    shifted.getUTCDate(),
+    0,
+    0,
+    0,
+    0,
+  );
+  const startUtc = new Date(startShiftedUtcMs - offsetMs);
+  const endUtc = new Date(startUtc.getTime() + 24 * 60 * 60 * 1000);
+  return { startUtc, endUtc };
+};
+
+const getTakeawayTokenDayQuery = (cartId) => {
+  const { startUtc, endUtc } = getTakeawayTokenBusinessDayRange();
+  return {
+    cartId,
+    serviceType: "TAKEAWAY",
+    orderType: { $ne: "DELIVERY" },
+    takeawayToken: { $ne: null },
+    createdAt: {
+      $gte: startUtc,
+      $lt: endUtc,
+    },
+  };
+};
+
 const findExistingTakeawayTokenForSession = async ({ cartId, sessionToken }) => {
   if (!cartId || !sessionToken) return null;
   const existingOrder = await Order.findOne({
@@ -579,9 +620,19 @@ const findExistingTakeawayTokenForSession = async ({ cartId, sessionToken }) => 
 const resolveTakeawayTokenAllocation = async ({ cartId, preferredToken = null }) => {
   if (!cartId) return { token: null, source: "unavailable" };
 
-  const existingTokens = await Order.find(getActiveTakeawayTokenQuery(cartId))
+  // Daily monotonic tokens per cart:
+  // - token increments through the day
+  // - never reuses completed/cancelled/returned numbers within same business day
+  // - resets to 1 next business day
+  const existingTokens = await Order.find(getTakeawayTokenDayQuery(cartId))
     .select("takeawayToken")
     .lean();
+
+  const todaysTokens = existingTokens
+    .map((order) => order.takeawayToken)
+    .filter((value) => Number.isInteger(value) && value > 0);
+  const maxToken = todaysTokens.length ? Math.max(...todaysTokens) : 0;
+  const nextToken = maxToken + 1;
 
   const usedTokens = new Set(
     existingTokens
@@ -593,14 +644,10 @@ const resolveTakeawayTokenAllocation = async ({ cartId, preferredToken = null })
   if (
     Number.isInteger(preferredNumber) &&
     preferredNumber > 0 &&
+    preferredNumber === nextToken &&
     !usedTokens.has(preferredNumber)
   ) {
-    return { token: preferredNumber, source: "preferred" };
-  }
-
-  let nextToken = 1;
-  while (usedTokens.has(nextToken)) {
-    nextToken += 1;
+    return { token: preferredNumber, source: "preferred_next" };
   }
 
   return { token: nextToken, source: "next" };
@@ -1723,9 +1770,19 @@ async function ensurePaymentRecord(order, options = {}) {
   return { payment, created };
 }
 
-function formatPaymentPayload(payment) {
+function formatPaymentPayload(payment, order = null) {
   const plain = payment?.toObject ? payment.toObject() : payment;
   if (!plain) return null;
+  const cartIdSource = order?.cartId || order?.cafeId || null;
+  const cafeIdSource = order?.cafeId || order?.cartId || null;
+  const cartId =
+    cartIdSource && typeof cartIdSource.toString === "function"
+      ? cartIdSource.toString()
+      : cartIdSource || null;
+  const cafeId =
+    cafeIdSource && typeof cafeIdSource.toString === "function"
+      ? cafeIdSource.toString()
+      : cafeIdSource || null;
   return {
     id: plain._id || plain.id,
     orderId: plain.orderId,
@@ -1742,6 +1799,8 @@ function formatPaymentPayload(payment) {
     paidAt: plain.paidAt,
     cancelledAt: plain.cancelledAt,
     cancellationReason: plain.cancellationReason,
+    cartId,
+    cafeId,
   };
 }
 
@@ -3498,7 +3557,7 @@ const createOrder = async (req, res) => {
 
       // Generate simple takeaway token (1, 2, 3, etc.) per cart.
       // Do not assign takeaway token for DELIVERY orders.
-      // REUSABLE: when orders are Paid/Cancelled/Returned, their tokens become free again.
+      // Daily monotonic: token never reuses within same business day and resets next day.
       if (cartId && !isDelivery && !isOfficeDeliveryOrder) {
         const tokenScopeCartId = normalizeObjectId(cartId);
         if (!tokenScopeCartId) {
@@ -5652,7 +5711,7 @@ const updateOrderStatus = async (req, res) => {
           description: "Payment recorded via order status update",
         });
         if (payment && io) {
-          const payload = formatPaymentPayload(payment);
+          const payload = formatPaymentPayload(payment, updatedOrder);
           if (payload) {
             io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
           }
@@ -5868,7 +5927,7 @@ const cancelOrderByCustomer = async (req, res) => {
         payment.cancellationReason = "Order returned";
         await payment.save();
         if (io) {
-          const payload = formatPaymentPayload(payment);
+          const payload = formatPaymentPayload(payment, order);
           if (payload) {
             io.emit("paymentUpdated", payload);
           }
@@ -6040,7 +6099,7 @@ const confirmPaymentByCustomer = async (req, res) => {
     });
 
     if (payment && io) {
-      const payload = formatPaymentPayload(payment);
+      const payload = formatPaymentPayload(payment, order);
       if (payload) {
         io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
       }
@@ -6132,7 +6191,7 @@ const deleteOrder = async (req, res) => {
         // Emit payment update event
         const io = req.app.get("io");
         if (io) {
-          const payload = formatPaymentPayload(payment);
+          const payload = formatPaymentPayload(payment, order);
           if (payload) {
             io.emit("paymentUpdated", payload);
           }
@@ -6470,7 +6529,7 @@ const convertToTakeaway = async (req, res) => {
 
           const io = req.app.get("io");
           if (io) {
-            const payload = formatPaymentPayload(originalPayment);
+            const payload = formatPaymentPayload(originalPayment, order);
             if (payload) {
               io.emit("paymentUpdated", payload);
             }
