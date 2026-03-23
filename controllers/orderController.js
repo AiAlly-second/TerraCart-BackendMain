@@ -2755,7 +2755,7 @@ const createOrder = async (req, res) => {
     );
     const normalizedOfficePaymentMode =
       normalizedSourceQrType === "OFFICE"
-        ? "ONLINE"
+        ? requestedNormalizedOfficePaymentMode
         : requestedNormalizedOfficePaymentMode;
     const resolvedOfficeName =
       normalizedSourceQrType === "OFFICE"

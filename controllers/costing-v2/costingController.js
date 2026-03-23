@@ -84,6 +84,7 @@ const DefaultMenu = require("../../models/defaultMenuModel");
 const FIFOService = require("../../services/costing-v2/fifoService");
 const WeightedAverageService = require("../../services/costing-v2/weightedAverageService");
 const { convertUnit } = require("../../utils/costing-v2/unitConverter");
+const { getFileUrl } = require("../../config/uploadConfig");
 const {
   buildCostingQuery,
   getAllowedOutlets,
@@ -3149,7 +3150,28 @@ exports.returnToInventory = async (req, res) => {
  */
 exports.directPurchase = async (req, res) => {
   try {
-    const { ingredientId, qty, uom, unitPrice, supplier, notes, cartId } = req.body;
+    const {
+      ingredientId,
+      qty: qtyRaw,
+      uom,
+      unitPrice: unitPriceRaw,
+      totalAmount: totalAmountRaw,
+      supplier,
+      notes,
+      cartId,
+    } = req.body;
+
+    const qty = Number(qtyRaw);
+    const unitPriceInput =
+      unitPriceRaw === undefined || unitPriceRaw === null || unitPriceRaw === ""
+        ? null
+        : Number(unitPriceRaw);
+    const totalAmountInput =
+      totalAmountRaw === undefined ||
+      totalAmountRaw === null ||
+      totalAmountRaw === ""
+        ? null
+        : Number(totalAmountRaw);
 
     const ingredient = await Ingredient.findById(ingredientId);
     if (!ingredient) {
@@ -3178,15 +3200,58 @@ exports.directPurchase = async (req, res) => {
     }
 
     // Validate inputs
-    if (qty <= 0) return res.status(400).json({ success: false, message: "Quantity must be > 0" });
-    if (unitPrice < 0) return res.status(400).json({ success: false, message: "Price cannot be negative" });
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Quantity must be > 0" });
+    }
+
+    if (totalAmountInput !== null) {
+      if (!Number.isFinite(totalAmountInput) || totalAmountInput < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Total amount cannot be negative",
+        });
+      }
+    }
+
+    if (unitPriceInput !== null) {
+      if (!Number.isFinite(unitPriceInput) || unitPriceInput < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Price cannot be negative",
+        });
+      }
+    }
+
+    let resolvedUnitPrice = unitPriceInput;
+    if (totalAmountInput !== null) {
+      resolvedUnitPrice = totalAmountInput / qty;
+    }
+
+    if (
+      resolvedUnitPrice === null ||
+      !Number.isFinite(resolvedUnitPrice) ||
+      resolvedUnitPrice < 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide a valid unitPrice or totalAmount",
+      });
+    }
 
     // Convert to base unit
     const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
 
     // Calculate cost per base unit
     const conversionFactor = safeConvertToBaseUnit(ingredient, 1, uom);
-    const unitCostInBaseUnit = unitPrice / conversionFactor;
+    if (!Number.isFinite(conversionFactor) || conversionFactor <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid unit conversion for selected UOM",
+      });
+    }
+    const unitCostInBaseUnit = resolvedUnitPrice / conversionFactor;
 
     // Update Weighted Average
     const result = await WeightedAverageService.updateWeightedAverage(
@@ -3198,7 +3263,19 @@ exports.directPurchase = async (req, res) => {
 
     // Create Inventory Transaction
     // costAllocated = qtyInBaseUnit * unitCostInBaseUnit (should equal qty * unitPrice)
-    const costAllocated = qtyInBaseUnit * unitCostInBaseUnit;
+    const computedTotalAmount =
+      totalAmountInput !== null ? totalAmountInput : qty * resolvedUnitPrice;
+    const costAllocated = Number(computedTotalAmount);
+
+    const trimmedSupplier = supplier?.toString().trim();
+    const trimmedNotes = notes?.toString().trim();
+    const transactionNotes = trimmedNotes
+      ? `${trimmedNotes}${trimmedSupplier ? ` (Supplier: ${trimmedSupplier})` : ""}`
+      : `Direct Purchase from ${trimmedSupplier || "N/A"}`;
+
+    const invoiceImagePath = req.file
+      ? getFileUrl(req, req.file, "invoices")
+      : null;
 
     const transaction = new InventoryTransaction({
       ingredientId,
@@ -3206,19 +3283,33 @@ exports.directPurchase = async (req, res) => {
       qty,
       uom,
       qtyInBaseUnit,
-      unitPrice, // Store the price per UOM
+      unitPrice: resolvedUnitPrice, // Store derived price per UOM
       costAllocated,
       // Keep consistent with schema enum and weighted-average lookups.
       refType: "purchase",
       date: new Date(),
-      notes: notes ? `${notes} (Supplier: ${supplier || 'N/A'})` : `Direct Purchase from ${supplier || 'N/A'}`,
+      notes: transactionNotes,
       recordedBy: req.user._id,
       cartId: finalOutletId,
+      invoiceImagePath,
+      invoiceImageOriginalName: req.file?.originalname || null,
+      invoiceImageMimeType: req.file?.mimetype || null,
     });
 
     await transaction.save();
 
-    res.json({ success: true, data: { ...result, transaction } });
+    res.json({
+      success: true,
+      data: {
+        ...result,
+        transaction,
+        pricing: {
+          qty,
+          unitPrice: resolvedUnitPrice,
+          totalAmount: computedTotalAmount,
+        },
+      },
+    });
   } catch (error) {
     console.error("[DIRECT_PURCHASE] Error:", error);
     res.status(400).json({ success: false, message: error.message });

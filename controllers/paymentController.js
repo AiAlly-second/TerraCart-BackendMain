@@ -18,6 +18,7 @@ const {
 } = require("../utils/orderContract");
 const {
   notifyNewOrder,
+  notifyPaymentRequest,
   notifyPaymentReceived,
 } = require("../services/notificationEventService");
 const { Jimp } = require("jimp");
@@ -986,7 +987,9 @@ exports.createPaymentIntent = async (req, res) => {
 
     const isOfficeOrder =
       String(order.sourceQrType || "").trim().toUpperCase() === "OFFICE";
-    const officePaymentMode = isOfficeOrder ? "ONLINE" : null;
+    const officePaymentMode = isOfficeOrder
+      ? String(order.officePaymentMode || "ONLINE").trim().toUpperCase()
+      : null;
 
     if (officePaymentMode === "ONLINE" && method !== "ONLINE") {
       return res.status(400).json({
@@ -1092,18 +1095,27 @@ exports.createPaymentIntent = async (req, res) => {
 
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
+    const normalizedPaymentStatus = String(
+      payload.status || payment.status || "",
+    ).toUpperCase();
     const isOnlinePendingRequest =
       method === "ONLINE" &&
-      ["PENDING", "PROCESSING"].includes(String(payload.status || "").toUpperCase());
+      ["PENDING", "PROCESSING"].includes(normalizedPaymentStatus);
+    const isCashPendingRequest =
+      method === "CASH" &&
+      ["PENDING", "PROCESSING", "CASH_PENDING"].includes(normalizedPaymentStatus);
+    const isEmployeePaymentRequest = isOnlinePendingRequest || isCashPendingRequest;
     const orderReference =
       order.takeawayToken != null && order.takeawayToken !== ""
         ? `Token ${order.takeawayToken}`
         : `Order ${orderId}`;
-    const paymentCreatedPayload = isOnlinePendingRequest
+    const paymentCreatedPayload = isEmployeePaymentRequest
       ? formatPaymentResponse(payment, order, {
           notificationType: "payment_request",
           title: "Payment Request",
-          body: `New online payment request for ${orderReference}.`,
+          body: isCashPendingRequest
+            ? `New cash payment request for ${orderReference}.`
+            : `New online payment request for ${orderReference}.`,
         })
       : formatPaymentResponse(payment, order);
 
@@ -1117,6 +1129,20 @@ exports.createPaymentIntent = async (req, res) => {
     const paymentCreatedCartId = toSocketIdString(order?.cartId || order?.cafeId);
     if (paymentCreatedCartId && io && emitToCafe) {
       emitToCafe(io, paymentCreatedCartId, "paymentCreated", paymentCreatedPayload);
+    }
+
+    if (isEmployeePaymentRequest) {
+      notifyPaymentRequest({
+        io,
+        emitToCafeFn: emitToCafe,
+        order,
+        payment,
+      }).catch((pushError) => {
+        console.error(
+          "[PAYMENT] payment_request notification failed:",
+          pushError?.message || pushError,
+        );
+      });
     }
 
     if (shouldAdvanceOrderForCashSelection && order.cartId && io && emitToCafe) {

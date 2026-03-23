@@ -1,4 +1,6 @@
 const express = require("express");
+const multer = require("multer");
+const path = require("path");
 const router = express.Router();
 const {
   // Suppliers
@@ -71,6 +73,83 @@ const {
 } = require("../controllers/costing-v2/costingController");
 const { protect } = require("../middleware/authMiddleware");
 const { authorize } = require("../middleware/authMiddleware");
+const { getStorageCallback } = require("../config/uploadConfig");
+
+const uploadInvoiceImage = multer({
+  storage: getStorageCallback("invoices"),
+  limits: {
+    fileSize: 15 * 1024 * 1024,
+  },
+  fileFilter: (_req, file, cb) => {
+    const allowedExtensions = new Set([
+      ".jpg",
+      ".jpeg",
+      ".png",
+      ".webp",
+      ".heic",
+      ".heif",
+      ".pdf",
+    ]);
+    const ext = path.extname(file.originalname || "").toLowerCase();
+
+    const allowedMimes = new Set([
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/webp",
+      "image/heic",
+      "image/heif",
+      "image/heic-sequence",
+      "image/heif-sequence",
+      "application/pdf",
+      // Some devices/providers send generic type for camera-captured files.
+      "application/octet-stream",
+    ]);
+    const mime = (file.mimetype || "").toLowerCase();
+
+    const isAllowedMime = allowedMimes.has(mime);
+    const isAllowedByExtension =
+      allowedExtensions.has(ext) &&
+      (mime === "application/octet-stream" || mime === "");
+
+    if (isAllowedMime || isAllowedByExtension) {
+      cb(null, true);
+    } else {
+      cb(
+        new Error(
+          "Only invoice images/PDF files (JPG, PNG, WEBP, HEIC, HEIF, PDF) are allowed"
+        ),
+        false
+      );
+    }
+  },
+});
+
+const handleInventoryInvoiceUpload = (req, res, next) => {
+  uploadInvoiceImage.single("invoiceImage")(req, res, (error) => {
+    if (!error) {
+      return next();
+    }
+
+    if (error instanceof multer.MulterError) {
+      if (error.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({
+          success: false,
+          message: "Invoice file is too large. Maximum allowed size is 15MB.",
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: error.message || "Invoice upload failed.",
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      message: error.message || "Invalid invoice file.",
+    });
+  });
+};
 
 // All routes require authentication
 router.use(protect);
@@ -172,6 +251,7 @@ router.post(
 router.post(
   "/inventory/direct-purchase",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  handleInventoryInvoiceUpload,
   directPurchase
 );
 router.get(

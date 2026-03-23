@@ -65,6 +65,19 @@ const inventoryTransactionSchema = new mongoose.Schema(
       type: Number,
       default: null, // Only set for purchase transactions (type: "IN", refType: "purchase")
     },
+    // Optional invoice image attached while recording manual/direct purchases.
+    invoiceImagePath: {
+      type: String,
+      default: null,
+    },
+    invoiceImageOriginalName: {
+      type: String,
+      default: null,
+    },
+    invoiceImageMimeType: {
+      type: String,
+      default: null,
+    },
     notes: {
       type: String,
       default: "",

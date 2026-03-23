@@ -1,6 +1,30 @@
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 
+const STOCK_EPSILON = 1e-3;
+
+const roundTo = (value, decimals = 6) => {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round((numericValue + Number.EPSILON) * factor) / factor;
+};
+
+const normalizeQuantity = (value) => {
+  const rounded = roundTo(value, 6);
+  if (Math.abs(rounded) <= STOCK_EPSILON) return 0;
+  return rounded;
+};
+
+const hasSufficientQuantity = (available, required) =>
+  normalizeQuantity(available) + STOCK_EPSILON >= normalizeQuantity(required);
+
+const formatQuantityForMessage = (value) => {
+  const normalized = normalizeQuantity(value);
+  const fixed = normalized.toFixed(3);
+  return fixed.replace(/\.?0+$/, "");
+};
+
 const getSafeConversionFactor = (ingredient, fromUom) => {
   const normalizedFrom = (fromUom || ingredient?.uom || ingredient?.baseUnit || "")
     .toString()
@@ -84,8 +108,10 @@ class WeightedAverageService {
       }
     }
 
+    const purchaseQty = normalizeQuantity(newPurchaseQty);
+
     // Validate inputs
-    if (newPurchaseQty <= 0) {
+    if (purchaseQty <= 0) {
       throw new Error("Purchase quantity must be greater than 0");
     }
     if (newPurchaseCostPerBaseUnit < 0) {
@@ -100,7 +126,7 @@ class WeightedAverageService {
       // Cart-specific ingredient
       if (cartId && ingredient.cartId.toString() === cartId.toString()) {
         // Same outlet - use ingredient values directly
-        existingQty = ingredient.qtyOnHand || 0;
+        existingQty = normalizeQuantity(ingredient.qtyOnHand || 0);
         existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
       } else {
         // Different outlet - don't update this ingredient's stock
@@ -116,7 +142,7 @@ class WeightedAverageService {
       // Shared ingredient
       if (!cartId) {
         // Global purchase (no cartId) - use global qtyOnHand and currentCostPerBaseUnit
-        existingQty = ingredient.qtyOnHand || 0;
+        existingQty = normalizeQuantity(ingredient.qtyOnHand || 0);
         existingAvgCost = ingredient.currentCostPerBaseUnit || 0;
       } else {
         // Outlet-specific purchase - calculate existing stock and weighted average from transactions
@@ -178,7 +204,7 @@ class WeightedAverageService {
           }
         }
         
-        existingQty = Math.max(0, totalQty);
+        existingQty = normalizeQuantity(Math.max(0, totalQty));
         // existingAvgCost is already calculated above from transactions
       }
     }
@@ -186,11 +212,11 @@ class WeightedAverageService {
     // Calculate weighted average cost
     // Formula: (Existing Stock Qty × Existing Avg Cost + New Purchase Qty × New Purchase Cost) / (Existing Stock Qty + New Purchase Qty)
     let newAverageCost = 0;
-    const totalQty = existingQty + newPurchaseQty;
+    const totalQty = normalizeQuantity(existingQty + purchaseQty);
     
     // Log calculation inputs for debugging
     if (process.env.NODE_ENV === 'development') {
-      console.log(`[Weighted Average Calc] ${ingredient.name}: existingQty=${existingQty} ${ingredient.baseUnit}, existingAvgCost=₹${existingAvgCost.toFixed(6)}/${ingredient.baseUnit}, newPurchaseQty=${newPurchaseQty} ${ingredient.baseUnit}, newPurchaseCost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
+      console.log(`[Weighted Average Calc] ${ingredient.name}: existingQty=${existingQty} ${ingredient.baseUnit}, existingAvgCost=₹${existingAvgCost.toFixed(6)}/${ingredient.baseUnit}, newPurchaseQty=${purchaseQty} ${ingredient.baseUnit}, newPurchaseCost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}/${ingredient.baseUnit}`);
     }
     
     if (totalQty > 0) {
@@ -198,7 +224,7 @@ class WeightedAverageService {
         // We have existing stock - calculate weighted average
         // Even if existingAvgCost is 0, we should still calculate (though this shouldn't happen normally)
         const existingTotalValue = existingQty * (existingAvgCost || 0);
-        const newPurchaseValue = newPurchaseQty * newPurchaseCostPerBaseUnit;
+        const newPurchaseValue = purchaseQty * newPurchaseCostPerBaseUnit;
         const totalValue = existingTotalValue + newPurchaseValue;
         newAverageCost = totalValue / totalQty;
         
@@ -257,7 +283,7 @@ class WeightedAverageService {
         ingredient.currentCostPerBaseUnit = newAverageCost; // Use weighted average cost
         ingredient.lastReceivedAt = new Date();
         if (process.env.NODE_ENV === 'development') {
-          console.log(`[Weighted Average] Shared ingredient ${ingredient.name}: Outlet-specific purchase (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions. Existing: ${existingQty}, New purchase: ${newPurchaseQty}, Total: ${totalQty}, existing cost=₹${existingAvgCost.toFixed(6)}, new purchase cost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}, weighted avg=₹${newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
+          console.log(`[Weighted Average] Shared ingredient ${ingredient.name}: Outlet-specific purchase (cartId: ${cartId}) - NOT updating global stock. Stock tracked via transactions. Existing: ${existingQty}, New purchase: ${purchaseQty}, Total: ${totalQty}, existing cost=₹${existingAvgCost.toFixed(6)}, new purchase cost=₹${newPurchaseCostPerBaseUnit.toFixed(6)}, weighted avg=₹${newAverageCost.toFixed(6)}/${ingredient.baseUnit}`);
         }
         await ingredient.save();
         return {
@@ -316,7 +342,8 @@ class WeightedAverageService {
       }
     }
 
-    if (qtyToConsume <= 0) {
+    const requestedQty = normalizeQuantity(qtyToConsume);
+    if (requestedQty <= 0) {
       throw new Error("Quantity to consume must be greater than 0");
     }
 
@@ -326,7 +353,7 @@ class WeightedAverageService {
 
     if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - use values directly
-      availableQty = ingredient.qtyOnHand || 0;
+      availableQty = normalizeQuantity(ingredient.qtyOnHand || 0);
       avgCost = ingredient.currentCostPerBaseUnit || 0;
     } else if (cartId) {
       // Shared ingredient - calculate outlet-specific values from transactions
@@ -347,7 +374,7 @@ class WeightedAverageService {
         }
       }
 
-      availableQty = Math.max(0, totalQty);
+      availableQty = normalizeQuantity(Math.max(0, totalQty));
       
       // SIMPLE: Use last purchase price (exact price, no averaging)
       // Find the most recent purchase transaction to get exact purchase price
@@ -374,13 +401,13 @@ class WeightedAverageService {
       // This allows cart admins to use shared ingredients that haven't been purchased outlet-specifically yet
       if (availableQty === 0 && outletTransactions.length === 0 && ingredient.qtyOnHand > 0) {
         // No outlet-specific stock, but global stock exists - allow consumption from global stock
-        availableQty = ingredient.qtyOnHand || 0;
+        availableQty = normalizeQuantity(ingredient.qtyOnHand || 0);
         avgCost = ingredient.currentCostPerBaseUnit || 0;
       }
       // When no purchase history exists, avgCost uses ingredient.currentCostPerBaseUnit (set via Purchases or manual) for food cost.
     } else {
       // Global/shared ingredient - no cartId specified
-      availableQty = ingredient.qtyOnHand || 0;
+      availableQty = normalizeQuantity(ingredient.qtyOnHand || 0);
       avgCost = ingredient.currentCostPerBaseUnit || 0;
     }
 
@@ -388,26 +415,29 @@ class WeightedAverageService {
     // Relaxed check: Allow consumption for shared ingredients even if local stock is 0
     // Validate sufficient stock (unless allowNegativeStock is true for waste tracking)
     // Relaxed check: Allow consumption for shared ingredients even if local stock is 0
-    if (availableQty < qtyToConsume && !allowNegativeStock) {
-       console.warn(`[WeightedAverage] Insufficient stock for ${ingredient.name}. Available: ${availableQty}, Required: ${qtyToConsume}.`);
-       let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableQty} ${ingredient.baseUnit}, Required: ${qtyToConsume} ${ingredient.baseUnit}`;
-       
-       if (availableQty === 0) {
+    if (!hasSufficientQuantity(availableQty, requestedQty) && !allowNegativeStock) {
+       const availableForMessage = formatQuantityForMessage(availableQty);
+       const requiredForMessage = formatQuantityForMessage(requestedQty);
+       console.warn(`[WeightedAverage] Insufficient stock for ${ingredient.name}. Available: ${availableForMessage}, Required: ${requiredForMessage}.`);
+       let errorMessage = `Insufficient stock for ${ingredient.name}. Available: ${availableForMessage} ${ingredient.baseUnit}, Required: ${requiredForMessage} ${ingredient.baseUnit}`;
+
+       if (availableQty <= STOCK_EPSILON) {
          errorMessage += `. Please make a purchase for this ingredient first.`;
        }
-       
+
        throw new Error(errorMessage);
-    }
+     }
 
     // SIMPLE: Calculate cost allocated using last purchase price (exact price, no averaging)
-    const costAllocated = qtyToConsume * avgCost;
+    const costAllocated = requestedQty * avgCost;
 
     // Update ingredient stock (validate no negative stock unless allowNegativeStock is true)
-    const newQty = availableQty - qtyToConsume;
-    
-    if (newQty < 0 && !allowNegativeStock) {
+    const rawNewQty = normalizeQuantity(availableQty - requestedQty);
+    const newQty = Math.abs(rawNewQty) <= STOCK_EPSILON ? 0 : rawNewQty;
+
+    if (newQty < -STOCK_EPSILON && !allowNegativeStock) {
       throw new Error(
-        `Stock update would result in negative quantity. Available: ${availableQty} ${ingredient.baseUnit}, Consuming: ${qtyToConsume} ${ingredient.baseUnit}`
+        `Stock update would result in negative quantity. Available: ${formatQuantityForMessage(availableQty)} ${ingredient.baseUnit}, Consuming: ${formatQuantityForMessage(requestedQty)} ${ingredient.baseUnit}`
       );
     } 
     
@@ -435,7 +465,7 @@ class WeightedAverageService {
 
     return {
       costAllocated,
-      remainingQty: availableQty - qtyToConsume,
+      remainingQty: newQty,
       avgCostUsed: avgCost,
     };
   }
@@ -475,7 +505,8 @@ class WeightedAverageService {
       }
     }
 
-    if (qtyToReturn <= 0) {
+    const returnQty = normalizeQuantity(qtyToReturn);
+    if (returnQty <= 0) {
       throw new Error("Quantity to return must be greater than 0");
     }
 
@@ -532,7 +563,7 @@ class WeightedAverageService {
     }
 
     // Calculate cost at current average (don't recalculate average)
-    const costAllocated = qtyToReturn * avgCost;
+    const costAllocated = returnQty * avgCost;
 
     // Update ingredient stock
     // IMPORTANT: Only update ingredient.qtyOnHand for:
@@ -541,11 +572,11 @@ class WeightedAverageService {
     // For shared ingredients with cartId, stock is tracked via transactions only
     if (cartId && ingredient.cartId && ingredient.cartId.toString() === cartId.toString()) {
       // Cart-specific ingredient - update directly
-      ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+      ingredient.qtyOnHand = normalizeQuantity((ingredient.qtyOnHand || 0) + returnQty);
       ingredient.lastReceivedAt = new Date();
     } else if (!ingredient.cartId && !cartId) {
       // Shared ingredient with NO cartId - global return, update global stock
-      ingredient.qtyOnHand = (ingredient.qtyOnHand || 0) + qtyToReturn;
+      ingredient.qtyOnHand = normalizeQuantity((ingredient.qtyOnHand || 0) + returnQty);
       ingredient.lastReceivedAt = new Date();
     } else if (!ingredient.cartId && cartId) {
       // Shared ingredient with cartId - outlet-specific return
@@ -576,12 +607,12 @@ class WeightedAverageService {
           if (totalQty < 0) totalQty = 0;
         }
       }
-      updatedQtyOnHand = Math.max(0, totalQty);
+      updatedQtyOnHand = normalizeQuantity(Math.max(0, totalQty));
     }
 
     return {
       costAllocated,
-      updatedQtyOnHand: updatedQtyOnHand,
+      updatedQtyOnHand: normalizeQuantity(updatedQtyOnHand),
       avgCostUsed: avgCost,
     };
   }

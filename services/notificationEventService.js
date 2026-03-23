@@ -11,6 +11,7 @@ const {
 const NOTIFICATION_EVENT_TYPES = Object.freeze({
   NEW_ORDER: "new_order",
   ORDER_READY: "order_ready",
+  PAYMENT_REQUEST: "payment_request",
   ASSISTANCE_REQUEST: "assistance_request",
   PAYMENT_RECEIVED: "payment_received",
   ORDER_CANCELLED: "order_cancelled",
@@ -212,6 +213,78 @@ const notifyPaymentReceived = async ({ io, emitToCafeFn, order }) => {
   return pushResult;
 };
 
+const notifyPaymentRequest = async ({
+  io,
+  emitToCafeFn,
+  order,
+  payment = null,
+}) => {
+  const cartId = order?.cartId || order?.cafeId || null;
+  const orderId = toObjectIdString(order?._id);
+  const paymentId = toObjectIdString(payment?._id || payment?.id);
+  const takeawayToken =
+    order?.takeawayToken != null ? String(order.takeawayToken) : "";
+  const paymentMethod = String(payment?.method || "").trim().toUpperCase();
+  const isCashFlow = paymentMethod === "CASH" || paymentMethod === "COD";
+  const title = "Payment Request";
+  const body = takeawayToken
+    ? isCashFlow
+      ? `New cash payment request for token ${takeawayToken}.`
+      : `New online payment request for token ${takeawayToken}.`
+    : isCashFlow
+      ? "New cash payment request received."
+      : "New online payment request received.";
+
+  const payload = {
+    notificationType: NOTIFICATION_EVENT_TYPES.PAYMENT_REQUEST,
+    event: "payment:created",
+    orderId: orderId || "",
+    paymentId: paymentId || "",
+    cartId: toObjectIdString(cartId) || "",
+    method: paymentMethod || null,
+    status: payment?.status || null,
+    paymentStatus: order?.paymentStatus || null,
+    title,
+    body,
+    updatedAt: order?.updatedAt || new Date().toISOString(),
+    takeawayToken,
+  };
+
+  emitToCafe({
+    io,
+    emitToCafeFn,
+    cartId,
+    event: NOTIFICATION_EVENT_TYPES.PAYMENT_REQUEST,
+    payload,
+  });
+
+  const roles = ["waiter", "captain", "manager"];
+  const tokens = await resolveAudienceTokens({ cartId, roles });
+  if (!tokens.length) {
+    return {
+      success: false,
+      skipped: true,
+      reason: "TOKEN_MISSING",
+      event: NOTIFICATION_EVENT_TYPES.PAYMENT_REQUEST,
+      cartId: toObjectIdString(cartId),
+      orderId,
+      paymentId,
+    };
+  }
+
+  const pushPayload = { title, body, data: payload };
+
+  const pushResult = await sendPushToTokens(tokens, pushPayload);
+  return {
+    ...pushResult,
+    event: NOTIFICATION_EVENT_TYPES.PAYMENT_REQUEST,
+    cartId: toObjectIdString(cartId),
+    orderId,
+    paymentId,
+    tokenCount: tokens.length,
+  };
+};
+
 const notifyOrderCancelled = async ({ io, emitToCafeFn, order, reason = null }) => {
   const cartId = order?.cartId || null;
   emitToCafe({
@@ -327,6 +400,7 @@ module.exports = {
   NOTIFICATION_EVENT_TYPES,
   notifyNewOrder,
   notifyOrderReady,
+  notifyPaymentRequest,
   notifyPaymentReceived,
   notifyOrderCancelled,
   notifyAssistanceRequestCreated,

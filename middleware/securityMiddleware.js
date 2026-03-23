@@ -424,6 +424,7 @@ const errorHandler = (err, req, res, next) => {
   if (err.name === 'CastError') statusCode = 400;
   if (err.name === 'JsonWebTokenError') statusCode = 401;
   if (err.name === 'TokenExpiredError') statusCode = 401;
+  if (err.name === 'MulterError') statusCode = 400;
 
   // Send safe error response
   res.status(statusCode).json({
