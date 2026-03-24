@@ -175,6 +175,16 @@ const orderSchema = new mongoose.Schema(
       enum: ["ONLINE", "COD", "BOTH", null],
       default: null,
     },
+    isVIP: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    vipMeta: {
+      name: { type: String, trim: true, default: null },
+      address: { type: String, trim: true, default: null },
+      phone: { type: String, trim: true, default: null },
+    },
     // Special instructions/notes from customer
     specialInstructions: { type: String },
     kotLines: { type: [kotLineSchema], default: [] },

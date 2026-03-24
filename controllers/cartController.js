@@ -384,6 +384,7 @@ exports.updateCartSettings = async (req, res) => {
     const {
       pickupEnabled,
       deliveryEnabled,
+      allowVipQR,
       deliveryRadius,
       deliveryCharge,
       pinCode,
@@ -419,6 +420,7 @@ exports.updateCartSettings = async (req, res) => {
         location: user.location || "",
         pickupEnabled: true,
         deliveryEnabled: false,
+        allowVipQR: false,
         deliveryRadius: 5,
         deliveryCharge: 0,
         isActive: true,
@@ -431,6 +433,7 @@ exports.updateCartSettings = async (req, res) => {
     const updateData = {};
     if (pickupEnabled !== undefined) updateData.pickupEnabled = pickupEnabled;
     if (deliveryEnabled !== undefined) updateData.deliveryEnabled = deliveryEnabled;
+    if (allowVipQR !== undefined) updateData.allowVipQR = !!allowVipQR;
     if (deliveryRadius !== undefined) updateData.deliveryRadius = deliveryRadius;
     if (deliveryCharge !== undefined) updateData.deliveryCharge = deliveryCharge;
     if (pinCode !== undefined) updateData.pinCode = pinCode;
@@ -583,6 +586,7 @@ exports.getMyCartSettings = async (req, res) => {
         location: user.location || "",
         pickupEnabled: true,
         deliveryEnabled: false,
+        allowVipQR: false,
         deliveryRadius: 5,
         deliveryCharge: 0,
         isActive: true,
@@ -628,7 +632,7 @@ exports.getCartByAdminId = async (req, res) => {
     }
 
     const cart = await Cart.findOne({ cartAdminId: userId })
-      .select("name location address coordinates pickupEnabled deliveryEnabled deliveryRadius deliveryCharge contactPhone contactEmail")
+      .select("name location address coordinates pickupEnabled deliveryEnabled allowVipQR deliveryRadius deliveryCharge contactPhone contactEmail")
       .populate("cartAdminId", "name cartName cafeName email")
       .populate("franchiseId", "name")
       .lean();

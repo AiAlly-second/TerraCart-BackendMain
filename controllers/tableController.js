@@ -154,6 +154,7 @@ const sanitizeOfficePaymentMode = (value, fallback = "ONLINE") => {
 const normalizeQrContextPayload = (input = {}) => {
   const qrContextTypeRaw =
     input.qrContextType === "OFFICE" ? "OFFICE" : "TABLE";
+  const isVIP = input.isVIP === true;
 
   const officeName = sanitizeTextField(input.officeName);
   const officeAddress = sanitizeTextField(input.officeAddress);
@@ -176,6 +177,7 @@ const normalizeQrContextPayload = (input = {}) => {
       qrContextTypeRaw === "OFFICE" ? officeDeliveryCharge : 0,
     officePaymentMode:
       qrContextTypeRaw === "OFFICE" ? officePaymentMode : "ONLINE",
+    isVIP: qrContextTypeRaw === "OFFICE" ? isVIP : false,
   };
 };
 
@@ -217,6 +219,7 @@ const buildPublicTableResponse = (table, waitlistLength = 0, options = {}) => {
     officeAddress: table.officeAddress || null,
     officePhone: table.officePhone || null,
     officeDeliveryCharge: Number(table.officeDeliveryCharge || 0),
+    isVIP: table.isVIP === true,
     officePaymentMode:
       isOfficeQr
         ? sanitizeOfficePaymentMode(table.officePaymentMode, "ONLINE")
@@ -1430,6 +1433,7 @@ exports.createTable = async (req, res) => {
       officePhone,
       officeDeliveryCharge,
       officePaymentMode,
+      isVIP,
     } = req.body;
 
     const normalizedContext = normalizeQrContextPayload({
@@ -1439,6 +1443,7 @@ exports.createTable = async (req, res) => {
       officePhone,
       officeDeliveryCharge,
       officePaymentMode,
+      isVIP,
     });
     if (
       normalizedContext.qrContextType === "OFFICE" &&
@@ -1576,6 +1581,7 @@ exports.createTable = async (req, res) => {
       officePhone: normalizedContext.officePhone,
       officeDeliveryCharge: normalizedContext.officeDeliveryCharge,
       officePaymentMode: normalizedContext.officePaymentMode,
+      isVIP: normalizedContext.isVIP,
     });
 
     return res.status(201).json(table);
@@ -1770,6 +1776,7 @@ exports.updateTable = async (req, res) => {
       "officePhone",
       "officeDeliveryCharge",
       "officePaymentMode",
+      "isVIP",
     ];
     for (const field of allowedFields) {
       if (field in req.body) {
@@ -1841,6 +1848,7 @@ exports.updateTable = async (req, res) => {
       "officePhone",
       "officeDeliveryCharge",
       "officePaymentMode",
+      "isVIP",
     ].some((field) => field in req.body);
     if (hasQrContextField) {
       const normalizedContext = normalizeQrContextPayload({
@@ -1868,6 +1876,8 @@ exports.updateTable = async (req, res) => {
           updates.officePaymentMode !== undefined
             ? updates.officePaymentMode
             : table.officePaymentMode,
+        isVIP:
+          updates.isVIP !== undefined ? updates.isVIP : table.isVIP === true,
       });
 
       if (
@@ -1893,6 +1903,7 @@ exports.updateTable = async (req, res) => {
       updates.officePhone = normalizedContext.officePhone;
       updates.officeDeliveryCharge = normalizedContext.officeDeliveryCharge;
       updates.officePaymentMode = normalizedContext.officePaymentMode;
+      updates.isVIP = normalizedContext.isVIP;
     }
 
     const isOfficeContextAfterUpdate = isOfficeQrContext({

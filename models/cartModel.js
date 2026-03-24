@@ -33,6 +33,8 @@ const cartSchema = new mongoose.Schema(
     // Order fulfillment options
     pickupEnabled: { type: Boolean, default: true },
     deliveryEnabled: { type: Boolean, default: false },
+    // Feature flag: expose VIP QR creation in admin panel when enabled.
+    allowVipQR: { type: Boolean, default: false },
     deliveryRadius: { type: Number, default: 5 }, // Maximum delivery radius in km
     deliveryCharge: { type: Number, default: 0 }, // Delivery charge in rupees
     // Menu tracking

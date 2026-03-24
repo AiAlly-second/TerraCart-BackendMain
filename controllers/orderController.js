@@ -934,8 +934,18 @@ const isCashOnDeliveryOrder = (order) =>
 const requiresPaymentBeforeProceeding = (order) => {
   const isOfficeOrder = normalizeUpper(order?.sourceQrType) === "OFFICE";
   if (isOfficeOrder) {
-    // Business rule: OFFICE QR orders are prepaid-only.
-    return true;
+    const officePaymentMode = normalizeOfficePaymentMode(
+      order?.officePaymentMode,
+      "ONLINE",
+    );
+    if (officePaymentMode === "ONLINE") {
+      return true;
+    }
+    if (officePaymentMode === "COD") {
+      return false;
+    }
+    // BOTH: allow progression only when explicitly marked as CASH/COD flow.
+    return !isCashOnDeliveryOrder(order);
   }
 
   const serviceType = normalizeUpper(order?.serviceType);
@@ -2672,8 +2682,12 @@ const createOrder = async (req, res) => {
       sourceQrType,
       sourceQrContext,
       officeName,
+      officeAddress,
+      officePhone,
       officeDeliveryCharge,
       officePaymentMode,
+      isVIP,
+      vipMeta,
       idempotencyKey,
       paymentRequiredBeforeProceeding: requestedPaymentRequiredBeforeProceeding,
     } = req.body;
@@ -2730,7 +2744,7 @@ const createOrder = async (req, res) => {
     if (tableId && mongoose.Types.ObjectId.isValid(tableId)) {
       officeTableContext = await Table.findById(tableId)
         .select(
-          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode cartId cafeId",
+          "qrContextType officeName officeAddress officePhone officeDeliveryCharge officePaymentMode isVIP cartId cafeId",
         )
         .lean();
       if (officeTableContext?.qrContextType === "OFFICE") {
@@ -2762,6 +2776,35 @@ const createOrder = async (req, res) => {
         ? requestedOfficeName ||
           String(officeTableContext?.officeName || "").trim()
         : "";
+    const requestVipMeta =
+      vipMeta && typeof vipMeta === "object" ? vipMeta : {};
+    const isVipOrder = isVIP === true || officeTableContext?.isVIP === true;
+    const normalizedVipName = String(
+      requestVipMeta.name || officeName || customerName || "",
+    ).trim();
+    const normalizedVipAddress = String(
+      requestVipMeta.address ||
+        officeAddress ||
+        customerLocation?.address ||
+        customerLocation?.fullAddress ||
+        "",
+    ).trim();
+    const normalizedVipPhone = String(
+      requestVipMeta.phone || officePhone || customerMobile || "",
+    ).trim();
+
+    if (isVipOrder) {
+      if (!normalizedVipName) {
+        return res
+          .status(400)
+          .json({ message: "VIP orders require customer name in QR payload." });
+      }
+      if (!normalizedVipAddress) {
+        return res
+          .status(400)
+          .json({ message: "VIP orders require address in QR payload." });
+      }
+    }
 
     // Validate service type - now supports DINE_IN, TAKEAWAY, PICKUP, DELIVERY
     const validServiceTypes = ["DINE_IN", "TAKEAWAY", "PICKUP", "DELIVERY"];
@@ -3425,6 +3468,20 @@ const createOrder = async (req, res) => {
 
     if (normalizedSourceQrType === "OFFICE" && resolvedOfficeDeliveryCharge > 0) {
       orderData.officeDeliveryCharge = resolvedOfficeDeliveryCharge;
+    }
+
+    if (isVipOrder) {
+      orderData.isVIP = true;
+      orderData.vipMeta = {
+        name: normalizedVipName,
+        address: normalizedVipAddress,
+        phone: normalizedVipPhone || null,
+      };
+      console.log("[ORDER][VIP] VIP order metadata attached", {
+        orderId: orderData._id,
+        sourceQrType: orderData.sourceQrType,
+        officePaymentMode: orderData.officePaymentMode,
+      });
     }
 
     if (isOfficeDeliveryOrder && resolvedOfficeDeliveryCharge > 0 && !orderData.deliveryInfo) {
@@ -4813,7 +4870,20 @@ const getOrders = async (req, res) => {
       }
     }
 
+    const isVipActiveOrder = (order) => {
+      if (!order || order.isVIP !== true) return false;
+      const normalizedStatus = normalizeUpper(order.status);
+      const isCompletedOrder = normalizedStatus === ORDER_STATUSES.COMPLETED;
+      const isPaidOrder =
+        normalizeUpper(order.paymentStatus) === PAYMENT_STATUSES.PAID ||
+        order.isPaid === true;
+      return !isCompletedOrder && !isPaidOrder;
+    };
+
     const responseOrders = orders.map((order) => orderToPlainPayload(order));
+    responseOrders.sort(
+      (a, b) => Number(isVipActiveOrder(b)) - Number(isVipActiveOrder(a)),
+    );
     return res.json(responseOrders);
   } catch (err) {
     console.error("[GET_ORDERS] Error:", err);
@@ -5608,6 +5678,16 @@ const updateOrderStatus = async (req, res) => {
       ORDER_STATUSES.READY,
       ORDER_STATUSES.COMPLETED,
     ].includes(requestedStatus);
+    console.log("[ORDER][STATUS_GATE] Payment gate evaluation", {
+      orderId: String(order._id || ""),
+      currentStatus,
+      requestedStatus,
+      sourceQrType: order.sourceQrType || null,
+      officePaymentMode: order.officePaymentMode || null,
+      paymentMode: order.paymentMode || null,
+      paymentRequiredBeforeProceeding: !!order.paymentRequiredBeforeProceeding,
+      requiresPaymentFirst: requiresPaymentBeforeProceeding(order),
+    });
     if (requiresPaymentBeforeProceeding(order) && isProceedingStatus) {
       const paymentComplete =
         requestMarksOrderPaid ||

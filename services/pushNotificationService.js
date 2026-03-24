@@ -788,17 +788,21 @@ const sendNewOrderNotificationToCartStaff = async (order) => {
     };
   }
 
+  const isVipOrder = order?.isVIP === true;
   const payload = {
-    title: "New Order",
-    body: buildStaffOrderNotificationBody(order),
+    title: isVipOrder ? "VIP Order" : "New Order",
+    body: isVipOrder
+      ? `VIP priority order received${order?._id ? ` (${order._id})` : ""}.`
+      : buildStaffOrderNotificationBody(order),
     data: {
-      notificationType: "new_order",
+      notificationType: isVipOrder ? "vip_order" : "new_order",
       event: "order:created",
       orderId: String(order?._id || ""),
       orderStatus: String(order?.status || ""),
       lifecycleStatus: String(order?.lifecycleStatus || ""),
       serviceType: String(order?.serviceType || ""),
       orderType: String(order?.orderType || ""),
+      isVIP: isVipOrder ? "true" : "false",
       cartId: cartObjectId.toString(),
       tableNumber: String(order?.tableNumber || ""),
       takeawayToken: Number.isInteger(order?.takeawayToken)

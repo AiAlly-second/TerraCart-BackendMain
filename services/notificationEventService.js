@@ -127,6 +127,7 @@ const resolveAudienceTokens = async ({
 
 const notifyNewOrder = async ({ io, emitToCafeFn, order }) => {
   const cartId = order?.cartId || order?.cafeId || null;
+  const isVipOrder = order?.isVIP === true;
   emitToCafe({
     io,
     emitToCafeFn,
@@ -136,6 +137,8 @@ const notifyNewOrder = async ({ io, emitToCafeFn, order }) => {
       orderId: toObjectIdString(order?._id),
       status: order?.status || null,
       paymentStatus: order?.paymentStatus || null,
+      isVIP: isVipOrder,
+      notificationVariant: isVipOrder ? "vip" : "default",
       updatedAt: order?.updatedAt || order?.createdAt || new Date().toISOString(),
     },
   });

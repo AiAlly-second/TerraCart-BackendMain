@@ -1,9 +1,9 @@
 {
-    "latestVersion":  "1.0.12",
+    "latestVersion":  "1.0.13",
     "minimumSupportedVersion":  "1.0.2",
     "apkUrl":  "",
-    "releaseNotes":  " Ai Tap to order added \n Inventory can be added from voice now",
-    "sha256":  "630677934683927f284197419e7cf04d97bb49875b31a16055d65037ec9c79a0",
+    "releaseNotes":  " Ai Tap to order added \n Added VIP order feature \n Added Sort in the order screen",
+    "sha256":  "553407ba4dd14c62dd62cd9d1c7832278c94e776de37b3bac0f637b2e086991e",
     "forceUpdate":  false,
     "updateUrl":  ""
 }

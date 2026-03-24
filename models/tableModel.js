@@ -88,6 +88,10 @@ const tableSchema = new mongoose.Schema(
       enum: ["ONLINE", "COD", "BOTH"],
       default: "ONLINE",
     },
+    isVIP: {
+      type: Boolean,
+      default: false,
+    },
     // Cafe admin association for data isolation
     cartId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     // Franchise association - tables belong to franchises through cafes

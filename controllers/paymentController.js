@@ -565,8 +565,13 @@ const requiresPaymentBeforeProceeding = (order) => {
     .trim()
     .toUpperCase();
   if (normalizedSourceQrType === "OFFICE") {
-    // Business rule: OFFICE QR orders are prepaid-only.
-    return true;
+    const officePaymentMode = normalizeOfficePaymentMode(
+      order.officePaymentMode,
+      "ONLINE",
+    );
+    if (officePaymentMode === "ONLINE") return true;
+    if (officePaymentMode === "COD") return false;
+    return String(order.paymentMode || "").trim().toUpperCase() !== "CASH";
   }
   if (Boolean(order.paymentRequiredBeforeProceeding)) return true;
   return false;
