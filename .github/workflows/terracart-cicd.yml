@@ -19,6 +19,11 @@ jobs:
         with:
           node-version: 20
 
+      - name: Show repo files
+        run: |
+          pwd
+          ls -la
+
       - name: Install backend dependencies
         run: |
           if [ -f package-lock.json ]; then
