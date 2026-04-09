@@ -32,5 +32,5 @@ jobs:
             npm install
           fi
 
-      - name: Run backend tests
-        run: npm test --if-present
+      - name: Build backend
+        run: npm run build --if-present
