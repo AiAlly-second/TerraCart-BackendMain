@@ -7,12 +7,34 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-script:
+  terracart-job:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run first test command
-        run: echo "My TerraCart CI/CD pipeline is working successfully"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install frontend dependencies
+        run: |
+          cd TerraCart-Frontend
+          npm install
+
+      - name: Build frontend
+        run: |
+          cd TerraCart-Frontend
+          npm run build
+
+      - name: Install backend dependencies
+        run: |
+          cd TerraCart-BackendMain
+          npm install
+
+      - name: Run backend tests
+        run: |
+          cd TerraCart-BackendMain
+          npm test --if-present
