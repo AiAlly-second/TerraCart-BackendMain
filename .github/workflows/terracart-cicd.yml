@@ -1,4 +1,4 @@
-name: TerraCart CI Pipeline
+name: TerraCart Backend CI Pipeline
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  terracart-job:
+  backend-job:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,22 +19,13 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install frontend dependencies
-        run: |
-          cd TerraCart-Frontend
-          npm install
-
-      - name: Build frontend
-        run: |
-          cd TerraCart-Frontend
-          npm run build
-
       - name: Install backend dependencies
         run: |
-          cd TerraCart-BackendMain
-          npm install
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Run backend tests
-        run: |
-          cd TerraCart-BackendMain
-          npm test --if-present
+        run: npm test --if-present
