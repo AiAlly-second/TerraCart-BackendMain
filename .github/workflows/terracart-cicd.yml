@@ -25,4 +25,12 @@ jobs:
           ls -la
 
       - name: Install backend dependencies
-        run: npm install
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run backend tests
+        run: npm test --if-present
