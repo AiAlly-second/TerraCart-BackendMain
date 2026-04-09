@@ -1,0 +1,18 @@
+name: TerraCart CI Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run first test command
+        run: echo "My TerraCart CI/CD pipeline is working successfully"
