@@ -1,0 +1,28 @@
+name: TerraCart Backend Deploy via SSM
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Deploy backend through SSM
+        run: |
+          aws ssm send-command \
+            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "TerraCart backend safe deploy" \
+            --parameters 'commands=[
+              "sudo -iu ec2-user bash -lc '\''cd /home/ec2-user/terracart/TerraCart-BackendMain && git pull origin main && npm install && npm run build --if-present && pm2 restart server && pm2 save'\''"
+            ]' \
+            --query "Command.CommandId" \
+            --output text
