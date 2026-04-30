@@ -13,7 +13,7 @@ router.post(
   validateEmail('email'),
   adminLogin
 );
-
+// Admin login route with rate limiting and validation
 // Token verification
 router.get("/verify", protect, verifyAdminToken);
 
