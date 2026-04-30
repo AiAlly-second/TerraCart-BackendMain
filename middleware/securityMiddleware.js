@@ -19,6 +19,28 @@ const API_KEY_CACHE_TTL_MS = Number.parseInt(
   process.env.API_KEY_BYPASS_CACHE_TTL_MS || "60000",
   10,
 );
+const RATE_LIMIT_STORE_MAX_ENTRIES = Number.parseInt(
+  process.env.RATE_LIMIT_STORE_MAX_ENTRIES || "15000",
+  10,
+);
+const HEALTH_PATH_REGEX = /^\/(?:api\/)?health(?:\/|$)/i;
+
+const shouldBypassRateLimitForPath = (pathValue) =>
+  HEALTH_PATH_REGEX.test(String(pathValue || ""));
+
+const getWindowStart = (timestampMs, windowMs) =>
+  timestampMs - (timestampMs % windowMs);
+
+const pruneOldRateLimitEntries = () => {
+  if (rateLimitStore.size <= RATE_LIMIT_STORE_MAX_ENTRIES) return;
+  const entries = Array.from(rateLimitStore.entries()).sort(
+    (left, right) => (left[1]?.lastSeenAt || 0) - (right[1]?.lastSeenAt || 0)
+  );
+  const toDelete = rateLimitStore.size - RATE_LIMIT_STORE_MAX_ENTRIES;
+  for (let index = 0; index < toDelete; index += 1) {
+    rateLimitStore.delete(entries[index][0]);
+  }
+};
 
 const isTrustedApiKey = async (rawApiKey) => {
   const apiKey = String(rawApiKey || "").trim();
@@ -41,10 +63,11 @@ const isTrustedApiKey = async (rawApiKey) => {
 };
 
 // Clean up expired entries every 5 minutes
-setInterval(() => {
+const rateLimitCleanupInterval = setInterval(() => {
   const now = Date.now();
   for (const [key, data] of rateLimitStore.entries()) {
-    if (now > data.resetTime) {
+    const maxAge = Math.max((data?.windowMs || 0) * 3, 5 * 60 * 1000);
+    if (!data || now - (data.lastSeenAt || 0) > maxAge) {
       rateLimitStore.delete(key);
     }
   }
@@ -53,7 +76,12 @@ setInterval(() => {
       apiKeyBypassCache.delete(key);
     }
   }
+  pruneOldRateLimitEntries();
 }, 5 * 60 * 1000);
+
+if (typeof rateLimitCleanupInterval.unref === "function") {
+  rateLimitCleanupInterval.unref();
+}
 
 /**
  * Rate limiter middleware factory
@@ -64,6 +92,7 @@ const createRateLimiter = (options = {}) => {
   
   // In development, use much more lenient limits or disable
   const {
+    name = "default",
     windowMs = 15 * 60 * 1000, // 15 minutes
     max = 100, // Max requests per window
     message = 'Too many requests, please try again later',
@@ -76,7 +105,8 @@ const createRateLimiter = (options = {}) => {
              'unknown';
     },
     skipSuccessfulRequests = false,
-    skipFailedRequests = false
+    skipFailedRequests = false,
+    skip = () => false
   } = options;
 
   // In development, multiply limits by 50x or disable entirely
@@ -86,6 +116,10 @@ const createRateLimiter = (options = {}) => {
   return async (req, res, next) => {
     // Skip rate limiting in development if explicitly disabled
     if (isDevelopment && process.env.DISABLE_RATE_LIMIT === 'true') {
+      return next();
+    }
+
+    if (skip(req) || shouldBypassRateLimitForPath(req.path)) {
       return next();
     }
 
@@ -109,37 +143,71 @@ const createRateLimiter = (options = {}) => {
       }
     }
 
-    const key = keyGenerator(req);
+    const baseKey = keyGenerator(req);
+    const key = `${name}:${baseKey}`;
     const now = Date.now();
+    const currentWindowStart = getWindowStart(now, effectiveWindowMs);
 
     let data = rateLimitStore.get(key);
-    
-    if (!data || now > data.resetTime) {
-      // New window
+
+    if (!data || data.windowMs !== effectiveWindowMs) {
       data = {
-        count: 0,
-        resetTime: now + effectiveWindowMs
+        currentCount: 0,
+        previousCount: 0,
+        windowStart: currentWindowStart,
+        windowMs: effectiveWindowMs,
+        lastSeenAt: now,
+      };
+    } else if (data.windowStart !== currentWindowStart) {
+      const isConsecutiveWindow =
+        data.windowStart === currentWindowStart - effectiveWindowMs;
+      data = {
+        currentCount: 0,
+        previousCount: isConsecutiveWindow ? data.currentCount : 0,
+        windowStart: currentWindowStart,
+        windowMs: effectiveWindowMs,
+        lastSeenAt: now,
       };
     }
 
-    data.count++;
-    rateLimitStore.set(key, data);
+    const elapsedMsInWindow = now - data.windowStart;
+    const previousWindowWeight = Math.max(
+      0,
+      (effectiveWindowMs - elapsedMsInWindow) / effectiveWindowMs
+    );
+    const estimatedCount =
+      data.currentCount + data.previousCount * previousWindowWeight;
 
     // Set rate limit headers
     res.setHeader('X-RateLimit-Limit', effectiveMax);
-    res.setHeader('X-RateLimit-Remaining', Math.max(0, effectiveMax - data.count));
-    res.setHeader('X-RateLimit-Reset', Math.ceil(data.resetTime / 1000));
+    res.setHeader(
+      'X-RateLimit-Remaining',
+      Math.max(0, Math.floor(effectiveMax - estimatedCount))
+    );
+    res.setHeader(
+      'X-RateLimit-Reset',
+      Math.ceil((data.windowStart + effectiveWindowMs) / 1000)
+    );
 
-    if (data.count > effectiveMax) {
-      res.setHeader('Retry-After', Math.ceil((data.resetTime - now) / 1000));
+    if (estimatedCount >= effectiveMax) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((effectiveWindowMs - elapsedMsInWindow) / 1000)
+      );
+      res.setHeader('Retry-After', retryAfterSeconds);
       return res.status(429).json({
         success: false,
         message: isDevelopment 
           ? `Rate limit exceeded (dev mode: ${effectiveMax} requests per ${effectiveWindowMs/1000}s)`
           : message,
-        retryAfter: Math.ceil((data.resetTime - now) / 1000)
+        retryAfter: retryAfterSeconds
       });
     }
+
+    data.currentCount += 1;
+    data.lastSeenAt = now;
+    rateLimitStore.set(key, data);
+    pruneOldRateLimitEntries();
 
     // Hook into response to track success/failure
     if (skipSuccessfulRequests || skipFailedRequests) {
@@ -147,7 +215,8 @@ const createRateLimiter = (options = {}) => {
       res.end = function(...args) {
         if ((skipSuccessfulRequests && res.statusCode < 400) ||
             (skipFailedRequests && res.statusCode >= 400)) {
-          data.count = Math.max(0, data.count - 1);
+          data.currentCount = Math.max(0, data.currentCount - 1);
+          data.lastSeenAt = Date.now();
           rateLimitStore.set(key, data);
         }
         originalEnd.apply(res, args);
@@ -166,15 +235,26 @@ const rateLimiters = {
   // In dev: Disabled by default (can enable with ENABLE_RATE_LIMIT=true)
   // In prod: 500 requests per 15 min
   api: createRateLimiter({
+    name: "api",
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 500, // 500 requests per 15 min (disabled in dev by default)
     message: 'Too many API requests'
+  }),
+
+  // Shared limiter for authentication endpoints (login/signup)
+  auth: createRateLimiter({
+    name: "auth",
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: Number.parseInt(process.env.RATE_LIMIT_LOGIN || "10", 10) || 10,
+    message: 'Too many login attempts. Please try again later.',
+    skipSuccessfulRequests: true // Don't count successful logins
   }),
 
   // Login attempts - secure default in production
   // In dev: Disabled by default unless ENABLE_RATE_LIMIT=true.
   // In prod: configurable via RATE_LIMIT_LOGIN env var, with secure default.
   login: createRateLimiter({
+    name: "login",
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: Number.parseInt(process.env.RATE_LIMIT_LOGIN || "10", 10) || 10,
     message: 'Too many login attempts. Please try again later.',
@@ -184,6 +264,7 @@ const rateLimiters = {
   // Very strict for password reset
   // In dev: 50 attempts per 30 min, in prod: 5 per hour
   passwordReset: createRateLimiter({
+    name: "passwordReset",
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 5, // Only 5 password reset requests per hour (50 in dev)
     message: 'Too many password reset attempts. Please try again later.'
@@ -192,6 +273,7 @@ const rateLimiters = {
   // File upload limit
   // In dev: 500 uploads per 30 min, in prod: 50 per hour
   upload: createRateLimiter({
+    name: "upload",
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 50, // 50 uploads per hour (500 in dev)
     message: 'Upload limit exceeded. Please try again later.'
@@ -200,6 +282,7 @@ const rateLimiters = {
   // Order creation limit
   // In dev: 300 orders per 30 sec, in prod: 30 per minute
   orders: createRateLimiter({
+    name: "orders",
     windowMs: 60 * 1000, // 1 minute
     max: 30, // 30 orders per minute per IP (300 in dev)
     message: 'Order rate limit exceeded. Please slow down.'
