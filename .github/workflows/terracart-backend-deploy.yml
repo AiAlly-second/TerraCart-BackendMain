@@ -15,9 +15,9 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            cd /home/ec2-user/TerraCart-BackendMain
+            cd /home/ec2-user/terracart/TerraCart-BackendMain
             git pull origin main
             npm install
             npm run build --if-present
-            pm2 restart server
+            pm2 restart all
             pm2 save
