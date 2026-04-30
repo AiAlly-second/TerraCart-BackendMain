@@ -8,7 +8,7 @@ const { validateRequired, validateEmail } = require("../middleware/validationMid
 // Admin login with rate limiting and validation
 router.post(
   "/login",
-  rateLimiters.login,
+  rateLimiters.auth,
   validateRequired(['email', 'password']),
   validateEmail('email'),
   adminLogin

@@ -36,7 +36,7 @@ const {
 // Login with rate limiting and validation
 router.post(
   "/login",
-  rateLimiters.login,
+  rateLimiters.auth,
   validateRequired(["email", "password"]),
   validateEmail("email"),
   loginUser
@@ -45,7 +45,7 @@ router.post(
 // Public cafe admin registration (for signup page)
 router.post(
   "/register-cafe-admin-public",
-  rateLimiters.login, // Use login limiter for registration too
+  rateLimiters.auth, // Use auth limiter for registration too
   uploadCafeAdminDocs,
   validateRequired(["name", "email", "password", "cartName", "location"]),
   validateEmail("email"),

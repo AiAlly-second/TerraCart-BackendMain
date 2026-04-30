@@ -34,9 +34,20 @@ const {
   errorHandler,
   getCorsConfig,
 } = require("./middleware/securityMiddleware");
+const {
+  createSlowApiLogger,
+  createRequestTimeoutGuard,
+  createWarmupGuard,
+  createRequestDeduplicationMiddleware,
+  createGetResponseCache,
+  createShutdownGuard,
+  writeLogLine,
+} = require("./middleware/reliabilityMiddleware");
 
 // Always load backend/.env (do not use .env.production)
 dotenv.config({ path: path.join(__dirname, ".env") });
+const SERVER_BOOT_AT = Date.now();
+let isShuttingDown = false;
 
 // Silence backend runtime console output by default.
 // Set BACKEND_ENABLE_CONSOLE_LOGS=true to re-enable logs when needed.
@@ -88,15 +99,21 @@ validateEnv();
 
 // Global error handlers to prevent silent crashes
 process.on("uncaughtException", (err) => {
-  console.error("❌ UNCAUGHT EXCEPTION:", err.message);
-  console.error(err.stack);
+  writeLogLine(`[ERROR] Uncaught exception: ${err?.message || "unknown"}`);
+  if (process.env.NODE_ENV !== "production" && err?.stack) {
+    writeLogLine(err.stack);
+  }
   // Give time for logs to flush before exiting
   setTimeout(() => process.exit(1), 1000);
 });
 
 process.on("unhandledRejection", (reason, promise) => {
-  console.error("❌ UNHANDLED REJECTION:", reason);
-  // Note: We don't necessarily want to exit on rejection, but we should log it
+  const reasonText =
+    reason instanceof Error ? reason.message : JSON.stringify(reason || {});
+  writeLogLine(`[ERROR] Unhandled rejection: ${reasonText}`);
+  if (process.env.NODE_ENV !== "production" && reason instanceof Error && reason.stack) {
+    writeLogLine(reason.stack);
+  }
 });
 
 // Initialize Express app
@@ -109,11 +126,123 @@ let redisSubClient;
 const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
 app.set("trust proxy", Number.isNaN(trustProxyHops) ? 1 : trustProxyHops);
 
+const SOCKET_ATTEMPT_WINDOW_MS = Number.parseInt(
+  process.env.SOCKET_ATTEMPT_WINDOW_MS || "10000",
+  10
+);
+const SOCKET_ATTEMPT_MAX_PER_IP = Number.parseInt(
+  process.env.SOCKET_ATTEMPT_MAX_PER_IP || "15",
+  10
+);
+const SOCKET_MAX_CONNECTIONS_PER_USER = Number.parseInt(
+  process.env.SOCKET_MAX_CONNECTIONS_PER_USER || "3",
+  10
+);
+const SOCKET_MIN_RECONNECT_INTERVAL_MS = Number.parseInt(
+  process.env.SOCKET_MIN_RECONNECT_INTERVAL_MS || "800",
+  10
+);
+const SOCKET_IP_TRACKER_MAX_ENTRIES = Number.parseInt(
+  process.env.SOCKET_IP_TRACKER_MAX_ENTRIES || "5000",
+  10
+);
+const SOCKET_USER_TRACKER_MAX_ENTRIES = Number.parseInt(
+  process.env.SOCKET_USER_TRACKER_MAX_ENTRIES || "5000",
+  10
+);
+
+const socketAttemptStore = new Map();
+const socketUserConnectionStore = new Map();
+
+const parseForwardedFor = (headerValue) => {
+  if (typeof headerValue !== "string") return null;
+  const ip = headerValue.split(",")[0]?.trim();
+  return ip || null;
+};
+
+const getSocketRequestIp = (requestLike) => {
+  const forwarded = parseForwardedFor(requestLike?.headers?.["x-forwarded-for"]);
+  if (forwarded) return forwarded;
+  return (
+    requestLike?.socket?.remoteAddress ||
+    requestLike?.connection?.remoteAddress ||
+    "unknown"
+  );
+};
+
+const pruneOldestSocketEntries = (map, maxEntries) => {
+  if (map.size <= maxEntries) return;
+  const entries = Array.from(map.entries()).sort(
+    (left, right) => (left[1]?.lastSeenAt || 0) - (right[1]?.lastSeenAt || 0)
+  );
+  const removeCount = map.size - maxEntries;
+  for (let index = 0; index < removeCount; index += 1) {
+    map.delete(entries[index][0]);
+  }
+};
+
+const pruneSocketStores = () => {
+  const now = Date.now();
+  for (const [ip, meta] of socketAttemptStore.entries()) {
+    if (!meta || now - (meta.lastSeenAt || 0) > SOCKET_ATTEMPT_WINDOW_MS * 3) {
+      socketAttemptStore.delete(ip);
+    }
+  }
+
+  for (const [userId, meta] of socketUserConnectionStore.entries()) {
+    const hasSockets = meta?.socketIds && meta.socketIds.size > 0;
+    if (!meta || (!hasSockets && now - (meta.lastSeenAt || 0) > 5 * 60 * 1000)) {
+      socketUserConnectionStore.delete(userId);
+    }
+  }
+
+  pruneOldestSocketEntries(socketAttemptStore, SOCKET_IP_TRACKER_MAX_ENTRIES);
+  pruneOldestSocketEntries(socketUserConnectionStore, SOCKET_USER_TRACKER_MAX_ENTRIES);
+};
+
+const socketStoreCleanupInterval = setInterval(pruneSocketStores, 60 * 1000);
+if (typeof socketStoreCleanupInterval.unref === "function") {
+  socketStoreCleanupInterval.unref();
+}
+
+const allowSocketHandshake = (requestLike) => {
+  const now = Date.now();
+  const ip = getSocketRequestIp(requestLike);
+  const currentWindowStart = now - (now % SOCKET_ATTEMPT_WINDOW_MS);
+  let attemptMeta = socketAttemptStore.get(ip);
+
+  if (!attemptMeta || attemptMeta.windowStart !== currentWindowStart) {
+    attemptMeta = {
+      count: 0,
+      windowStart: currentWindowStart,
+      lastSeenAt: now,
+    };
+  }
+
+  if (attemptMeta.count >= SOCKET_ATTEMPT_MAX_PER_IP) {
+    attemptMeta.lastSeenAt = now;
+    socketAttemptStore.set(ip, attemptMeta);
+    return false;
+  }
+
+  attemptMeta.count += 1;
+  attemptMeta.lastSeenAt = now;
+  socketAttemptStore.set(ip, attemptMeta);
+  pruneOldestSocketEntries(socketAttemptStore, SOCKET_IP_TRACKER_MAX_ENTRIES);
+  return true;
+};
+
 // Socket.IO setup
 const io = socketIo(server, {
   cors: getCorsConfig(),
   pingTimeout: 60000,
   pingInterval: 25000,
+  allowRequest: (req, callback) => {
+    if (!allowSocketHandshake(req)) {
+      return callback("Socket reconnect throttled", false);
+    }
+    return callback(null, true);
+  },
 });
 
 const SOCKET_ROLE_ALLOWLIST = new Set([
@@ -191,6 +320,65 @@ const extractSocketAnonymousSessionId = (socket) => {
   return normalizeSocketRoomValue(raw);
 };
 
+const getSocketUserTrackingMeta = (userId) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) return null;
+
+  const existing = socketUserConnectionStore.get(normalizedUserId);
+  if (existing) return existing;
+
+  const fresh = {
+    socketIds: new Set(),
+    lastConnectedAt: 0,
+    lastSeenAt: Date.now(),
+  };
+  socketUserConnectionStore.set(normalizedUserId, fresh);
+  return fresh;
+};
+
+const canAcceptSocketForUser = (userId) => {
+  const meta = getSocketUserTrackingMeta(userId);
+  if (!meta) return false;
+
+  const now = Date.now();
+  const activeConnections = meta.socketIds.size;
+  if (activeConnections >= SOCKET_MAX_CONNECTIONS_PER_USER) {
+    meta.lastSeenAt = now;
+    return false;
+  }
+
+  if (
+    activeConnections > 0 &&
+    meta.lastConnectedAt > 0 &&
+    now - meta.lastConnectedAt < SOCKET_MIN_RECONNECT_INTERVAL_MS
+  ) {
+    meta.lastSeenAt = now;
+    return false;
+  }
+
+  return true;
+};
+
+const registerSocketForUser = (userId, socketId) => {
+  const meta = getSocketUserTrackingMeta(userId);
+  if (!meta) return;
+  meta.socketIds.add(String(socketId));
+  meta.lastConnectedAt = Date.now();
+  meta.lastSeenAt = meta.lastConnectedAt;
+};
+
+const unregisterSocketForUser = (userId, socketId) => {
+  const normalizedUserId = String(userId || "").trim();
+  if (!normalizedUserId) return;
+  const meta = socketUserConnectionStore.get(normalizedUserId);
+  if (!meta) return;
+  meta.socketIds.delete(String(socketId));
+  meta.lastSeenAt = Date.now();
+  if (meta.socketIds.size === 0) {
+    socketUserConnectionStore.delete(normalizedUserId);
+  }
+};
+
 const resolveSocketCartIds = async (user) => {
   const cartIds = new Set();
   if (!user) return cartIds;
@@ -239,6 +427,7 @@ const resolveSocketCartIds = async (user) => {
 io.use(async (socket, next) => {
   try {
     socket.data.user = null;
+    socket.data.socketUserId = null;
     const token = extractSocketBearerToken(socket);
     if (!token) return next();
 
@@ -259,10 +448,17 @@ io.use(async (socket, next) => {
       user.tokenVersion !== undefined ? Number(user.tokenVersion) : 0;
     if (tokenVersion !== userTokenVersion) return next();
 
+    const socketUserId = user?._id ? String(user._id) : null;
+    if (socketUserId && !canAcceptSocketForUser(socketUserId)) {
+      return next(new Error("Socket user connection throttled"));
+    }
+
     socket.data.user = user;
+    socket.data.socketUserId = socketUserId;
     return next();
   } catch (_error) {
     socket.data.user = null;
+    socket.data.socketUserId = null;
     return next();
   }
 });
@@ -288,6 +484,38 @@ const setupSocketRedisAdapter = async () => {
   redisSubClient = subClient;
 };
 
+const warmupGuard = createWarmupGuard({
+  warmupMs: Number.parseInt(process.env.WARMUP_DURATION_MS || "8000", 10),
+});
+const requestTimeoutGuard = createRequestTimeoutGuard({
+  timeoutMs: Number.parseInt(process.env.REQUEST_TIMEOUT_GUARD_MS || "10000", 10),
+  skip: (req) => req.method === "OPTIONS" || req.is("multipart/form-data"),
+});
+const slowApiLogger = createSlowApiLogger({
+  thresholdMs: Number.parseInt(process.env.SLOW_API_THRESHOLD_MS || "300", 10),
+});
+const getResponseCache = createGetResponseCache({
+  ttlMs: Number.parseInt(process.env.GET_CACHE_TTL_MS || "10000", 10),
+  matcher: (req) => {
+    const routePath = String(req.path || "");
+    return routePath === "/api/menu/public" || routePath === "/api/menu/meta/spice-levels";
+  },
+});
+const requestDeduper = createRequestDeduplicationMiddleware({
+  pendingTtlMs: Number.parseInt(process.env.REQUEST_DEDUP_TTL_MS || "20000", 10),
+  skip: (req) =>
+    req.method === "OPTIONS" ||
+    req.path.startsWith("/uploads") ||
+    req.is("multipart/form-data"),
+});
+const shutdownGuard = createShutdownGuard(() => isShuttingDown);
+
+const ROOT_HEALTH_CACHE_TTL_MS = 5000;
+let rootHealthCachePayload = null;
+let rootHealthCacheStatus = 200;
+let rootHealthCacheDbState = null;
+let rootHealthCacheExpiresAt = 0;
+
 // Middleware
 app.use(
   compression({
@@ -302,9 +530,16 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(cors(getCorsConfig()));
 app.use(securityHeaders);
 app.use(sanitizeInput);
+app.use(shutdownGuard);
+app.use(warmupGuard);
+app.use(requestTimeoutGuard);
+app.use(slowApiLogger);
+app.use(getResponseCache);
+app.use(requestDeduper);
 
 // Apply rate limiting to all routes
 app.use(rateLimiters.api);
+app.use("/api/orders", rateLimiters.orders);
 
 // Routes
 app.use("/api/users", require("./routes/userRoutes"));
@@ -356,15 +591,28 @@ app.use("/api", require("./routes/notificationRoutes"));
 const healthRoutes = require("./routes/healthRoutes");
 app.use("/api", healthRoutes);
 app.get("/health", (req, res) => {
-  const dbReady = mongoose.connection.readyState === 1;
-  const status = dbReady ? "healthy" : "degraded";
-  res.status(dbReady ? 200 : 503).json({
-    status,
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    environment: process.env.NODE_ENV || "development",
-    dbState: mongoose.connection.readyState,
-  });
+  const now = Date.now();
+  const dbState = mongoose.connection.readyState;
+  const dbReady = dbState === 1;
+
+  if (
+    !rootHealthCachePayload ||
+    now >= rootHealthCacheExpiresAt ||
+    rootHealthCacheDbState !== dbState
+  ) {
+    rootHealthCacheStatus = dbReady ? 200 : 503;
+    rootHealthCacheDbState = dbState;
+    rootHealthCachePayload = {
+      status: dbReady ? "healthy" : "degraded",
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: process.env.NODE_ENV || "development",
+      dbState,
+    };
+    rootHealthCacheExpiresAt = now + ROOT_HEALTH_CACHE_TTL_MS;
+  }
+
+  res.status(rootHealthCacheStatus).json(rootHealthCachePayload);
 });
 
 // Static file serving for uploads
@@ -400,6 +648,13 @@ if (
 
 // Socket.IO connection handling with room support
 io.on("connection", (socket) => {
+  const trackedSocketUserId =
+    socket.data?.socketUserId ||
+    (socket.data?.user?._id ? String(socket.data.user._id) : null);
+  if (trackedSocketUserId) {
+    registerSocketForUser(trackedSocketUserId, socket.id);
+  }
+
   writeSocketTraceLog("client connected", {
     socketId: socket.id,
     hasUser: !!socket.data?.user,
@@ -684,6 +939,9 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", (reason) => {
+    if (trackedSocketUserId) {
+      unregisterSocketForUser(trackedSocketUserId, socket.id);
+    }
     writeSocketTraceLog("client disconnected", {
       socketId: socket.id,
       reason,
@@ -803,9 +1061,9 @@ const startServer = async () => {
     // CRITICAL: Omit host to listen on all interfaces (IPv4 and IPv6)
     // This resolves 'localhost' resolution issues in some environments
     server.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`📡 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🌐 Server accessible locally at: http://localhost:${PORT}`);
+      writeLogLine(`[STARTUP] Server running on port ${PORT}`);
+      writeLogLine(`[STARTUP] Environment: ${process.env.NODE_ENV || "development"}`);
+      writeLogLine(`[STARTUP] Booted at: ${new Date(SERVER_BOOT_AT).toISOString()}`);
     });
   } catch (error) {
     process.exit(1);
@@ -815,10 +1073,17 @@ const startServer = async () => {
 startServer();
 
 const closeRedisClients = async () => {
+  isShuttingDown = true;
   await new Promise((resolve) => {
     if (!server.listening) return resolve();
-    server.close(() => resolve());
+    const forceCloseTimer = setTimeout(() => resolve(), 15000);
+    if (typeof forceCloseTimer.unref === "function") forceCloseTimer.unref();
+    server.close(() => {
+      clearTimeout(forceCloseTimer);
+      resolve();
+    });
   });
+  await new Promise((resolve) => io.close(() => resolve()));
   await Promise.allSettled([
     redisPubClient?.quit?.(),
     redisSubClient?.quit?.(),
@@ -826,13 +1091,27 @@ const closeRedisClients = async () => {
   await Promise.allSettled([mongoose.connection.close()]);
 };
 
-process.on("SIGTERM", async () => {
-  await closeRedisClients();
-  process.exit(0);
+const handleShutdownSignal = async (signalName) => {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  writeLogLine(`[SHUTDOWN] Received ${signalName}. Draining server...`);
+  try {
+    await closeRedisClients();
+  } catch (error) {
+    writeLogLine(
+      `[SHUTDOWN] Error while closing resources: ${error?.message || "unknown"}`
+    );
+  } finally {
+    process.exit(0);
+  }
+};
+
+process.on("SIGTERM", () => {
+  handleShutdownSignal("SIGTERM");
 });
 
-process.on("SIGINT", async () => {
-  await closeRedisClients();
+process.on("SIGINT", () => {
+  handleShutdownSignal("SIGINT");
 });
 
 module.exports = { app, server, io };
