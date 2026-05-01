@@ -539,7 +539,7 @@ app.use(requestDeduper);
 
 // Apply rate limiting to all routes
 app.use(rateLimiters.api);
-app.use("/api/orders", rateLimiters.orders);
+app.use("/api/print", rateLimiters.system);
 
 // Routes
 app.use("/api/users", require("./routes/userRoutes"));
@@ -1058,9 +1058,8 @@ const startServer = async () => {
       server.requestTimeout = requestTimeoutMs;
     }
 
-    // CRITICAL: Omit host to listen on all interfaces (IPv4 and IPv6)
-    // This resolves 'localhost' resolution issues in some environments
-    server.listen(PORT, () => {
+    // CRITICAL: Bind explicitly for PM2/Nginx deployments.
+    server.listen(PORT, "0.0.0.0", () => {
       writeLogLine(`[STARTUP] Server running on port ${PORT}`);
       writeLogLine(`[STARTUP] Environment: ${process.env.NODE_ENV || "development"}`);
       writeLogLine(`[STARTUP] Booted at: ${new Date(SERVER_BOOT_AT).toISOString()}`);

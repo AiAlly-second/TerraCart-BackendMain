@@ -24,9 +24,38 @@ const RATE_LIMIT_STORE_MAX_ENTRIES = Number.parseInt(
   10,
 );
 const HEALTH_PATH_REGEX = /^\/(?:api\/)?health(?:\/|$)/i;
+const SYSTEM_ROUTE_REGEXES = [
+  /^\/api\/print(?:\/|$)/i,
+  /^\/api\/orders\/[^/]+\/(?:kot-print|print-claim|print-complete|print-status)(?:\/|$)/i,
+];
+
+const getRateLimitPath = (req) =>
+  String(req.originalUrl || req.url || req.path || "").split("?")[0];
 
 const shouldBypassRateLimitForPath = (pathValue) =>
   HEALTH_PATH_REGEX.test(String(pathValue || ""));
+
+const isSystemRateLimitPath = (pathValue) =>
+  SYSTEM_ROUTE_REGEXES.some((regex) => regex.test(String(pathValue || "")));
+
+const getRequestSource = (req) =>
+  String(
+    req.headers["x-request-source"] ||
+      req.headers["x-client-source"] ||
+      req.headers["x-app-source"] ||
+      req.headers["user-agent"] ||
+      "unknown"
+  )
+    .slice(0, 120)
+    .replace(/\s+/g, " ");
+
+const writeRateLimitLog = (message) => {
+  try {
+    process.stdout.write(`${message}\n`);
+  } catch (_error) {
+    // Ignore log write failures.
+  }
+};
 
 const getWindowStart = (timestampMs, windowMs) =>
   timestampMs - (timestampMs % windowMs);
@@ -119,7 +148,8 @@ const createRateLimiter = (options = {}) => {
       return next();
     }
 
-    if (skip(req) || shouldBypassRateLimitForPath(req.path)) {
+    const requestPath = getRateLimitPath(req);
+    if (skip(req) || shouldBypassRateLimitForPath(requestPath)) {
       return next();
     }
 
@@ -194,6 +224,9 @@ const createRateLimiter = (options = {}) => {
         1,
         Math.ceil((effectiveWindowMs - elapsedMsInWindow) / 1000)
       );
+      writeRateLimitLog(
+        `[RATE_LIMIT] blocked limiter=${name} ip=${baseKey} method=${req.method} path=${requestPath} source="${getRequestSource(req)}" estimated=${Math.ceil(estimatedCount)} limit=${effectiveMax}`
+      );
       res.setHeader('Retry-After', retryAfterSeconds);
       return res.status(429).json({
         success: false,
@@ -208,6 +241,15 @@ const createRateLimiter = (options = {}) => {
     data.lastSeenAt = now;
     rateLimitStore.set(key, data);
     pruneOldRateLimitEntries();
+
+    if (
+      (process.env.RATE_LIMIT_TRACE === "true" || name === "orders") &&
+      estimatedCount + 1 >= Math.max(1, Math.floor(effectiveMax * 0.8))
+    ) {
+      writeRateLimitLog(
+        `[RATE_LIMIT] nearing limiter=${name} ip=${baseKey} method=${req.method} path=${requestPath} source="${getRequestSource(req)}" estimated=${Math.ceil(estimatedCount + 1)} limit=${effectiveMax}`
+      );
+    }
 
     // Hook into response to track success/failure
     if (skipSuccessfulRequests || skipFailedRequests) {
@@ -238,7 +280,8 @@ const rateLimiters = {
     name: "api",
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 500, // 500 requests per 15 min (disabled in dev by default)
-    message: 'Too many API requests'
+    message: 'Too many API requests',
+    skip: (req) => isSystemRateLimitPath(getRateLimitPath(req))
   }),
 
   // Shared limiter for authentication endpoints (login/signup)
@@ -286,6 +329,15 @@ const rateLimiters = {
     windowMs: 60 * 1000, // 1 minute
     max: 30, // 30 orders per minute per IP (300 in dev)
     message: 'Order rate limit exceeded. Please slow down.'
+  }),
+
+  // System/background print traffic gets its own bucket so KOT recovery does not
+  // consume user order quota.
+  system: createRateLimiter({
+    name: "system",
+    windowMs: 60 * 1000,
+    max: Number.parseInt(process.env.RATE_LIMIT_SYSTEM || "240", 10) || 240,
+    message: 'System request rate limit exceeded. Please retry shortly.'
   })
 };
 
