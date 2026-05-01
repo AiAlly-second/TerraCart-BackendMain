@@ -28,13 +28,14 @@ const {
 const {
   validateOrderType,
 } = require("../middleware/orderValidationMiddleware");
+const { rateLimiters } = require("../middleware/securityMiddleware");
 
 const router = express.Router();
 
 /* ---------- main flow (public - customer-facing) ---------- */
-router.post("/", optionalProtect, validateOrderType, createOrder); // first Confirm - public for customers, but authenticate if token provided
+router.post("/", rateLimiters.orders, optionalProtect, validateOrderType, createOrder); // first Confirm - public for customers, but authenticate if token provided
 router.get("/takeaway-token/next", optionalProtect, getNextTakeawayToken);
-router.post("/:id/kot", optionalProtect, addKot); // Order More → Confirm - public for customers
+router.post("/:id/kot", rateLimiters.orders, optionalProtect, addKot); // Order More → Confirm - public for customers
 router.post("/:id/finalize", protect, authorize(["admin"]), finalizeOrder);
 router.patch("/:id/customer-status", optionalProtect, cancelOrderByCustomer); // Customer cancel/return - public with sessionToken verification
 router.patch("/:id/confirm-payment", optionalProtect, confirmPaymentByCustomer); // Customer confirm payment - public with sessionToken verification
@@ -56,6 +57,7 @@ router.get(
 );
 router.get(
   "/:id/kot-print",
+  rateLimiters.system,
   protect,
   authorize(["admin", "manager", "waiter", "captain"]),
   getKotPrintTemplate,
@@ -83,18 +85,21 @@ router.patch(
 );
 router.patch(
   "/:id/print-status",
+  rateLimiters.system,
   protect,
   authorize(["admin", "manager", "waiter", "captain"]),
   updatePrintStatus,
 );
 router.patch(
   "/:id/print-claim",
+  rateLimiters.system,
   protect,
   authorize(["admin", "manager", "waiter", "captain"]),
   claimPrintJob,
 );
 router.patch(
   "/:id/print-complete",
+  rateLimiters.system,
   protect,
   authorize(["admin", "manager", "waiter", "captain"]),
   completePrintJob,
