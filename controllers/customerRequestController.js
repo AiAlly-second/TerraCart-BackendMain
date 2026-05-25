@@ -4,6 +4,7 @@ const { Table } = require("../models/tableModel");
 const Order = require("../models/orderModel");
 const {
   notifyAssistanceRequestCreated,
+  notifyCustomerRequestCreated,
 } = require("../services/notificationEventService");
 
 // Helper function to build query based on user role
@@ -180,6 +181,15 @@ exports.createRequest = async (req, res) => {
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
     if (io && emitToCafe && requestCartId) {
       emitToCafe(io, requestCartId.toString(), "request:created", request);
+    }
+
+    try {
+      await notifyCustomerRequestCreated({ request });
+    } catch (notificationError) {
+      console.error(
+        "[CUSTOMER_REQUEST] notification dispatch failed:",
+        notificationError?.message || notificationError,
+      );
     }
 
     if (request.requestType === "assistance") {

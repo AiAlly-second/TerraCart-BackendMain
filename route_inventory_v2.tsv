@@ -1,0 +1,239 @@
+method	endpoint	auth	roles	file	line
+GET	/api/addons/	protect		routes/addonRoutes.js	12
+POST	/api/addons/	protect		routes/addonRoutes.js	13
+DELETE	/api/addons/:id	protect		routes/addonRoutes.js	15
+PUT	/api/addons/:id	protect		routes/addonRoutes.js	14
+GET	/api/addons/public	protect		routes/addonRoutes.js	7
+GET	/api/admin/costing/dashboard	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	82
+GET	/api/admin/costing/expense-categories	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	100
+POST	/api/admin/costing/expense-categories	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	101
+DELETE	/api/admin/costing/expense-categories/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	103
+PUT	/api/admin/costing/expense-categories/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	102
+GET	/api/admin/costing/expenses	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	92
+POST	/api/admin/costing/expenses	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	94
+DELETE	/api/admin/costing/expenses/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	96
+GET	/api/admin/costing/expenses/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	93
+PUT	/api/admin/costing/expenses/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	95
+POST	/api/admin/costing/expenses/bulk-import	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	97
+GET	/api/admin/costing/ingredient-purchases	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	123
+POST	/api/admin/costing/ingredient-purchases	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	124
+DELETE	/api/admin/costing/ingredient-purchases/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	126
+PUT	/api/admin/costing/ingredient-purchases/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	125
+GET	/api/admin/costing/ingredients	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	106
+POST	/api/admin/costing/ingredients	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	107
+DELETE	/api/admin/costing/ingredients/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	109
+PUT	/api/admin/costing/ingredients/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	108
+POST	/api/admin/costing/inventory/adjust	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	119
+GET	/api/admin/costing/inventory/transactions	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	120
+GET	/api/admin/costing/investments	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	85
+POST	/api/admin/costing/investments	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	87
+DELETE	/api/admin/costing/investments/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	89
+GET	/api/admin/costing/investments/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	86
+PUT	/api/admin/costing/investments/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	88
+GET	/api/admin/costing/outlet-assets	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	135
+POST	/api/admin/costing/outlet-assets	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	136
+DELETE	/api/admin/costing/outlet-assets/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	138
+PUT	/api/admin/costing/outlet-assets/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	137
+GET	/api/admin/costing/outlet-opex	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	129
+POST	/api/admin/costing/outlet-opex	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	130
+DELETE	/api/admin/costing/outlet-opex/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	132
+PUT	/api/admin/costing/outlet-opex/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	131
+GET	/api/admin/costing/recipes	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	112
+POST	/api/admin/costing/recipes	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	114
+DELETE	/api/admin/costing/recipes/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	116
+GET	/api/admin/costing/recipes/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	113
+PUT	/api/admin/costing/recipes/:id	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	115
+GET	/api/admin/costing/reports/cost-per-dish	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	144
+GET	/api/admin/costing/reports/pnl	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	141
+GET	/api/admin/costing/reports/profitability	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	143
+GET	/api/admin/costing/reports/roi	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	routes/costingRoutes.js	142
+POST	/api/admin/logout-all	protect		routes/adminRoutes.js	21
+GET	/api/admin/verify	protect		routes/adminRoutes.js	18
+POST	/api/ai-session/token	none		routes/aiSessionRoutes.js	7
+GET	/api/analytics/attendance	authorize	adminRoles	routes/analyticsRoutes.js	55
+GET	/api/analytics/customers	authorize	adminRoles	routes/analyticsRoutes.js	52
+GET	/api/analytics/employees	authorize	adminRoles	routes/analyticsRoutes.js	46
+GET	/api/analytics/export	authorize	adminRoles	routes/analyticsRoutes.js	61
+GET	/api/analytics/inventory	authorize	adminRoles	routes/analyticsRoutes.js	58
+GET	/api/analytics/menu	authorize	adminRoles	routes/analyticsRoutes.js	43
+GET	/api/analytics/orders	authorize	adminRoles	routes/analyticsRoutes.js	40
+GET	/api/analytics/revenue	authorize	adminRoles	routes/analyticsRoutes.js	49
+GET	/api/analytics/summary	authorize	adminRoles	routes/analyticsRoutes.js	37
+GET	/api/app/apk/:version	none		routes/appUpdateRoutes.js	10
+GET	/api/app/version	none		routes/appUpdateRoutes.js	9
+DELETE	/api/attendance/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/attendanceRoutes.js	57
+PATCH	/api/attendance/:id/checkout	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	48
+PATCH	/api/attendance/:id/end-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	65
+POST	/api/attendance/:id/end-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	64
+PATCH	/api/attendance/:id/start-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	61
+POST	/api/attendance/:id/start-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	60
+PUT	/api/attendance/:id/status	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/attendanceRoutes.js	54
+POST	/api/attendance/checkin	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	42
+POST	/api/attendance/checkout	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	45
+GET	/api/attendance/past	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	39
+GET	/api/attendance/stats	authorize	["admin", "franchise_admin", "super_admin"]	routes/attendanceRoutes.js	51
+GET	/api/attendance/today	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/attendanceRoutes.js	36
+GET	/api/carts/:id	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	26
+GET	/api/carts/available	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	17
+GET	/api/carts/by-admin/:userId	optionalProtect	["admin", "cart_admin", "franchise_admin", "super_admin"]	routes/cartRoutes.js	23
+GET	/api/carts/my-settings	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	21
+PUT	/api/carts/my-settings	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	22
+GET	/api/carts/nearby	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	16
+GET	/api/carts/public-contact	optionalProtect	["admin", "cart_admin"]	routes/cartRoutes.js	18
+GET	/api/compliance/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/complianceRoutes.js	9
+GET	/api/compliance/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/complianceRoutes.js	28
+GET	/api/compliance/expiring	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/complianceRoutes.js	14
+GET	/api/compliance/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/complianceRoutes.js	19
+DELETE	/api/costing-v2/menu-items/:id	authorize	["admin"]	routes/costing-v2Routes.js	328
+GET	/api/customer-requests/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	24
+POST	/api/customer-requests/	protect		routes/customerRequestRoutes.js	18
+DELETE	/api/customer-requests/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/customerRequestRoutes.js	46
+GET	/api/customer-requests/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	33
+PATCH	/api/customer-requests/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	37
+PUT	/api/customer-requests/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	36
+POST	/api/customer-requests/:id/acknowledge	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	40
+POST	/api/customer-requests/:id/resolve	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	43
+GET	/api/customer-requests/pending	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/customerRequestRoutes.js	27
+GET	/api/customer-requests/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/customerRequestRoutes.js	30
+GET	/api/customers/	protect		routes/customerRoutes.js	21
+GET	/api/customers/:id	protect		routes/customerRoutes.js	24
+GET	/api/customers/search	protect		routes/customerRoutes.js	18
+GET	/api/customers/stats	protect		routes/customerRoutes.js	15
+DELETE	/api/default-menu/	authorize	["super_admin", "franchise_admin"]	routes/defaultMenuRoutes.js	18
+GET	/api/default-menu/	authorize	["super_admin", "franchise_admin"]	routes/defaultMenuRoutes.js	16
+PUT	/api/default-menu/	authorize	["super_admin", "franchise_admin"]	routes/defaultMenuRoutes.js	17
+POST	/api/default-menu/push/cafe/:cartId	authorize	["super_admin", "franchise_admin"]	routes/defaultMenuRoutes.js	20
+POST	/api/default-menu/push/franchise/:franchiseId	authorize	["super_admin", "franchise_admin"]	routes/defaultMenuRoutes.js	19
+GET	/api/employee-skills/mappings	protect		routes/employeeSkillsRoutes.js	25
+POST	/api/employee-skills/mappings	protect		routes/employeeSkillsRoutes.js	27
+DELETE	/api/employee-skills/mappings/:id	protect		routes/employeeSkillsRoutes.js	29
+PUT	/api/employee-skills/mappings/:id	protect		routes/employeeSkillsRoutes.js	28
+GET	/api/employee-skills/mappings/employee/:employeeId	protect		routes/employeeSkillsRoutes.js	26
+GET	/api/employee-skills/skills	protect		routes/employeeSkillsRoutes.js	19
+POST	/api/employee-skills/skills	protect		routes/employeeSkillsRoutes.js	20
+DELETE	/api/employee-skills/skills/:id	protect		routes/employeeSkillsRoutes.js	22
+PUT	/api/employee-skills/skills/:id	protect		routes/employeeSkillsRoutes.js	21
+GET	/api/feedback/	protect		routes/feedbackRoutes.js	17
+POST	/api/feedback/	protect		routes/feedbackRoutes.js	20
+GET	/api/feedback/:id	protect		routes/feedbackRoutes.js	19
+POST	/api/feedback/public	protect		routes/feedbackRoutes.js	12
+GET	/api/feedback/stats	protect		routes/feedbackRoutes.js	18
+POST	/api/files/generate-url	protect		routes/fileRoutes.js	171
+GET	/api/firebase-web-config	optionalProtect		routes/notificationRoutes.js	14
+GET	/api/geocode/reverse	none		routes/geocodeRoutes.js	8
+GET	/api/health	none		routes/healthRoutes.js	16
+GET	/api/inventory/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/inventoryRoutes.js	26
+POST	/api/inventory/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	32
+DELETE	/api/inventory/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	41
+GET	/api/inventory/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/inventoryRoutes.js	29
+PATCH	/api/inventory/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	35
+PATCH	/api/inventory/:id/stock	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	38
+GET	/api/inventory/available-ingredients	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	20
+GET	/api/inventory/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/inventoryRoutes.js	23
+GET	/api/kiosk-owner/	protect		routes/kioskOwnerRoutes.js	14
+POST	/api/kiosk-owner/	protect		routes/kioskOwnerRoutes.js	16
+DELETE	/api/kiosk-owner/:id	protect		routes/kioskOwnerRoutes.js	18
+GET	/api/kiosk-owner/:id	protect		routes/kioskOwnerRoutes.js	15
+PUT	/api/kiosk-owner/:id	protect		routes/kioskOwnerRoutes.js	17
+GET	/api/kiosk/	protect		routes/kioskRoutes.js	14
+POST	/api/kiosk/	protect		routes/kioskRoutes.js	16
+DELETE	/api/kiosk/:id	protect		routes/kioskRoutes.js	18
+GET	/api/kiosk/:id	protect		routes/kioskRoutes.js	15
+PUT	/api/kiosk/:id	protect		routes/kioskRoutes.js	17
+GET	/api/kot/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/kotRoutes.js	58
+GET	/api/kot/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/kotRoutes.js	238
+PATCH	/api/kot/:id/status	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/kotRoutes.js	285
+GET	/api/kot/pending	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/kotRoutes.js	115
+GET	/api/kot/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/kotRoutes.js	198
+GET	/api/menu/	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	29
+POST	/api/menu/categories	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	32
+DELETE	/api/menu/categories/:id	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	34
+PATCH	/api/menu/categories/:id	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	33
+POST	/api/menu/items	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	37
+DELETE	/api/menu/items/:id	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	40
+PATCH	/api/menu/items/:id	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	38
+PATCH	/api/menu/items/:id/availability	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	39
+GET	/api/menu/meta/spice-levels	optionalProtect		routes/menuRoutes.js	20
+GET	/api/menu/public	optionalProtect		routes/menuRoutes.js	19
+GET	/api/menu/uploads	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	43
+POST	/api/menu/uploads	authorize	["admin", "franchise_admin", "super_admin"]	routes/menuRoutes.js	50
+POST	/api/orders/	optionalProtect	["admin"]	routes/orderRoutes.js	36
+GET	/api/orders/:id	optionalProtect	["admin", "manager", "waiter", "captain"]	routes/orderRoutes.js	65
+PATCH	/api/orders/:id/confirm-payment	optionalProtect	["admin"]	routes/orderRoutes.js	41
+PATCH	/api/orders/:id/customer-status	optionalProtect	["admin"]	routes/orderRoutes.js	40
+POST	/api/orders/:id/finalize	optionalProtect	["admin"]	routes/orderRoutes.js	39
+POST	/api/orders/:id/kot	optionalProtect	["admin"]	routes/orderRoutes.js	38
+GET	/api/orders/takeaway-token/next	optionalProtect	["admin"]	routes/orderRoutes.js	37
+GET	/api/payment-qr/	authorize	["admin", "franchise_admin", "super_admin"]	routes/paymentQrRoutes.js	26
+DELETE	/api/payment-qr/:id	authorize	["admin", "franchise_admin", "super_admin"]	routes/paymentQrRoutes.js	28
+GET	/api/payment-qr/active	authorize	["admin", "franchise_admin", "super_admin"]	routes/paymentQrRoutes.js	20
+GET	/api/payment-qr/list	authorize	["admin", "franchise_admin", "super_admin"]	routes/paymentQrRoutes.js	27
+GET	/api/payment-qr/test	protect		routes/paymentQrRoutes.js	15
+POST	/api/payment-qr/upload	authorize	["admin", "franchise_admin", "super_admin"]	routes/paymentQrRoutes.js	25
+GET	/api/payments/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	26
+GET	/api/payments/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	36
+POST	/api/payments/:id/cancel	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	21
+POST	/api/payments/:id/mark-paid	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	38
+POST	/api/payments/:id/verify-razorpay	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	22
+POST	/api/payments/create	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	19
+GET	/api/payments/meta/constants	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	29
+GET	/api/payments/order/:orderId/all	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	27
+GET	/api/payments/order/:orderId/latest	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	20
+POST	/api/payments/sync-paid	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/paymentRoutes.js	28
+GET	/api/print-queue/	authorize	['admin', 'franchise_admin', 'super_admin']	routes/printQueueRoutes.js	25
+POST	/api/print-queue/	authorize	['admin', 'franchise_admin', 'super_admin']	routes/printQueueRoutes.js	22
+POST	/api/print-queue/:id/printed	authorize	['admin', 'franchise_admin', 'super_admin']	routes/printQueueRoutes.js	19
+DELETE	/api/print-queue/cleanup	authorize	['admin', 'franchise_admin', 'super_admin']	routes/printQueueRoutes.js	28
+GET	/api/print-queue/pending	authorize	['admin', 'franchise_admin', 'super_admin']	routes/printQueueRoutes.js	16
+POST	/api/print/network	authorize	['admin', 'manager', 'waiter', 'captain']	routes/printRoutes.js	18
+POST	/api/print/test	protect		routes/printRoutes.js	21
+GET	/api/printer-config/	authorize	["waiter", "captain", "manager", "admin"]	routes/printerConfigRoutes.js	12
+PUT	/api/printer-config/	authorize	["manager", "admin"]	routes/printerConfigRoutes.js	14
+POST	/api/revenue/calculate/daily	authorize	["super_admin"]	routes/revenueRoutes.js	20
+POST	/api/revenue/calculate/monthly	authorize	["super_admin"]	routes/revenueRoutes.js	21
+GET	/api/revenue/current	authorize	["super_admin"]	routes/revenueRoutes.js	24
+GET	/api/revenue/export	authorize	["super_admin"]	routes/revenueRoutes.js	26
+GET	/api/revenue/franchise	authorize	["super_admin"]	routes/revenueRoutes.js	14
+GET	/api/revenue/history	authorize	["super_admin"]	routes/revenueRoutes.js	25
+POST	/api/save-token	optionalProtect		routes/notificationRoutes.js	17
+GET	/api/tables/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/tableRoutes.js	30
+POST	/api/tables/	authorize	["admin"]	routes/tableRoutes.js	32
+DELETE	/api/tables/:id	authorize	["admin"]	routes/tableRoutes.js	35
+GET	/api/tables/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/tableRoutes.js	31
+PATCH	/api/tables/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	routes/tableRoutes.js	34
+PUT	/api/tables/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	routes/tableRoutes.js	33
+POST	/api/tables/:id/occupy	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/tableRoutes.js	27
+POST	/api/tables/:id/regenerate-qr	authorize	["admin"]	routes/tableRoutes.js	36
+POST	/api/tables/:id/reset-qr	authorize	["admin"]	routes/tableRoutes.js	37
+POST	/api/tables/:id/unmerge	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	routes/tableRoutes.js	39
+GET	/api/tables/available	protect		routes/tableRoutes.js	23
+GET	/api/tables/dashboard/occupancy	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/tableRoutes.js	40
+GET	/api/tables/lookup/:slug	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/tableRoutes.js	26
+POST	/api/tables/merge	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	routes/tableRoutes.js	38
+GET	/api/tables/public	protect		routes/tableRoutes.js	24
+GET	/api/tables/public-cart-id/:tableId	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/tableRoutes.js	25
+GET	/api/tasks/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/taskRoutes.js	20
+POST	/api/tasks/	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	routes/taskRoutes.js	35
+DELETE	/api/tasks/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/taskRoutes.js	45
+GET	/api/tasks/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/taskRoutes.js	32
+PATCH	/api/tasks/:id	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	routes/taskRoutes.js	39
+PUT	/api/tasks/:id	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	routes/taskRoutes.js	38
+POST	/api/tasks/:id/complete	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/taskRoutes.js	42
+GET	/api/tasks/my	authorize	["waiter", "cook", "captain", "manager"]	routes/taskRoutes.js	23
+GET	/api/tasks/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	routes/taskRoutes.js	29
+GET	/api/tasks/today	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	routes/taskRoutes.js	26
+GET	/api/users/	authorize	["franchise_admin"]	routes/userRoutes.js	88
+DELETE	/api/users/:id	protect		routes/userRoutes.js	116
+GET	/api/users/:id	authorize	["super_admin"]	routes/userRoutes.js	102
+PUT	/api/users/:id	protect		routes/userRoutes.js	114
+GET	/api/users/emergency-contacts	protect		routes/userRoutes.js	74
+PUT	/api/users/emergency-contacts	protect		routes/userRoutes.js	75
+POST	/api/users/logout	authorize	["franchise_admin"]	routes/userRoutes.js	78
+GET	/api/users/me	protect		routes/userRoutes.js	71
+POST	/api/waitlist/	none		routes/waitlistRoutes.js	14
+DELETE	/api/waitlist/:token	none		routes/waitlistRoutes.js	16
+PATCH	/api/waitlist/:token/notify	none		routes/waitlistRoutes.js	20
+PATCH	/api/waitlist/:token/seat	none		routes/waitlistRoutes.js	17
+GET	/api/waitlist/status	none		routes/waitlistRoutes.js	15
+GET	/api/waitlist/table/:id	none		routes/waitlistRoutes.js	18
+POST	/api/waitlist/table/:id/notify-next	none		routes/waitlistRoutes.js	19

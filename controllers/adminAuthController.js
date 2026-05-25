@@ -15,6 +15,13 @@ const generateToken = (id, tokenVersion = 0) => {
   });
 };
 
+const normalizeAdminRole = (role) => {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  return normalizedRole === "cart_admin" ? "admin" : normalizedRole;
+};
+
+const ADMIN_WEB_ROLES = new Set(["super_admin", "franchise_admin", "admin"]);
+
 // Admin Login
 const adminLogin = async (req, res) => {
   try {
@@ -47,9 +54,10 @@ const adminLogin = async (req, res) => {
     }
 
     console.log(`[ADMIN_LOGIN] User found: ${user.name} (${user._id}), Role: ${user.role}, isActive: ${user.isActive}, isApproved: ${user.isApproved}`);
+    const effectiveRole = normalizeAdminRole(user.role);
 
     // Check if user is an admin role
-    if (!["super_admin", "franchise_admin", "admin"].includes(user.role)) {
+    if (!ADMIN_WEB_ROLES.has(effectiveRole)) {
       console.log(`[ADMIN_LOGIN] ❌ Invalid role: ${user.role} (not an admin role)`);
       return res.status(401).json({
         success: false,
@@ -67,7 +75,7 @@ const adminLogin = async (req, res) => {
     }
 
     // For cafe admins, check if they're approved, active, and their franchise is active
-    if (user.role === "admin") {
+    if (effectiveRole === "admin") {
       if (!user.isApproved) {
         return res.status(403).json({
           success: false,
@@ -120,7 +128,7 @@ const adminLogin = async (req, res) => {
       _id: user._id,
       name: user.name,
       email: user.email,
-      role: user.role,
+      role: effectiveRole,
       cafeName: user.cafeName,
       cartName: user.cartName,
       location: user.location,
@@ -134,7 +142,7 @@ const adminLogin = async (req, res) => {
     }
     
     // Add cart code for cart admins
-    if (user.role === "admin") {
+    if (effectiveRole === "admin") {
       userResponse.cartCode = user.cartCode;
     }
 
@@ -163,8 +171,9 @@ const verifyAdminToken = async (req, res) => {
     }
 
     const user = req.user;
+    const effectiveRole = normalizeAdminRole(user.role);
 
-    if (!["super_admin", "franchise_admin", "admin"].includes(user.role)) {
+    if (!ADMIN_WEB_ROLES.has(effectiveRole)) {
       return res.status(403).json({
         success: false,
         message: "Not authorized as admin",
@@ -181,7 +190,7 @@ const verifyAdminToken = async (req, res) => {
       });
     }
 
-    if (user.role === "admin") {
+    if (effectiveRole === "admin") {
       if (!user.isApproved) {
         return res.status(403).json({
           success: false,
@@ -219,7 +228,7 @@ const verifyAdminToken = async (req, res) => {
       _id: user._id,
       name: user.name,
       email: user.email,
-      role: user.role,
+      role: effectiveRole,
       cafeName: user.cafeName,
       cartName: user.cartName,
       location: user.location,
@@ -231,7 +240,7 @@ const verifyAdminToken = async (req, res) => {
       userResponse.franchiseShortcut = user.franchiseShortcut;
     }
     
-    if (user.role === "admin") {
+    if (effectiveRole === "admin") {
       userResponse.cartCode = user.cartCode;
     }
 

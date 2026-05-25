@@ -7,6 +7,11 @@ const getJwtSecret = () => {
   return secret || null;
 };
 
+const normalizeRoleAlias = (role = "") => {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  return normalizedRole === "cart_admin" ? "admin" : normalizedRole;
+};
+
 exports.protect = async (req, res, next) => {
   let token;
 
@@ -98,8 +103,10 @@ exports.protect = async (req, res, next) => {
         }
       }
 
+      const effectiveUserRole = normalizeRoleAlias(req.user.role);
+
       // Check if franchise admin is active
-      if (req.user.role === "franchise_admin" && req.user.isActive === false) {
+      if (effectiveUserRole === "franchise_admin" && req.user.isActive === false) {
         return res.status(403).json({ 
           message: 'Your franchise account has been deactivated. Please contact TerraCart Support.',
           code: 'ACCOUNT_DEACTIVATED',
@@ -108,7 +115,7 @@ exports.protect = async (req, res, next) => {
       }
 
       // Check if cafe admin is approved and franchise is active
-      if (req.user.role === "admin") {
+      if (effectiveUserRole === "admin") {
         if (!req.user.isApproved) {
           return res.status(403).json({ 
             message: 'Your account is pending approval from franchise admin. Please wait for approval.',
@@ -171,9 +178,10 @@ exports.protect = async (req, res, next) => {
 };
 
 exports.admin = async (req, res, next) => {
-  if (req.user && ["super_admin", "franchise_admin", "admin"].includes(req.user.role)) {
+  const effectiveRole = normalizeRoleAlias(req.user?.role);
+  if (req.user && ["super_admin", "franchise_admin", "admin"].includes(effectiveRole)) {
     // For cafe admins, check if they're approved
-    if (req.user.role === "admin" && !req.user.isApproved) {
+    if (effectiveRole === "admin" && !req.user.isApproved) {
       return res.status(403).json({ message: 'Cafe admin account pending approval' });
     }
     return next();
@@ -213,9 +221,9 @@ exports.authorize = (allowedRoles = []) => async (req, res, next) => {
     }
   }
   
-  const normalizedUserRole = String(userRole || "").toLowerCase();
+  const normalizedUserRole = normalizeRoleAlias(userRole);
   const normalizedAllowedRoles = allowedRoles.map((role) =>
-    String(role || "").toLowerCase(),
+    normalizeRoleAlias(role),
   );
 
   // Backward-compatible safety: allow admins to accept orders even if route
@@ -295,4 +303,58 @@ exports.optionalProtect = async (req, res, next) => {
   }
   // Always continue to next middleware (with or without req.user)
   return next();
+};
+
+/**
+ * Billable AI routes: staff JWT (req.user) OR valid x-terra-ai-session cart token,
+ * OR anonymous when AI_REQUIRE_CUSTOMER_SESSION is not "true".
+ */
+exports.requireAiCustomerOrStaff = async (req, res, next) => {
+  if (req.user) {
+    req.aiAccess = "staff";
+    req.aiAuthSource = "jwt";
+    return next();
+  }
+
+  const sessionHeader = req.headers["x-terra-ai-session"];
+  const rawSession =
+    typeof sessionHeader === "string" ? sessionHeader.trim() : "";
+
+  if (rawSession) {
+    const { verifyCartSessionToken } = require("../services/aiSessionService");
+    const v = verifyCartSessionToken(rawSession);
+    if (v.ok && v.cartId) {
+      req.aiCartId = v.cartId;
+      req.aiAccess = "customer_session";
+      req.aiAuthSource = "terra_session";
+
+      const bodyCart = req.body?.cartId;
+      if (
+        bodyCart !== undefined &&
+        bodyCart !== null &&
+        String(bodyCart).trim() !== "" &&
+        String(bodyCart).trim() !== String(v.cartId)
+      ) {
+        return res.status(403).json({
+          message: "AI session does not match cartId in request",
+          code: "AI_SESSION_CART_MISMATCH",
+        });
+      }
+      return next();
+    }
+  }
+
+  if (
+    String(process.env.AI_REQUIRE_CUSTOMER_SESSION || "")
+      .toLowerCase() !== "true"
+  ) {
+    req.aiAccess = "anonymous";
+    req.aiAuthSource = "anonymous";
+    return next();
+  }
+
+  return res.status(401).json({
+    message: "Authentication or AI session required",
+    code: "AI_AUTH_REQUIRED",
+  });
 };

@@ -314,6 +314,160 @@ const buildEmployeeVisibleQueueMongoFilter = () => ({
   ],
 });
 
+const escapeRegex = (value = "") =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const toBoundedPositiveInt = (
+  value,
+  fallback,
+  { min = 1, max = Number.MAX_SAFE_INTEGER } = {},
+) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return Math.min(parsed, max);
+};
+
+const normalizeOrderListFilterStatus = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase();
+
+const buildOrderListStatusFilter = (statusValue) => {
+  const normalizedStatus = normalizeOrderListFilterStatus(statusValue);
+  if (!normalizedStatus || normalizedStatus === "all") return null;
+
+  const notReturnedFilter = {
+    $or: [{ returnedAt: { $exists: false } }, { returnedAt: null }],
+  };
+  const notCancelledFilter = {
+    $or: [
+      { cancellationReason: { $exists: false } },
+      { cancellationReason: null },
+      { cancellationReason: "" },
+    ],
+  };
+
+  if (normalizedStatus === "active") {
+    return { $and: [notReturnedFilter, notCancelledFilter] };
+  }
+
+  if (normalizedStatus === "cancelled") {
+    return {
+      $or: [
+        { status: { $in: ["CANCELLED", "Cancelled", "cancelled"] } },
+        { cancellationReason: { $exists: true, $nin: [null, ""] } },
+      ],
+    };
+  }
+
+  if (normalizedStatus === "returned") {
+    return {
+      $or: [
+        { status: { $in: ["RETURNED", "Returned", "returned"] } },
+        { returnedAt: { $exists: true, $ne: null } },
+      ],
+    };
+  }
+
+  if (normalizedStatus === "paid") {
+    return {
+      $or: [{ paymentStatus: PAYMENT_STATUSES.PAID }, { isPaid: true }],
+    };
+  }
+
+  if (normalizedStatus === "ready") {
+    return { status: ORDER_STATUSES.READY };
+  }
+
+  if (normalizedStatus === "preparing") {
+    return { status: { $in: [ORDER_STATUSES.NEW, ORDER_STATUSES.PREPARING] } };
+  }
+
+  if (normalizedStatus === "served") {
+    return {
+      $and: [
+        { status: ORDER_STATUSES.COMPLETED },
+        {
+          $or: [
+            { paymentStatus: { $exists: false } },
+            { paymentStatus: null },
+            { paymentStatus: { $ne: PAYMENT_STATUSES.PAID } },
+          ],
+        },
+        notReturnedFilter,
+        notCancelledFilter,
+      ],
+    };
+  }
+
+  return null;
+};
+
+const parseDateOnly = (value, { endOfDay = false } = {}) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  if (endOfDay) {
+    parsed.setHours(23, 59, 59, 999);
+  } else {
+    parsed.setHours(0, 0, 0, 0);
+  }
+  return parsed;
+};
+
+const buildOrderListSearchExpression = ({
+  orderSearch = "",
+  tableSearch = "",
+  invoiceSearch = "",
+} = {}) => {
+  const expressionFilters = [];
+
+  const normalizedOrderSearch = String(orderSearch || "").trim();
+  if (normalizedOrderSearch) {
+    expressionFilters.push({
+      $regexMatch: {
+        input: { $toString: "$_id" },
+        regex: escapeRegex(normalizedOrderSearch),
+        options: "i",
+      },
+    });
+  }
+
+  const normalizedInvoiceSearch = String(invoiceSearch || "").trim();
+  if (normalizedInvoiceSearch) {
+    const invoiceToken = normalizedInvoiceSearch.replace(/^inv-/i, "").trim();
+    if (invoiceToken) {
+      expressionFilters.push({
+        $regexMatch: {
+          input: { $toString: "$_id" },
+          regex: escapeRegex(invoiceToken),
+          options: "i",
+        },
+      });
+    }
+  }
+
+  const normalizedTableSearch = String(tableSearch || "").trim();
+  if (normalizedTableSearch) {
+    expressionFilters.push({
+      $regexMatch: {
+        input: {
+          $toString: {
+            $ifNull: ["$tableNumber", ""],
+          },
+        },
+        regex: escapeRegex(normalizedTableSearch),
+        options: "i",
+      },
+    });
+  }
+
+  if (expressionFilters.length === 0) return null;
+  if (expressionFilters.length === 1) return expressionFilters[0];
+  return { $and: expressionFilters };
+};
+
 const resolveMobileCartId = async (user) => {
   if (!user) return null;
 
@@ -4737,6 +4891,19 @@ const getOrders = async (req, res) => {
   try {
     const query = {};
     let requiredCartScope = null;
+    let mobileCartScopeId = null;
+
+    const paginationRequested =
+      req.query?.page !== undefined || req.query?.limit !== undefined;
+    const page = toBoundedPositiveInt(req.query?.page, 1, {
+      min: 1,
+      max: 50000,
+    });
+    const limit = toBoundedPositiveInt(req.query?.limit, 25, {
+      min: 1,
+      max: 100,
+    });
+    const skip = (page - 1) * limit;
 
     // Filter orders based on user role:
     // - Cart admin (admin): ONLY see orders from their cart (cartId matches their _id) - CRITICAL FOR DATA ISOLATION
@@ -4771,6 +4938,7 @@ const getOrders = async (req, res) => {
       // Prefer cartId, fallback to cafeId for backward compatibility.
       const mobileCartId = await resolveMobileCartId(req.user);
       if (mobileCartId) {
+        mobileCartScopeId = mobileCartId.toString();
         requiredCartScope = buildCartOwnershipFilter(mobileCartId);
         if (!requiredCartScope) {
           console.warn(
@@ -4796,6 +4964,31 @@ const getOrders = async (req, res) => {
       query.$and.push(requiredCartScope);
     }
 
+    const requestedCartId =
+      String(req.query?.cartId || "")
+        .trim() || null;
+    if (requestedCartId) {
+      if (req.user?.role === "admin" && req.user?._id) {
+        if (requestedCartId !== req.user._id.toString()) {
+          return res
+            .status(403)
+            .json({ message: "Requested cartId does not match your cart access." });
+        }
+      } else if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
+        if (!mobileCartScopeId || requestedCartId !== mobileCartScopeId) {
+          return res
+            .status(403)
+            .json({ message: "Requested cartId does not match your cart access." });
+        }
+      }
+
+      const requestedCartFilter = buildCartOwnershipFilter(requestedCartId);
+      if (requestedCartFilter) {
+        query.$and = query.$and || [];
+        query.$and.push(requestedCartFilter);
+      }
+    }
+
     const includeHistory =
       String(req.query?.includeHistory || "").trim().toLowerCase() === "true";
 
@@ -4807,15 +5000,60 @@ const getOrders = async (req, res) => {
       }
     }
 
-    // Fetch ALL orders - no date filtering, no limits, permanent storage
-    // Add limit to prevent infinite queries (max 10000 orders at once)
-    // Use select to limit fields and improve performance
-    const orders = await Order.find(query)
+    const statusFilter = buildOrderListStatusFilter(req.query?.status);
+    if (statusFilter) {
+      query.$and = query.$and || [];
+      query.$and.push(statusFilter);
+    }
+
+    const paidOnly =
+      String(req.query?.paidOnly || "").trim().toLowerCase() === "true";
+    if (paidOnly) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [{ paymentStatus: PAYMENT_STATUSES.PAID }, { isPaid: true }],
+      });
+    }
+
+    const searchExpression = buildOrderListSearchExpression({
+      orderSearch: req.query?.orderSearch,
+      tableSearch: req.query?.tableSearch,
+      invoiceSearch: req.query?.invoiceSearch,
+    });
+    if (searchExpression) {
+      query.$expr = searchExpression;
+    }
+
+    const startDate = parseDateOnly(req.query?.startDate);
+    const endDate = parseDateOnly(req.query?.endDate, { endOfDay: true });
+    if (startDate || endDate) {
+      const dateFilter = {};
+      const rangeStart = startDate && endDate && startDate > endDate ? endDate : startDate;
+      const rangeEnd = startDate && endDate && startDate > endDate ? startDate : endDate;
+
+      if (rangeStart) dateFilter.$gte = rangeStart;
+      if (rangeEnd) dateFilter.$lte = rangeEnd;
+      query.createdAt = dateFilter;
+    }
+
+    const totalCount = paginationRequested
+      ? await Order.countDocuments(query)
+      : null;
+
+    let ordersQuery = Order.find(query)
       .sort({ createdAt: -1 }) // Sort by newest first (uses index)
-      .limit(10000) // Safety limit to prevent infinite queries
       .populate("table", "number name status") // Only populate needed fields
       .select("-__v") // Exclude version field
       .lean();
+
+    if (paginationRequested) {
+      ordersQuery = ordersQuery.skip(skip).limit(limit);
+    } else {
+      // Preserve existing behavior for legacy callers.
+      ordersQuery = ordersQuery.limit(10000); // Safety limit to prevent infinite queries
+    }
+
+    const orders = await ordersQuery;
 
     // Optimize franchiseId population: Batch fetch instead of N+1 queries
     const User = require("../models/userModel");
@@ -4884,6 +5122,21 @@ const getOrders = async (req, res) => {
     responseOrders.sort(
       (a, b) => Number(isVipActiveOrder(b)) - Number(isVipActiveOrder(a)),
     );
+    if (paginationRequested) {
+      const totalPages = Math.max(1, Math.ceil((totalCount || 0) / limit));
+      return res.json({
+        orders: responseOrders,
+        pagination: {
+          total: totalCount || 0,
+          page,
+          limit,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      });
+    }
+
     return res.json(responseOrders);
   } catch (err) {
     console.error("[GET_ORDERS] Error:", err);
@@ -5893,6 +6146,8 @@ const cancelOrderByCustomer = async (req, res) => {
     const orderCartScopeId = await resolveOrderCartScopeId(order);
 
     const requesterRole = String(req?.user?.role || "").toLowerCase();
+    const normalizedStaffRole =
+      requesterRole === "cart_admin" ? "admin" : requesterRole;
     const isStaffRequester = [
       "admin",
       "franchise_admin",
@@ -5901,21 +6156,21 @@ const cancelOrderByCustomer = async (req, res) => {
       "cook",
       "captain",
       "manager",
-    ].includes(requesterRole);
+    ].includes(normalizedStaffRole);
 
     if (isStaffRequester) {
-      if (requesterRole === "admin" && req.user?._id) {
+      if (normalizedStaffRole === "admin" && req.user?._id) {
         const requesterCartId = toSocketIdString(req.user._id);
         if (order.serviceType !== "TAKEAWAY" && order.serviceType !== "DELIVERY") {
           if (!orderCartScopeId || orderCartScopeId !== requesterCartId) {
             return res.status(403).json({ message: "Order does not belong to your cafe" });
           }
         }
-      } else if (requesterRole === "franchise_admin" && req.user?._id) {
+      } else if (normalizedStaffRole === "franchise_admin" && req.user?._id) {
         if (!order.franchiseId || order.franchiseId.toString() !== req.user._id.toString()) {
           return res.status(403).json({ message: "Order does not belong to your franchise" });
         }
-      } else if (["waiter", "cook", "captain", "manager"].includes(requesterRole)) {
+      } else if (["waiter", "cook", "captain", "manager"].includes(normalizedStaffRole)) {
         const userCartId = (req.user?.cartId || req.user?.cafeId)?.toString();
         if (!userCartId) {
           return res
@@ -6326,7 +6581,10 @@ const returnItems = async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
 
     // Check access permissions
-    if (req.user && req.user.role === "admin" && req.user._id) {
+    const returnItemsRequesterRole = String(req?.user?.role || "").toLowerCase();
+    const normalizedReturnItemsRole =
+      returnItemsRequesterRole === "cart_admin" ? "admin" : returnItemsRequesterRole;
+    if (req.user && normalizedReturnItemsRole === "admin" && req.user._id) {
       if (
         !order.cartId ||
         order.cartId.toString() !== req.user._id.toString()

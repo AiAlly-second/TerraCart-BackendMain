@@ -119,7 +119,7 @@ router.patch(
 router.patch(
   "/:id/return-items",
   protect,
-  authorize(["admin", "franchise_admin", "super_admin"]),
+  authorize(["admin", "cart_admin", "franchise_admin", "super_admin", "manager"]),
   returnItems,
 );
 router.patch(

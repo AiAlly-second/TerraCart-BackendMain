@@ -1,0 +1,239 @@
+file	line	method	prefix	path	auth	roles	endpoint
+routes/defaultMenuRoutes.js	18	DELETE	(unmounted?)	/	none		/
+routes/addonRoutes.js	12	GET	(unmounted?)	/	protect		/
+routes/complianceRoutes.js	9	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/
+routes/customerRequestRoutes.js	24	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/customerRoutes.js	21	GET	(unmounted?)	/	none		/
+routes/defaultMenuRoutes.js	16	GET	(unmounted?)	/	authorize	["super_admin", "franchise_admin"]	/
+routes/feedbackRoutes.js	17	GET	(unmounted?)	/	protect		/
+routes/inventoryRoutes.js	26	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/
+routes/kioskOwnerRoutes.js	14	GET	(unmounted?)	/	protect		/
+routes/kioskRoutes.js	14	GET	(unmounted?)	/	protect		/
+routes/kotRoutes.js	58	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/menuRoutes.js	29	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin"]	/
+routes/paymentQrRoutes.js	26	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin"]	/
+routes/paymentRoutes.js	26	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/
+routes/printerConfigRoutes.js	12	GET	(unmounted?)	/	authorize	["waiter", "captain", "manager", "admin"]	/
+routes/printQueueRoutes.js	25	GET	(unmounted?)	/	authorize	['admin', 'franchise_admin', 'super_admin']	/
+routes/tableRoutes.js	30	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/taskRoutes.js	20	GET	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/userRoutes.js	88	GET	(unmounted?)	/	none		/
+routes/addonRoutes.js	13	POST	(unmounted?)	/	protect		/
+routes/customerRequestRoutes.js	18	POST	(unmounted?)	/	protect		/
+routes/feedbackRoutes.js	20	POST	(unmounted?)	/	none		/
+routes/inventoryRoutes.js	32	POST	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/kioskOwnerRoutes.js	16	POST	(unmounted?)	/	none		/
+routes/kioskRoutes.js	16	POST	(unmounted?)	/	none		/
+routes/orderRoutes.js	36	POST	(unmounted?)	/	authorize	["admin"]	/
+routes/printQueueRoutes.js	22	POST	(unmounted?)	/	authorize	['admin', 'franchise_admin', 'super_admin']	/
+routes/tableRoutes.js	32	POST	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/taskRoutes.js	35	POST	(unmounted?)	/	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/
+routes/waitlistRoutes.js	14	POST	(unmounted?)	/	none		/
+routes/defaultMenuRoutes.js	17	PUT	(unmounted?)	/	authorize	["super_admin", "franchise_admin"]	/
+routes/printerConfigRoutes.js	14	PUT	(unmounted?)	/	authorize	["waiter", "captain", "manager", "admin"]	/
+routes/addonRoutes.js	15	DELETE	(unmounted?)	/:id	none		/:id
+routes/attendanceRoutes.js	57	DELETE	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/customerRequestRoutes.js	46	DELETE	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/inventoryRoutes.js	41	DELETE	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/kioskOwnerRoutes.js	18	DELETE	(unmounted?)	/:id	none		/:id
+routes/kioskRoutes.js	18	DELETE	(unmounted?)	/:id	none		/:id
+routes/paymentQrRoutes.js	28	DELETE	(unmounted?)	/:id	none		/:id
+routes/tableRoutes.js	35	DELETE	(unmounted?)	/:id	authorize	["admin"]	/:id
+routes/taskRoutes.js	45	DELETE	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/userRoutes.js	116	DELETE	(unmounted?)	/:id	none		/:id
+routes/cartRoutes.js	26	GET	(unmounted?)	/:id	authorize	["admin", "cart_admin", "franchise_admin", "super_admin"]	/:id
+routes/complianceRoutes.js	28	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/customerRequestRoutes.js	33	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/customerRoutes.js	24	GET	(unmounted?)	/:id	none		/:id
+routes/feedbackRoutes.js	19	GET	(unmounted?)	/:id	none		/:id
+routes/inventoryRoutes.js	29	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/kioskOwnerRoutes.js	15	GET	(unmounted?)	/:id	protect		/:id
+routes/kioskRoutes.js	15	GET	(unmounted?)	/:id	protect		/:id
+routes/kotRoutes.js	238	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/orderRoutes.js	65	GET	(unmounted?)	/:id	authorize	["admin", "manager", "waiter", "captain"]	/:id
+routes/paymentRoutes.js	36	GET	(unmounted?)	/:id	none		/:id
+routes/tableRoutes.js	31	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/taskRoutes.js	32	GET	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/userRoutes.js	102	GET	(unmounted?)	/:id	none		/:id
+routes/customerRequestRoutes.js	37	PATCH	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/inventoryRoutes.js	35	PATCH	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id
+routes/tableRoutes.js	34	PATCH	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/taskRoutes.js	39	PATCH	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	/:id
+routes/addonRoutes.js	14	PUT	(unmounted?)	/:id	none		/:id
+routes/customerRequestRoutes.js	36	PUT	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/kioskOwnerRoutes.js	17	PUT	(unmounted?)	/:id	none		/:id
+routes/kioskRoutes.js	17	PUT	(unmounted?)	/:id	none		/:id
+routes/tableRoutes.js	33	PUT	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id
+routes/taskRoutes.js	38	PUT	(unmounted?)	/:id	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	/:id
+routes/userRoutes.js	114	PUT	(unmounted?)	/:id	none		/:id
+routes/customerRequestRoutes.js	40	POST	(unmounted?)	/:id/acknowledge	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/acknowledge
+routes/paymentRoutes.js	21	POST	(unmounted?)	/:id/cancel	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id/cancel
+routes/attendanceRoutes.js	48	PATCH	(unmounted?)	/:id/checkout	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/checkout
+routes/taskRoutes.js	42	POST	(unmounted?)	/:id/complete	authorize	["admin", "franchise_admin", "super_admin", "captain", "manager"]	/:id/complete
+routes/orderRoutes.js	41	PATCH	(unmounted?)	/:id/confirm-payment	authorize	["admin"]	/:id/confirm-payment
+routes/orderRoutes.js	40	PATCH	(unmounted?)	/:id/customer-status	authorize	["admin"]	/:id/customer-status
+routes/attendanceRoutes.js	65	PATCH	(unmounted?)	/:id/end-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/end-break
+routes/attendanceRoutes.js	64	POST	(unmounted?)	/:id/end-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/end-break
+routes/orderRoutes.js	39	POST	(unmounted?)	/:id/finalize	authorize	["admin"]	/:id/finalize
+routes/orderRoutes.js	38	POST	(unmounted?)	/:id/kot	authorize	["admin"]	/:id/kot
+routes/paymentRoutes.js	38	POST	(unmounted?)	/:id/mark-paid	none		/:id/mark-paid
+routes/tableRoutes.js	27	POST	(unmounted?)	/:id/occupy	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/occupy
+routes/printQueueRoutes.js	19	POST	(unmounted?)	/:id/printed	authorize	['admin', 'franchise_admin', 'super_admin']	/:id/printed
+routes/tableRoutes.js	36	POST	(unmounted?)	/:id/regenerate-qr	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	/:id/regenerate-qr
+routes/tableRoutes.js	37	POST	(unmounted?)	/:id/reset-qr	authorize	["admin", "franchise_admin", "super_admin", "waiter", "captain", "manager"]	/:id/reset-qr
+routes/customerRequestRoutes.js	43	POST	(unmounted?)	/:id/resolve	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/resolve
+routes/attendanceRoutes.js	61	PATCH	(unmounted?)	/:id/start-break	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/start-break
+routes/attendanceRoutes.js	60	POST	(unmounted?)	/:id/start-break	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id/start-break
+routes/kotRoutes.js	285	PATCH	(unmounted?)	/:id/status	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/:id/status
+routes/attendanceRoutes.js	54	PUT	(unmounted?)	/:id/status	authorize	["admin", "franchise_admin", "super_admin"]	/:id/status
+routes/inventoryRoutes.js	38	PATCH	(unmounted?)	/:id/stock	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id/stock
+routes/tableRoutes.js	39	POST	(unmounted?)	/:id/unmerge	authorize	["admin"]	/:id/unmerge
+routes/paymentRoutes.js	22	POST	(unmounted?)	/:id/verify-razorpay	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/:id/verify-razorpay
+routes/waitlistRoutes.js	16	DELETE	(unmounted?)	/:token	none		/:token
+routes/waitlistRoutes.js	20	PATCH	(unmounted?)	/:token/notify	none		/:token/notify
+routes/waitlistRoutes.js	17	PATCH	(unmounted?)	/:token/seat	none		/:token/seat
+routes/paymentQrRoutes.js	20	GET	(unmounted?)	/active	authorize	["admin", "franchise_admin", "super_admin"]	/active
+routes/healthRoutes.js	16	GET	/api	/health	none		/api/health
+routes/appUpdateRoutes.js	10	GET	(unmounted?)	/apk/:version	none		/apk/:version
+routes/analyticsRoutes.js	55	GET	(unmounted?)	/attendance	authorize	adminRoles	/attendance
+routes/cartRoutes.js	17	GET	(unmounted?)	/available	none		/available
+routes/tableRoutes.js	23	GET	(unmounted?)	/available	authorize		/available
+routes/inventoryRoutes.js	20	GET	(unmounted?)	/available-ingredients	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/available-ingredients
+routes/cartRoutes.js	23	GET	(unmounted?)	/by-admin/:userId	authorize	["admin", "cart_admin"]	/by-admin/:userId
+routes/revenueRoutes.js	20	POST	(unmounted?)	/calculate/daily	authorize	["super_admin"]	/calculate/daily
+routes/revenueRoutes.js	21	POST	(unmounted?)	/calculate/monthly	none		/calculate/monthly
+routes/menuRoutes.js	32	POST	(unmounted?)	/categories	none		/categories
+routes/menuRoutes.js	34	DELETE	(unmounted?)	/categories/:id	none		/categories/:id
+routes/menuRoutes.js	33	PATCH	(unmounted?)	/categories/:id	none		/categories/:id
+routes/attendanceRoutes.js	42	POST	(unmounted?)	/checkin	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/checkin
+routes/attendanceRoutes.js	45	POST	(unmounted?)	/checkout	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/checkout
+routes/printQueueRoutes.js	28	DELETE	(unmounted?)	/cleanup	authorize	['admin', 'franchise_admin', 'super_admin']	/cleanup
+routes/paymentRoutes.js	19	POST	(unmounted?)	/create	none		/create
+routes/revenueRoutes.js	24	GET	(unmounted?)	/current	none		/current
+routes/analyticsRoutes.js	52	GET	(unmounted?)	/customers	authorize	adminRoles	/customers
+routes/costingRoutes.js	82	GET	(unmounted?)	/dashboard	authorize	["super_admin", "franchise_admin", "admin", "cart_admin"]	/dashboard
+routes/tableRoutes.js	40	GET	(unmounted?)	/dashboard/occupancy	authorize	["admin"]	/dashboard/occupancy
+routes/userRoutes.js	74	GET	(unmounted?)	/emergency-contacts	none		/emergency-contacts
+routes/userRoutes.js	75	PUT	(unmounted?)	/emergency-contacts	none		/emergency-contacts
+routes/analyticsRoutes.js	46	GET	(unmounted?)	/employees	authorize	adminRoles	/employees
+routes/costingRoutes.js	100	GET	(unmounted?)	/expense-categories	none		/expense-categories
+routes/costingRoutes.js	101	POST	(unmounted?)	/expense-categories	none		/expense-categories
+routes/costingRoutes.js	103	DELETE	(unmounted?)	/expense-categories/:id	none		/expense-categories/:id
+routes/costingRoutes.js	102	PUT	(unmounted?)	/expense-categories/:id	none		/expense-categories/:id
+routes/costingRoutes.js	92	GET	(unmounted?)	/expenses	none		/expenses
+routes/costingRoutes.js	94	POST	(unmounted?)	/expenses	none		/expenses
+routes/costingRoutes.js	96	DELETE	(unmounted?)	/expenses/:id	none		/expenses/:id
+routes/costingRoutes.js	93	GET	(unmounted?)	/expenses/:id	none		/expenses/:id
+routes/costingRoutes.js	95	PUT	(unmounted?)	/expenses/:id	none		/expenses/:id
+routes/costingRoutes.js	97	POST	(unmounted?)	/expenses/bulk-import	none		/expenses/bulk-import
+routes/complianceRoutes.js	14	GET	(unmounted?)	/expiring	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/expiring
+routes/analyticsRoutes.js	61	GET	(unmounted?)	/export	authorize	adminRoles	/export
+routes/revenueRoutes.js	26	GET	(unmounted?)	/export	none		/export
+routes/notificationRoutes.js	14	GET	(unmounted?)	/firebase-web-config	none		/firebase-web-config
+routes/revenueRoutes.js	14	GET	(unmounted?)	/franchise	authorize	["super_admin"]	/franchise
+routes/fileRoutes.js	171	POST	(unmounted?)	/generate-url	protect		/generate-url
+routes/revenueRoutes.js	25	GET	(unmounted?)	/history	none		/history
+routes/costingRoutes.js	123	GET	(unmounted?)	/ingredient-purchases	none		/ingredient-purchases
+routes/costingRoutes.js	124	POST	(unmounted?)	/ingredient-purchases	none		/ingredient-purchases
+routes/costingRoutes.js	126	DELETE	(unmounted?)	/ingredient-purchases/:id	none		/ingredient-purchases/:id
+routes/costingRoutes.js	125	PUT	(unmounted?)	/ingredient-purchases/:id	none		/ingredient-purchases/:id
+routes/costingRoutes.js	106	GET	(unmounted?)	/ingredients	none		/ingredients
+routes/costingRoutes.js	107	POST	(unmounted?)	/ingredients	none		/ingredients
+routes/costingRoutes.js	109	DELETE	(unmounted?)	/ingredients/:id	none		/ingredients/:id
+routes/costingRoutes.js	108	PUT	(unmounted?)	/ingredients/:id	none		/ingredients/:id
+routes/analyticsRoutes.js	58	GET	(unmounted?)	/inventory	authorize	adminRoles	/inventory
+routes/costingRoutes.js	119	POST	(unmounted?)	/inventory/adjust	none		/inventory/adjust
+routes/costingRoutes.js	120	GET	(unmounted?)	/inventory/transactions	none		/inventory/transactions
+routes/costingRoutes.js	85	GET	(unmounted?)	/investments	none		/investments
+routes/costingRoutes.js	87	POST	(unmounted?)	/investments	none		/investments
+routes/costingRoutes.js	89	DELETE	(unmounted?)	/investments/:id	none		/investments/:id
+routes/costingRoutes.js	86	GET	(unmounted?)	/investments/:id	none		/investments/:id
+routes/costingRoutes.js	88	PUT	(unmounted?)	/investments/:id	none		/investments/:id
+routes/menuRoutes.js	37	POST	(unmounted?)	/items	none		/items
+routes/menuRoutes.js	40	DELETE	(unmounted?)	/items/:id	none		/items/:id
+routes/menuRoutes.js	38	PATCH	(unmounted?)	/items/:id	none		/items/:id
+routes/menuRoutes.js	39	PATCH	(unmounted?)	/items/:id/availability	none		/items/:id/availability
+routes/paymentQrRoutes.js	27	GET	(unmounted?)	/list	none		/list
+routes/userRoutes.js	78	POST	(unmounted?)	/logout	none		/logout
+routes/adminRoutes.js	21	POST	(unmounted?)	/logout-all	protect		/logout-all
+routes/tableRoutes.js	26	GET	(unmounted?)	/lookup/:slug	protect		/lookup/:slug
+routes/employeeSkillsRoutes.js	25	GET	(unmounted?)	/mappings	none		/mappings
+routes/employeeSkillsRoutes.js	27	POST	(unmounted?)	/mappings	none		/mappings
+routes/employeeSkillsRoutes.js	29	DELETE	(unmounted?)	/mappings/:id	none		/mappings/:id
+routes/employeeSkillsRoutes.js	28	PUT	(unmounted?)	/mappings/:id	none		/mappings/:id
+routes/employeeSkillsRoutes.js	26	GET	(unmounted?)	/mappings/employee/:employeeId	none		/mappings/employee/:employeeId
+routes/userRoutes.js	71	GET	(unmounted?)	/me	protect		/me
+routes/analyticsRoutes.js	43	GET	(unmounted?)	/menu	authorize	adminRoles	/menu
+routes/costing-v2Routes.js	328	DELETE	(unmounted?)	/menu-items/:id	authorize	["super_admin", "franchise_admin", "admin"]	/menu-items/:id
+routes/tableRoutes.js	38	POST	(unmounted?)	/merge	authorize	["admin"]	/merge
+routes/paymentRoutes.js	29	GET	(unmounted?)	/meta/constants	none		/meta/constants
+routes/menuRoutes.js	20	GET	(unmounted?)	/meta/spice-levels	none		/meta/spice-levels
+routes/taskRoutes.js	23	GET	(unmounted?)	/my	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/my
+routes/cartRoutes.js	21	GET	(unmounted?)	/my-settings	authorize	["admin", "cart_admin"]	/my-settings
+routes/cartRoutes.js	22	PUT	(unmounted?)	/my-settings	authorize	["admin", "cart_admin"]	/my-settings
+routes/cartRoutes.js	16	GET	(unmounted?)	/nearby	none		/nearby
+routes/printRoutes.js	18	POST	(unmounted?)	/network	none		/network
+routes/paymentRoutes.js	27	GET	(unmounted?)	/order/:orderId/all	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/order/:orderId/all
+routes/paymentRoutes.js	20	GET	(unmounted?)	/order/:orderId/latest	none		/order/:orderId/latest
+routes/analyticsRoutes.js	40	GET	(unmounted?)	/orders	authorize	adminRoles	/orders
+routes/costingRoutes.js	135	GET	(unmounted?)	/outlet-assets	none		/outlet-assets
+routes/costingRoutes.js	136	POST	(unmounted?)	/outlet-assets	none		/outlet-assets
+routes/costingRoutes.js	138	DELETE	(unmounted?)	/outlet-assets/:id	none		/outlet-assets/:id
+routes/costingRoutes.js	137	PUT	(unmounted?)	/outlet-assets/:id	none		/outlet-assets/:id
+routes/costingRoutes.js	129	GET	(unmounted?)	/outlet-opex	none		/outlet-opex
+routes/costingRoutes.js	130	POST	(unmounted?)	/outlet-opex	none		/outlet-opex
+routes/costingRoutes.js	132	DELETE	(unmounted?)	/outlet-opex/:id	none		/outlet-opex/:id
+routes/costingRoutes.js	131	PUT	(unmounted?)	/outlet-opex/:id	none		/outlet-opex/:id
+routes/attendanceRoutes.js	39	GET	(unmounted?)	/past	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/past
+routes/customerRequestRoutes.js	27	GET	(unmounted?)	/pending	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/pending
+routes/kotRoutes.js	115	GET	(unmounted?)	/pending	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/pending
+routes/printQueueRoutes.js	16	GET	(unmounted?)	/pending	authorize	['admin', 'franchise_admin', 'super_admin']	/pending
+routes/addonRoutes.js	7	GET	(unmounted?)	/public	protect		/public
+routes/menuRoutes.js	19	GET	(unmounted?)	/public	none		/public
+routes/tableRoutes.js	24	GET	(unmounted?)	/public	none		/public
+routes/feedbackRoutes.js	12	POST	(unmounted?)	/public	protect		/public
+routes/tableRoutes.js	25	GET	(unmounted?)	/public-cart-id/:tableId	none		/public-cart-id/:tableId
+routes/cartRoutes.js	18	GET	(unmounted?)	/public-contact	authorize	["admin", "cart_admin"]	/public-contact
+routes/defaultMenuRoutes.js	20	POST	(unmounted?)	/push/cafe/:cartId	none		/push/cafe/:cartId
+routes/defaultMenuRoutes.js	19	POST	(unmounted?)	/push/franchise/:franchiseId	none		/push/franchise/:franchiseId
+routes/costingRoutes.js	112	GET	(unmounted?)	/recipes	none		/recipes
+routes/costingRoutes.js	114	POST	(unmounted?)	/recipes	none		/recipes
+routes/costingRoutes.js	116	DELETE	(unmounted?)	/recipes/:id	none		/recipes/:id
+routes/costingRoutes.js	113	GET	(unmounted?)	/recipes/:id	none		/recipes/:id
+routes/costingRoutes.js	115	PUT	(unmounted?)	/recipes/:id	none		/recipes/:id
+routes/costingRoutes.js	144	GET	(unmounted?)	/reports/cost-per-dish	none		/reports/cost-per-dish
+routes/costingRoutes.js	141	GET	(unmounted?)	/reports/pnl	none		/reports/pnl
+routes/costingRoutes.js	143	GET	(unmounted?)	/reports/profitability	none		/reports/profitability
+routes/costingRoutes.js	142	GET	(unmounted?)	/reports/roi	none		/reports/roi
+routes/analyticsRoutes.js	49	GET	(unmounted?)	/revenue	authorize	adminRoles	/revenue
+routes/geocodeRoutes.js	8	GET	(unmounted?)	/reverse	none		/reverse
+routes/notificationRoutes.js	17	POST	(unmounted?)	/save-token	none		/save-token
+routes/customerRoutes.js	18	GET	(unmounted?)	/search	none		/search
+routes/employeeSkillsRoutes.js	19	GET	(unmounted?)	/skills	protect		/skills
+routes/employeeSkillsRoutes.js	20	POST	(unmounted?)	/skills	none		/skills
+routes/employeeSkillsRoutes.js	22	DELETE	(unmounted?)	/skills/:id	none		/skills/:id
+routes/employeeSkillsRoutes.js	21	PUT	(unmounted?)	/skills/:id	none		/skills/:id
+routes/attendanceRoutes.js	51	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/stats
+routes/complianceRoutes.js	19	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/stats
+routes/customerRequestRoutes.js	30	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/stats
+routes/customerRoutes.js	15	GET	(unmounted?)	/stats	protect		/stats
+routes/feedbackRoutes.js	18	GET	(unmounted?)	/stats	protect		/stats
+routes/inventoryRoutes.js	23	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/stats
+routes/kotRoutes.js	198	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "manager"]	/stats
+routes/taskRoutes.js	29	GET	(unmounted?)	/stats	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/stats
+routes/waitlistRoutes.js	15	GET	(unmounted?)	/status	none		/status
+routes/analyticsRoutes.js	37	GET	(unmounted?)	/summary	authorize	adminRoles	/summary
+routes/paymentRoutes.js	28	POST	(unmounted?)	/sync-paid	none		/sync-paid
+routes/waitlistRoutes.js	18	GET	(unmounted?)	/table/:id	none		/table/:id
+routes/waitlistRoutes.js	19	POST	(unmounted?)	/table/:id/notify-next	none		/table/:id/notify-next
+routes/orderRoutes.js	37	GET	(unmounted?)	/takeaway-token/next	authorize	["admin"]	/takeaway-token/next
+routes/paymentQrRoutes.js	15	GET	(unmounted?)	/test	none		/test
+routes/printRoutes.js	21	POST	(unmounted?)	/test	none		/test
+routes/attendanceRoutes.js	36	GET	(unmounted?)	/today	authorize	["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]	/today
+routes/taskRoutes.js	26	GET	(unmounted?)	/today	authorize	["waiter", "cook", "captain", "manager"]	/today
+routes/aiSessionRoutes.js	7	POST	(unmounted?)	/token	none		/token
+routes/paymentQrRoutes.js	25	POST	(unmounted?)	/upload	authorize	["admin", "franchise_admin", "super_admin"]	/upload
+routes/menuRoutes.js	43	GET	(unmounted?)	/uploads	none		/uploads
+routes/menuRoutes.js	50	POST	(unmounted?)	/uploads	none		/uploads
+routes/adminRoutes.js	18	GET	(unmounted?)	/verify	protect		/verify
+routes/appUpdateRoutes.js	9	GET	(unmounted?)	/version	none		/version

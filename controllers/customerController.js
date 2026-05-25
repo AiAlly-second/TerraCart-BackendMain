@@ -45,6 +45,16 @@ const toUniqueStringList = (values = []) =>
 const escapeRegex = (value) =>
   String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const toBoundedPositiveInt = (
+  value,
+  fallback,
+  { min = 1, max = Number.MAX_SAFE_INTEGER } = {},
+) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return Math.min(parsed, max);
+};
+
 const extractOrderId = (value) => {
   if (!value) return "";
   if (typeof value === "string") return value.trim();
@@ -866,6 +876,16 @@ exports.getAllCustomers = async (req, res) => {
       sortOrder = "desc",
       includeAllSources = "false",
     } = req.query;
+    const paginationRequested =
+      req.query?.page !== undefined || req.query?.limit !== undefined;
+    const page = toBoundedPositiveInt(req.query?.page, 1, {
+      min: 1,
+      max: 50000,
+    });
+    const limit = toBoundedPositiveInt(req.query?.limit, 25, {
+      min: 1,
+      max: 100,
+    });
     const includeAllSourcesFlag =
       String(includeAllSources).toLowerCase() === "true";
 
@@ -1109,9 +1129,29 @@ exports.getAllCustomers = async (req, res) => {
         : null,
     }));
 
+    const totalCustomersCount = customersWithStats.length;
+
+    if (paginationRequested) {
+      const skip = (page - 1) * limit;
+      const paginatedCustomers = customersWithStats.slice(skip, skip + limit);
+      const totalPages = Math.max(1, Math.ceil(totalCustomersCount / limit));
+      return res.json({
+        customers: paginatedCustomers,
+        total: totalCustomersCount,
+        pagination: {
+          total: totalCustomersCount,
+          page,
+          limit,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      });
+    }
+
     return res.json({
       customers: customersWithStats,
-      total: customersWithStats.length,
+      total: totalCustomersCount,
     });
   } catch (err) {
     console.error("Error fetching customers:", err);
