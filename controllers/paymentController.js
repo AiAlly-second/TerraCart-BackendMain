@@ -44,6 +44,56 @@ const toSocketIdString = (value) => {
   return "";
 };
 
+const toBoundedPositiveInt = (
+  value,
+  fallback,
+  { min = 1, max = Number.MAX_SAFE_INTEGER } = {},
+) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return Math.min(parsed, max);
+};
+
+const parseDateOnly = (value, { endOfDay = false } = {}) => {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) return null;
+  if (endOfDay) {
+    parsed.setHours(23, 59, 59, 999);
+  } else {
+    parsed.setHours(0, 0, 0, 0);
+  }
+  return parsed;
+};
+
+const normalizeQueryCsvValues = (value) => {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((entry) => normalizeQueryCsvValues(entry))
+      .filter((entry) => Boolean(entry));
+  }
+
+  return String(value || "")
+    .split(",")
+    .map((entry) => String(entry || "").trim())
+    .filter(Boolean);
+};
+
+const normalizePaymentStatusFilters = (value) => {
+  const allowedStatuses = new Set(PAYMENT_STATUSES);
+  return normalizeQueryCsvValues(value)
+    .map((entry) => entry.toUpperCase())
+    .filter((entry) => allowedStatuses.has(entry));
+};
+
+const normalizePaymentMethodFilters = (value) => {
+  const allowedMethods = new Set(PAYMENT_METHODS);
+  return normalizeQueryCsvValues(value)
+    .map((entry) => entry.toUpperCase())
+    .filter((entry) => allowedMethods.has(entry));
+};
+
 const normalizeOrderUpsertTimestamp = (value) => {
   if (!value) return new Date().toISOString();
   if (value instanceof Date) return value.toISOString();
@@ -1198,19 +1248,76 @@ exports.createPaymentIntent = async (req, res) => {
 
 exports.listPayments = async (req, res) => {
   try {
-    const { status, method } = req.query;
     const requestedCartId = toSocketIdString(req.query?.cartId);
+    const paginationRequested =
+      req.query?.page !== undefined || req.query?.limit !== undefined;
+    const page = toBoundedPositiveInt(req.query?.page, 1, {
+      min: 1,
+      max: 50000,
+    });
+    const limit = toBoundedPositiveInt(req.query?.limit, 25, {
+      min: 1,
+      max: 100,
+    });
+    const skip = (page - 1) * limit;
+
     const filter = {};
-    if (status && PAYMENT_STATUSES.includes(status)) {
-      filter.status = status;
+    const statusFilters = normalizePaymentStatusFilters(req.query?.status);
+    if (statusFilters.length === 1) {
+      filter.status = statusFilters[0];
+    } else if (statusFilters.length > 1) {
+      filter.status = { $in: statusFilters };
     }
-    if (method && PAYMENT_METHODS.includes(method)) {
-      filter.method = method;
+
+    const methodFilters = normalizePaymentMethodFilters(req.query?.method);
+    if (methodFilters.length === 1) {
+      filter.method = methodFilters[0];
+    } else if (methodFilters.length > 1) {
+      filter.method = { $in: methodFilters };
+    }
+
+    const startDate = parseDateOnly(req.query?.startDate);
+    const endDate = parseDateOnly(req.query?.endDate, { endOfDay: true });
+    if (startDate || endDate) {
+      const dateFilter = {};
+      const rangeStart = startDate && endDate && startDate > endDate ? endDate : startDate;
+      const rangeEnd = startDate && endDate && startDate > endDate ? startDate : endDate;
+      if (rangeStart) dateFilter.$gte = rangeStart;
+      if (rangeEnd) dateFilter.$lte = rangeEnd;
+      filter.createdAt = dateFilter;
+    }
+
+    const requestedOrderIdsSet = new Set();
+    const directOrderId = toSocketIdString(req.query?.orderId);
+    if (directOrderId) {
+      requestedOrderIdsSet.add(directOrderId);
+    }
+    normalizeQueryCsvValues(req.query?.orderIds).forEach((orderId) => {
+      const normalized = toSocketIdString(orderId);
+      if (normalized) requestedOrderIdsSet.add(normalized);
+    });
+    const requestedOrderIds = Array.from(requestedOrderIdsSet);
+
+    if (requestedOrderIds.length > 0) {
+      filter.orderId = { $in: requestedOrderIds };
     }
 
     // Scope payments to the caller's outlet/franchise unless super_admin.
     const scope = await resolvePaymentScope(req.user);
     if (scope.type === "none") {
+      if (paginationRequested) {
+        return res.json({
+          payments: [],
+          pagination: {
+            total: 0,
+            page,
+            limit,
+            totalPages: 1,
+            hasNextPage: false,
+            hasPrevPage: page > 1,
+          },
+        });
+      }
       return res.json([]);
     }
 
@@ -1228,35 +1335,71 @@ exports.listPayments = async (req, res) => {
       : null;
     const scopedOrderQuery = buildOrderScopeQuery(scope);
     const shouldScopeByOrders =
-      scope.type !== "super_admin" || Boolean(requestedCartScopeQuery);
+      scope.type !== "super_admin" ||
+      Boolean(requestedCartScopeQuery) ||
+      requestedOrderIds.length > 0;
 
     if (shouldScopeByOrders) {
-      const effectiveOrderQuery = mergeQueriesWithAnd(
+      let effectiveOrderQuery = mergeQueriesWithAnd(
         scopedOrderQuery || {},
         requestedCartScopeQuery,
       );
+
+      if (requestedOrderIds.length > 0) {
+        effectiveOrderQuery = mergeQueriesWithAnd(effectiveOrderQuery, {
+          _id: { $in: requestedOrderIds },
+        });
+      }
+
       const scopedOrders = await Order.find(effectiveOrderQuery)
         .select("_id")
-        .limit(10000)
         .lean();
 
-      const orderIds = scopedOrders.map((order) => order._id);
+      const orderIds = scopedOrders
+        .map((order) => toSocketIdString(order?._id))
+        .filter((orderId) => Boolean(orderId));
       if (!orderIds.length) {
+        if (paginationRequested) {
+          return res.json({
+            payments: [],
+            pagination: {
+              total: 0,
+              page,
+              limit,
+              totalPages: 1,
+              hasNextPage: false,
+              hasPrevPage: page > 1,
+            },
+          });
+        }
         return res.json([]);
       }
 
       filter.orderId = { $in: orderIds };
     }
 
-    const payments = await Payment.find(filter)
+    const totalCount = paginationRequested
+      ? await Payment.countDocuments(filter)
+      : null;
+
+    let paymentsQuery = Payment.find(filter)
       .sort({ createdAt: -1 })
-      .limit(200)
       .lean();
+
+    if (paginationRequested) {
+      paymentsQuery = paymentsQuery.skip(skip).limit(limit);
+    } else if (requestedOrderIds.length > 0) {
+      paymentsQuery = paymentsQuery.limit(10000);
+    } else {
+      paymentsQuery = paymentsQuery.limit(200);
+    }
+
+    const payments = await paymentsQuery;
 
     const paymentOrderIds = Array.from(
       new Set(
         payments
-          .map((payment) => payment?.orderId)
+          .map((payment) => toSocketIdString(payment?.orderId))
           .filter((orderId) => Boolean(orderId)),
       ),
     );
@@ -1270,11 +1413,27 @@ exports.listPayments = async (req, res) => {
       orders.map((order) => [String(order._id), order]),
     );
 
-    return res.json(
-      payments.map((payment) =>
-        formatPaymentResponse(payment, orderById.get(String(payment.orderId))),
-      ),
-    );
+    const responsePayments = payments.map((payment) => {
+      const orderId = toSocketIdString(payment?.orderId);
+      return formatPaymentResponse(payment, orderById.get(orderId));
+    });
+
+    if (paginationRequested) {
+      const totalPages = Math.max(1, Math.ceil((totalCount || 0) / limit));
+      return res.json({
+        payments: responsePayments,
+        pagination: {
+          total: totalCount || 0,
+          page,
+          limit,
+          totalPages,
+          hasNextPage: page < totalPages,
+          hasPrevPage: page > 1,
+        },
+      });
+    }
+
+    return res.json(responsePayments);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

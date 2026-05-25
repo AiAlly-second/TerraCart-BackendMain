@@ -1,6 +1,10 @@
 const express = require("express");
 const multer = require("multer");
-const { optionalProtect } = require("../middleware/authMiddleware");
+const {
+  optionalProtect,
+  requireAiCustomerOrStaff,
+} = require("../middleware/authMiddleware");
+const { rateLimiters } = require("../middleware/securityMiddleware");
 const {
   parseTapToOrderVoice,
   transcribeTapToOrderAudio,
@@ -37,9 +41,17 @@ const tapToOrderAudioUploadMiddleware = (req, res, next) => {
 router.post(
   "/tap-to-order/transcribe",
   optionalProtect,
+  requireAiCustomerOrStaff,
+  rateLimiters.aiVoice,
   tapToOrderAudioUploadMiddleware,
   transcribeTapToOrderAudio,
 );
-router.post("/tap-to-order", optionalProtect, parseTapToOrderVoice);
+router.post(
+  "/tap-to-order",
+  optionalProtect,
+  requireAiCustomerOrStaff,
+  rateLimiters.aiVoice,
+  parseTapToOrderVoice,
+);
 
 module.exports = router;

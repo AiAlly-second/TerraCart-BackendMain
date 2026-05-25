@@ -18,6 +18,10 @@ const escapeRegex = (value = "") =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
+const normalizeAdminRole = (role = "") => {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  return normalizedRole === "cart_admin" ? "admin" : normalizedRole;
+};
 
 const findUserByEmailInsensitive = async (email, excludeUserId = null) => {
   const normalizedEmail = normalizeEmail(email);
@@ -439,8 +443,10 @@ exports.loginUser = async (req, res) => {
       });
     }
 
+    const normalizedWebRole = normalizeAdminRole(user.role);
+
     // For web/admin login, allow admin, franchise_admin, and super_admin roles
-    if (!["admin", "super_admin", "franchise_admin"].includes(user.role)) {
+    if (!["admin", "super_admin", "franchise_admin"].includes(normalizedWebRole)) {
       return res.status(403).json({ message: "Access denied. Admin only." });
     }
 
@@ -450,7 +456,7 @@ exports.loginUser = async (req, res) => {
       _id: user._id,
       name: user.name,
       email: user.email,
-      role: user.role,
+      role: normalizedWebRole,
       token: token,
     });
   } catch (error) {

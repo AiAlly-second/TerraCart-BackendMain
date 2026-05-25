@@ -59,6 +59,60 @@ const getISTDateRange = () => {
   return { today, tomorrow };
 };
 
+const getISTBoundaryUTCFromDateInput = (dateInput, endOfDay = false) => {
+  const normalized = String(dateInput || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    const [year, month, day] = normalized.split("-").map(Number);
+    const utcMs =
+      Date.UTC(
+        year,
+        month - 1,
+        day,
+        endOfDay ? 23 : 0,
+        endOfDay ? 59 : 0,
+        endOfDay ? 59 : 0,
+        endOfDay ? 999 : 0
+      ) - IST_OFFSET_MS;
+
+    return new Date(utcMs);
+  }
+
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  parsed.setHours(
+    endOfDay ? 23 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 59 : 0,
+    endOfDay ? 999 : 0
+  );
+  return new Date(parsed.getTime() - IST_OFFSET_MS);
+};
+
+const applyISTDateRangeFilter = (query, { startDate, endDate }) => {
+  if (!startDate && !endDate) return;
+
+  const dateFilter = {};
+  const startBoundary = startDate
+    ? getISTBoundaryUTCFromDateInput(startDate, false)
+    : null;
+  const endBoundary = endDate
+    ? getISTBoundaryUTCFromDateInput(endDate, true)
+    : null;
+
+  if (startBoundary) {
+    dateFilter.$gte = startBoundary;
+  }
+  if (endBoundary) {
+    dateFilter.$lte = endBoundary;
+  }
+  if (Object.keys(dateFilter).length > 0) {
+    query.date = dateFilter;
+  }
+};
+
 // Helper function to get day name in IST
 const getISTDayName = () => {
   const istNow = getISTNow();
@@ -528,14 +582,9 @@ exports.getAllAttendance = async (req, res) => {
       }
     }
 
-    if (req.query.cartId) {
-      query.cartId = req.query.cartId;
-    }
-
     // Check if querying for today's attendance
     const { today, tomorrow } = getISTDateRange();
     const istNow = getISTNow();
-    const now = new Date();
 
     // If querying today's attendance, mark absent employees
     const isQueryingToday = (!startDate && !endDate) || 
@@ -662,25 +711,7 @@ exports.getAllAttendance = async (req, res) => {
     }
 
     if (startDate || endDate) {
-      query.date = {};
-      // Convert dates to IST boundaries (UTC-5:30)
-      const IST_OFFSET_MINS = 330; // 5.5 hours * 60
-
-      if (startDate) {
-        const d = new Date(startDate);
-        // Calculate Start of Day in IST (00:00 IST), converted to UTC
-        // Default new Date(YYYY-MM-DD) is 00:00 UTC. 
-        // 00:00 IST is 18:30 Prev Day UTC. Subtract 5.5 hours.
-        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
-        query.date.$gte = d;
-      }
-      if (endDate) {
-        const d = new Date(endDate);
-        // Calculate End of Day in IST (23:59:59 IST), converted to UTC
-        d.setHours(23, 59, 59, 999);
-        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
-        query.date.$lte = d;
-      }
+      applyISTDateRangeFilter(query, { startDate, endDate });
     } else if (isQueryingToday) {
       // If querying today (or no dates provided), ensure date filter is set to today
       // UNLESS searching for all history (no dates provided) - wait, isQueryingToday logic handles that
@@ -2196,23 +2227,7 @@ exports.getAttendanceStats = async (req, res) => {
       query.cartId = req.query.cartId;
     }
 
-    if (startDate || endDate) {
-      query.date = {};
-      // Convert dates to IST boundaries (UTC-5:30)
-      const IST_OFFSET_MINS = 330; 
-
-      if (startDate) {
-        const d = new Date(startDate);
-        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
-        query.date.$gte = d;
-      }
-      if (endDate) {
-        const d = new Date(endDate);
-        d.setHours(23, 59, 59, 999);
-        d.setMinutes(d.getMinutes() - IST_OFFSET_MINS);
-        query.date.$lte = d;
-      }
-    }
+    applyISTDateRangeFilter(query, { startDate, endDate });
 
     const attendance = await EmployeeAttendance.find(query).lean();
 

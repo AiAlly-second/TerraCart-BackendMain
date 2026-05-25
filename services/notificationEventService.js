@@ -13,8 +13,17 @@ const NOTIFICATION_EVENT_TYPES = Object.freeze({
   ORDER_READY: "order_ready",
   PAYMENT_REQUEST: "payment_request",
   ASSISTANCE_REQUEST: "assistance_request",
+  CUSTOMER_REQUEST: "customer_request",
   PAYMENT_RECEIVED: "payment_received",
   ORDER_CANCELLED: "order_cancelled",
+});
+
+const CUSTOMER_REQUEST_LABELS = Object.freeze({
+  water: "Water",
+  cutlery: "Cutlery",
+  bill: "Bill",
+  menu: "Menu",
+  assistance: "Assistance",
 });
 
 const NOTIFICATION_LOG_PREFIX = "[NOTIFICATION_EVENT]";
@@ -399,6 +408,76 @@ const notifyAssistanceRequestCreated = async ({
   return pushResult;
 };
 
+const notifyCustomerRequestCreated = async ({ request }) => {
+  const cartId = request?.cartId || request?.cafeId || null;
+  const requestId =
+    toObjectIdString(request?._id) || toObjectIdString(request?.id);
+  const requestType = String(request?.requestType || "assistance").trim();
+  const tableLabel =
+    request?.tableId?.number ||
+    request?.tableNumber ||
+    request?.tableNo ||
+    "N/A";
+  const typeLabel =
+    CUSTOMER_REQUEST_LABELS[requestType] ||
+    requestType.charAt(0).toUpperCase() + requestType.slice(1);
+
+  const tokens = await resolveAudienceTokens({
+    cartId,
+    roles: [
+      "admin",
+      "franchise_admin",
+      "manager",
+      "waiter",
+      "captain",
+      "cook",
+      "kitchen",
+    ],
+    userIds: [],
+  });
+
+  logNotificationEvent("push dispatch start", {
+    event: NOTIFICATION_EVENT_TYPES.CUSTOMER_REQUEST,
+    requestId,
+    cartId: toObjectIdString(cartId),
+    requestType,
+    tokenCount: tokens.length,
+  });
+
+  if (!tokens.length) {
+    return {
+      success: false,
+      skipped: true,
+      reason: "TOKEN_MISSING",
+    };
+  }
+
+  const pushResult = await sendPushToTokens(tokens, {
+    title: `${typeLabel} Request`,
+    body: `Table ${tableLabel} requested ${typeLabel.toLowerCase()}.`,
+    data: {
+      notificationType: NOTIFICATION_EVENT_TYPES.CUSTOMER_REQUEST,
+      requestId: requestId || "",
+      cartId: toObjectIdString(cartId) || "",
+      orderId: toObjectIdString(request?.orderId) || "",
+      requestType,
+      status: String(request?.status || "pending"),
+    },
+  });
+
+  logNotificationEvent("push dispatch end", {
+    event: NOTIFICATION_EVENT_TYPES.CUSTOMER_REQUEST,
+    requestId,
+    success: !!pushResult?.success,
+    reason: pushResult?.reason || null,
+    tokenCount: tokens.length,
+    successCount: pushResult?.successCount || 0,
+    failureCount: pushResult?.failureCount || 0,
+  });
+
+  return pushResult;
+};
+
 module.exports = {
   NOTIFICATION_EVENT_TYPES,
   notifyNewOrder,
@@ -407,4 +486,5 @@ module.exports = {
   notifyPaymentReceived,
   notifyOrderCancelled,
   notifyAssistanceRequestCreated,
+  notifyCustomerRequestCreated,
 };

@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_TRANSCRIPT_API_URL = "https://api.openai.com/v1/audio/transcriptions";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -8,10 +9,18 @@ const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const { preprocessVoiceText } = require("../services/voiceParserService");
 const { detectVoiceLanguage } = require("../utils/languageDetector");
 const {
+  retrieveTopKMenuNames,
+  tryDeterministicNonAddIntent,
+  normalizeText: normalizeVoiceMenuText,
+} = require("../services/voiceMenuRetrievalService");
+const { recordAiRequest } = require("../services/aiUsageTracker");
+const { getRedisAppClient } = require("../services/redisAppClient");
+const {
   generateVoiceResponse,
   combineVoiceResponses,
   getTtsLocaleForLanguage,
 } = require("../services/voiceResponseService");
+const { logAi, logVoiceCache } = require("../logging/logger");
 
 const hasExplicitPlaceOrderIntent = (value) => {
   const normalized = normalizeText(value);
@@ -36,6 +45,52 @@ const normalizeText = (value) =>
     .replace(/[^a-z0-9\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+
+const isRetrievalV2Enabled = () =>
+  String(process.env.VOICE_RETRIEVAL_V2 ?? "true").toLowerCase() !== "false";
+
+const isVoiceParseCacheEnabled = () =>
+  String(process.env.VOICE_PARSE_CACHE_ENABLED ?? "true").toLowerCase() !==
+  "false";
+
+const getRetrievalTopK = () => {
+  const n = Number.parseInt(process.env.VOICE_MENU_TOP_K || "40", 10);
+  return Number.isFinite(n) ? Math.max(15, Math.min(120, n)) : 40;
+};
+
+const voiceParseCacheKey = (normalizedTranscript, menuFingerprint) =>
+  `voice_parse:v2:${crypto
+    .createHash("sha256")
+    .update(`${menuFingerprint}::${normalizedTranscript}`)
+    .digest("hex")}`;
+
+const voiceParseLockRedisKey = (cacheKey) =>
+  `voice_parse:lock:${crypto
+    .createHash("sha256")
+    .update(cacheKey)
+    .digest("hex")
+    .slice(0, 48)}`;
+
+async function waitForVoiceParseCache(redis, cacheKey, maxWaitMs) {
+  const step = 80;
+  let waited = 0;
+  while (waited < maxWaitMs) {
+    await new Promise((resolve) => setTimeout(resolve, step));
+    waited += step;
+    try {
+      const cached = await redis.get(cacheKey);
+      if (!cached) continue;
+      const parsedCache = parseJsonSafely(cached);
+      if (parsedCache && typeof parsedCache === "object") return parsedCache;
+    } catch (_e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+const menuFingerprint = (names) =>
+  crypto.createHash("sha1").update(names.sort().join("|")).digest("hex");
 
 const normalizeAction = (value) => {
   const normalized = String(value || "")
@@ -205,6 +260,16 @@ exports.transcribeTapToOrderAudio = async (req, res) => {
       return res.status(502).json({ message: "No speech detected in audio" });
     }
 
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.ip ||
+      "unknown";
+    await recordAiRequest({
+      routeKey: "voice_transcribe",
+      ip,
+      cartId: req.body?.cartId,
+    });
+
     return res.json({ transcript });
   } catch (error) {
     console.error("[VOICE_ORDER] transcribeTapToOrderAudio error:", error);
@@ -217,7 +282,9 @@ exports.parseTapToOrderVoice = async (req, res) => {
     const transcript = String(req.body?.transcript || "").trim();
     const locale = String(req.body?.locale || "en-IN").trim();
     const language = detectVoiceLanguage(transcript, { locale });
-    const rawMenuItems = Array.isArray(req.body?.menuItems) ? req.body.menuItems : [];
+    const rawMenuItems = Array.isArray(req.body?.menuItems)
+      ? req.body.menuItems
+      : [];
 
     if (!transcript) {
       return res.status(400).json({ message: "transcript is required" });
@@ -235,8 +302,6 @@ exports.parseTapToOrderVoice = async (req, res) => {
     });
     const normalizedTranscript =
       String(preprocessedTranscript.finalText || "").trim() || transcript;
-    console.log(`[VOICE_ORDER] raw voice text: ${transcript}`);
-    console.log(`[VOICE_ORDER] normalized text: ${normalizedTranscript}`);
 
     const menuItems = rawMenuItems
       .map((entry) =>
@@ -250,10 +315,163 @@ exports.parseTapToOrderVoice = async (req, res) => {
       return res.status(400).json({ message: "menuItems are required" });
     }
 
+    const fp = menuFingerprint(menuItems);
+    const redis = await getRedisAppClient();
+    const cacheKey = voiceParseCacheKey(normalizedTranscript, fp);
+
+    if (redis && isVoiceParseCacheEnabled()) {
+      try {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+          const parsedCache = parseJsonSafely(cached);
+          if (parsedCache && typeof parsedCache === "object") {
+            const ip =
+              req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+              req.ip ||
+              "unknown";
+            await recordAiRequest({
+              routeKey: "voice_parse_cache_hit",
+              ip,
+              cartId: req.body?.cartId,
+            });
+            logVoiceCache({ hit: true, phase: "readThrough" });
+            return res.json({
+              ...parsedCache,
+              voiceParseMeta: {
+                ...(parsedCache.voiceParseMeta || {}),
+                cacheHit: true,
+              },
+            });
+          }
+        }
+      } catch (_e) {
+        /* continue without cache */
+      }
+    }
+
+    let parseLockKey = null;
+    const lockTtlSec =
+      Number.parseInt(process.env.VOICE_PARSE_LOCK_TTL_SEC || "45", 10) || 45;
+    const coalesceWaitMs =
+      Number.parseInt(process.env.VOICE_PARSE_COALESCE_WAIT_MS || "20000", 10) ||
+      20000;
+
+    if (redis && isVoiceParseCacheEnabled()) {
+      const lockRedisKey = voiceParseLockRedisKey(cacheKey);
+      try {
+        const acquired = await redis.set(lockRedisKey, "1", {
+          NX: true,
+          EX: lockTtlSec,
+        });
+        if (acquired !== "OK") {
+          const coalesced = await waitForVoiceParseCache(
+            redis,
+            cacheKey,
+            coalesceWaitMs,
+          );
+          if (coalesced) {
+            const ipWait =
+              req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+              req.ip ||
+              "unknown";
+            await recordAiRequest({
+              routeKey: "voice_parse_cache_hit",
+              ip: ipWait,
+              cartId: req.body?.cartId,
+            });
+            return res.json({
+              ...coalesced,
+              voiceParseMeta: {
+                ...(coalesced.voiceParseMeta || {}),
+                cacheHit: true,
+                coalesced: true,
+              },
+            });
+          }
+          logAi("voice_parse_busy", { code: "VOICE_PARSE_BUSY" });
+          return res.status(429).json({
+            message: "Voice parser busy, retry shortly",
+            code: "VOICE_PARSE_BUSY",
+            retryAfterSec: 2,
+          });
+        }
+        parseLockKey = lockRedisKey;
+      } catch (_e) {
+        parseLockKey = null;
+      }
+    }
+
+    try {
+    /** Full menu canonicalization map */
     const menuLookup = new Map();
     menuItems.forEach((name) => {
       menuLookup.set(normalizeText(name), name);
     });
+
+    const ip =
+      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+      req.ip ||
+      "unknown";
+
+    const normForPhrase = normalizeVoiceMenuText(normalizedTranscript);
+    const deterministic = tryDeterministicNonAddIntent(normForPhrase);
+    if (deterministic) {
+      const action = deterministic.action;
+      const items = [];
+      const notFound = [];
+      const assistantReply = buildLocalizedOrderReply({
+        action,
+        items,
+        notFound,
+        language,
+      }).slice(0, 220);
+
+      await recordAiRequest({
+        routeKey: "voice_parse_deterministic",
+        ip,
+        cartId: req.body?.cartId,
+      });
+
+      const payloadOut = {
+        originalText: transcript,
+        language,
+        ttsLocale: getTtsLocaleForLanguage(language),
+        parsedCommand: {
+          action,
+          items,
+          notFound,
+        },
+        action,
+        items,
+        notFound,
+        assistantReply,
+        voiceParseMeta: {
+          usedGpt: false,
+          path: "deterministic_intent",
+          retrievalEnabled: isRetrievalV2Enabled(),
+        },
+      };
+
+      if (redis && isVoiceParseCacheEnabled()) {
+        try {
+          await redis.set(
+            cacheKey,
+            JSON.stringify(payloadOut),
+            { EX: Number.parseInt(process.env.VOICE_PARSE_CACHE_TTL_SEC || "1800", 10) || 1800 },
+          );
+        } catch (_e) {
+          /* ignore */
+        }
+      }
+
+      return res.json(payloadOut);
+    }
+
+    const retrievalEnabled = isRetrievalV2Enabled();
+    const topK = getRetrievalTopK();
+    const menuForPrompt = retrievalEnabled
+      ? retrieveTopKMenuNames(transcript, menuItems, topK).names
+      : menuItems;
 
     const systemPrompt = [
       "You are a restaurant voice-order parser for a Tap to Order button.",
@@ -287,11 +505,23 @@ exports.parseTapToOrderVoice = async (req, res) => {
               transcript: normalizedTranscript,
               rawTranscript: transcript,
               locale,
-              menuItems,
+              menuItems: menuForPrompt,
+              menuCandidatesUsed: menuForPrompt.length,
+              menuTotalAvailable: menuItems.length,
             }),
           },
         ],
       }),
+    });
+
+    await recordAiRequest({
+      routeKey: "voice_parse_gpt",
+      ip,
+      cartId: req.body?.cartId,
+    });
+    logAi("voice_parse_openai_request", {
+      menuCandidates: menuForPrompt.length,
+      menuTotal: menuItems.length,
     });
 
     if (!openAiResponse.ok) {
@@ -310,7 +540,9 @@ exports.parseTapToOrderVoice = async (req, res) => {
     }
 
     let action = normalizeAction(parsed.action);
-    const responseItems = Array.isArray(parsed.items) ? parsed.items.slice(0, MAX_RESULT_ITEMS) : [];
+    const responseItems = Array.isArray(parsed.items)
+      ? parsed.items.slice(0, MAX_RESULT_ITEMS)
+      : [];
     const notFoundSet = new Set(
       (Array.isArray(parsed.notFound) ? parsed.notFound : [])
         .map((entry) => String(entry || "").trim())
@@ -351,17 +583,7 @@ exports.parseTapToOrderVoice = async (req, res) => {
       language,
     }).slice(0, 220);
 
-    console.log(
-      `[VOICE_ORDER] parsed output: ${JSON.stringify({
-        action,
-        language,
-        itemCount: items.length,
-        notFoundCount: notFoundSet.size,
-      })}`,
-    );
-    console.log("[VOICE_ORDER] ai fallback usage: false");
-
-    return res.json({
+    const payloadOut = {
       originalText: transcript,
       language,
       ttsLocale: getTtsLocaleForLanguage(language),
@@ -374,7 +596,36 @@ exports.parseTapToOrderVoice = async (req, res) => {
       items,
       notFound,
       assistantReply,
-    });
+      voiceParseMeta: {
+        usedGpt: true,
+        retrievalEnabled,
+        menuCandidatesUsed: menuForPrompt.length,
+        menuTotalAvailable: menuItems.length,
+      },
+    };
+
+    if (redis && isVoiceParseCacheEnabled()) {
+      try {
+        await redis.set(
+          cacheKey,
+          JSON.stringify(payloadOut),
+          { EX: Number.parseInt(process.env.VOICE_PARSE_CACHE_TTL_SEC || "1800", 10) || 1800 },
+        );
+      } catch (_e) {
+        /* ignore */
+      }
+    }
+
+    return res.json(payloadOut);
+    } finally {
+      if (redis && parseLockKey) {
+        try {
+          await redis.del(parseLockKey);
+        } catch (_delErr) {
+          /* ignore */
+        }
+      }
+    }
   } catch (error) {
     console.error("[VOICE_ORDER] parseTapToOrderVoice error:", error);
     return res.status(500).json({ message: "Voice parsing failed" });

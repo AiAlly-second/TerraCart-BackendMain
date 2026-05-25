@@ -1,3 +1,5 @@
+const { getRedisAppClient } = require("../services/redisAppClient");
+
 const OPENAI_API_URL = "https://api.openai.com/v1/chat/completions";
 const OPENAI_MODEL =
   process.env.OPENAI_TRANSLATE_MODEL ||
@@ -19,6 +21,49 @@ const CACHE_LIMIT = 10000;
 const TRANSLATION_STYLE_VERSION = "script_preserve_english_v1";
 
 const translationCache = new Map();
+
+const translationRedisEnabled = () =>
+  String(process.env.TRANSLATION_REDIS_ENABLED ?? "true").toLowerCase() !==
+  "false";
+
+const redisTranslationKey = (logicalKey) => `tr:${logicalKey}`;
+
+async function redisTranslationGet(logicalKey) {
+  if (!translationRedisEnabled()) return null;
+  const redis = await getRedisAppClient();
+  if (!redis) return null;
+  try {
+    const raw = await redis.get(redisTranslationKey(logicalKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const text = normalizeText(parsed?.translated);
+    return text || null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function redisTranslationSet(logicalKey, translated) {
+  if (!translationRedisEnabled()) return;
+  const redis = await getRedisAppClient();
+  if (!redis) return;
+  try {
+    const ttlSec = Math.min(
+      Math.ceil(CACHE_TTL_MS / 1000),
+      86400 * 365,
+    );
+    await redis.set(
+      redisTranslationKey(logicalKey),
+      JSON.stringify({
+        translated,
+        createdAt: Date.now(),
+      }),
+      { EX: ttlSec },
+    );
+  } catch (_e) {
+    /* ignore */
+  }
+}
 
 const normalizeLang = (value) => {
   const lang = String(value || "en").trim().toLowerCase();
@@ -171,15 +216,24 @@ exports.translateMenuPageTexts = async (req, res) => {
 
     const translations = {};
     const missingTexts = [];
-    dedupedTexts.forEach((text) => {
+    for (const text of dedupedTexts) {
       const cacheKey = toCacheKey(targetLang, text);
-      const cached = translationCache.get(cacheKey);
-      if (cached && normalizeText(cached.translated)) {
-        translations[text] = normalizeText(cached.translated);
-      } else {
-        missingTexts.push(text);
+      const mem = translationCache.get(cacheKey);
+      if (mem && normalizeText(mem.translated)) {
+        translations[text] = normalizeText(mem.translated);
+        continue;
       }
-    });
+      const redisHit = await redisTranslationGet(cacheKey);
+      if (redisHit) {
+        translations[text] = redisHit;
+        translationCache.set(cacheKey, {
+          translated: redisHit,
+          createdAt: Date.now(),
+        });
+        continue;
+      }
+      missingTexts.push(text);
+    }
 
     for (let i = 0; i < missingTexts.length; i += BATCH_SIZE) {
       const batch = missingTexts.slice(i, i + BATCH_SIZE);
@@ -189,16 +243,22 @@ exports.translateMenuPageTexts = async (req, res) => {
           texts: batch,
         });
 
-        batchResult.forEach(({ index, translated }) => {
-          if (!Number.isFinite(index) || index < 0 || index >= batch.length) return;
+        for (const row of batchResult) {
+          const index = Number(row?.index);
+          const translated = normalizeText(row?.translated);
+          if (!Number.isFinite(index) || index < 0 || index >= batch.length) {
+            continue;
+          }
           const sourceText = batch[index];
           const safeTranslated = translated || sourceText;
           translations[sourceText] = safeTranslated;
-          translationCache.set(toCacheKey(targetLang, sourceText), {
+          const ck = toCacheKey(targetLang, sourceText);
+          translationCache.set(ck, {
             translated: safeTranslated,
             createdAt: Date.now(),
           });
-        });
+          await redisTranslationSet(ck, safeTranslated);
+        }
 
         // Fill any unresolved rows with source text to keep response complete.
         batch.forEach((sourceText) => {

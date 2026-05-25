@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const path = require("path");
+const { sendJsonWithOptionalPrivateCache } = require("../utils/menuHttpCache");
 const fs = require("fs");
 const multer = require("multer");
 const MenuCategory = require("../models/menuCategoryModel");
@@ -188,7 +189,7 @@ exports.getPublicMenu = async (req, res) => {
       console.log(
         "[MENU] getPublicMenu - No cartId found, returning empty menu",
       );
-      return res.json([]);
+      return sendJsonWithOptionalPrivateCache(req, res, []);
     }
 
     const categories = await MenuCategory.find(categoryQuery)
@@ -224,7 +225,7 @@ exports.getPublicMenu = async (req, res) => {
         "[MENU] getPublicMenu - No categories found, query was:",
         JSON.stringify(categoryQuery, null, 2),
       );
-      return res.json([]);
+      return sendJsonWithOptionalPrivateCache(req, res, []);
     }
 
     const items = await MenuItem.find(itemQuery)
@@ -291,7 +292,11 @@ exports.getPublicMenu = async (req, res) => {
       return acc;
     }, {});
 
-    return res.json(buildCategoryWithItems(categories, itemsByCategory));
+    return sendJsonWithOptionalPrivateCache(
+      req,
+      res,
+      buildCategoryWithItems(categories, itemsByCategory),
+    );
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }

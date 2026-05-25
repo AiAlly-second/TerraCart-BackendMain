@@ -8,6 +8,17 @@
  */
 
 const User = require("../models/userModel");
+const { getRedisAppClient } = require("../services/redisAppClient");
+
+const DISTRIBUTED_AI_LIMITERS = new Set([
+  "aiVoice",
+  "aiTranslate",
+  "aiSessionIssue",
+]);
+
+const redisRateLimitEnabled = () =>
+  String(process.env.REDIS_RATE_LIMIT_ENABLED ?? "true").toLowerCase() !==
+  "false";
 
 // ============= RATE LIMITING =============
 // Simple in-memory rate limiter (for single instance)
@@ -28,6 +39,10 @@ const SYSTEM_ROUTE_REGEXES = [
   /^\/api\/print(?:\/|$)/i,
   /^\/api\/orders\/[^/]+\/(?:kot-print|print-claim|print-complete|print-status)(?:\/|$)/i,
 ];
+const LOW_RISK_READ_ROUTE_REGEXES = [
+  /^\/api\/admin\/verify(?:\/|$)/i,
+  /^\/api\/menu(?:\/|$)/i,
+];
 
 const getRateLimitPath = (req) =>
   String(req.originalUrl || req.url || req.path || "").split("?")[0];
@@ -37,6 +52,12 @@ const shouldBypassRateLimitForPath = (pathValue) =>
 
 const isSystemRateLimitPath = (pathValue) =>
   SYSTEM_ROUTE_REGEXES.some((regex) => regex.test(String(pathValue || "")));
+
+const isLowRiskReadRateLimitPath = (req, pathValue) =>
+  req.method === "GET" &&
+  LOW_RISK_READ_ROUTE_REGEXES.some((regex) =>
+    regex.test(String(pathValue || ""))
+  );
 
 const getRequestSource = (req) =>
   String(
@@ -174,8 +195,76 @@ const createRateLimiter = (options = {}) => {
     }
 
     const baseKey = keyGenerator(req);
-    const key = `${name}:${baseKey}`;
     const now = Date.now();
+
+    if (
+      redisRateLimitEnabled() &&
+      DISTRIBUTED_AI_LIMITERS.has(name)
+    ) {
+      try {
+        const redis = await getRedisAppClient();
+        if (redis) {
+          const ipPart = String(baseKey || "unknown")
+            .replace(/[^a-zA-Z0-9._-]/g, "_")
+            .slice(0, 120);
+          const cartPart =
+            String(process.env.REDIS_RL_PER_AI_CART || "")
+              .toLowerCase() === "true" &&
+            req.aiCartId
+              ? String(req.aiCartId)
+                  .replace(/[^a-zA-Z0-9._-]/g, "_")
+                  .slice(0, 64)
+              : "";
+          const wid = Math.floor(now / effectiveWindowMs);
+          const rkey = `rl:v1:${name}:${ipPart}${
+            cartPart ? `:${cartPart}` : ""
+          }:${wid}`;
+          const n = await redis.incr(rkey);
+          if (n === 1) {
+            await redis.expire(
+              rkey,
+              Math.ceil(effectiveWindowMs / 1000) + 15,
+            );
+          }
+
+          res.setHeader("X-RateLimit-Limit", effectiveMax);
+          res.setHeader(
+            "X-RateLimit-Remaining",
+            Math.max(0, effectiveMax - n),
+          );
+          const windowEndSec = Math.ceil(
+            (wid + 1) * (effectiveWindowMs / 1000),
+          );
+          res.setHeader("X-RateLimit-Reset", windowEndSec);
+
+          if (n > effectiveMax) {
+            const elapsed = now % effectiveWindowMs;
+            const retryAfterSeconds = Math.max(
+              1,
+              Math.ceil((effectiveWindowMs - elapsed) / 1000),
+            );
+            res.setHeader("Retry-After", retryAfterSeconds);
+            writeRateLimitLog(
+              `[RATE_LIMIT_REDIS] blocked limiter=${name} ip=${ipPart} path=${getRateLimitPath(req)} n=${n} limit=${effectiveMax}`,
+            );
+            return res.status(429).json({
+              success: false,
+              message:
+                isDevelopment && process.env.NODE_ENV !== "production"
+                  ? `Rate limit exceeded (Redis): ${effectiveMax} per ${effectiveWindowMs / 1000}s`
+                  : message,
+              retryAfter: retryAfterSeconds,
+            });
+          }
+
+          return next();
+        }
+      } catch (_err) {
+        /* fall through to in-memory limiter */
+      }
+    }
+
+    const key = `${name}:${baseKey}`;
     const currentWindowStart = getWindowStart(now, effectiveWindowMs);
 
     let data = rateLimitStore.get(key);
@@ -281,7 +370,13 @@ const rateLimiters = {
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: 500, // 500 requests per 15 min (disabled in dev by default)
     message: 'Too many API requests',
-    skip: (req) => isSystemRateLimitPath(getRateLimitPath(req))
+    skip: (req) => {
+      const requestPath = getRateLimitPath(req);
+      return (
+        isSystemRateLimitPath(requestPath) ||
+        isLowRiskReadRateLimitPath(req, requestPath)
+      );
+    }
   }),
 
   // Shared limiter for authentication endpoints (login/signup)
@@ -338,7 +433,28 @@ const rateLimiters = {
     windowMs: 60 * 1000,
     max: Number.parseInt(process.env.RATE_LIMIT_SYSTEM || "240", 10) || 240,
     message: 'System request rate limit exceeded. Please retry shortly.'
-  })
+  }),
+
+  aiVoice: createRateLimiter({
+    name: "aiVoice",
+    windowMs: 60 * 1000,
+    max: Number.parseInt(process.env.RATE_LIMIT_AI_VOICE_PER_MIN || "30", 10) || 30,
+    message: 'Voice AI rate limit exceeded. Please slow down.',
+  }),
+
+  aiTranslate: createRateLimiter({
+    name: "aiTranslate",
+    windowMs: 60 * 1000,
+    max: Number.parseInt(process.env.RATE_LIMIT_AI_TRANSLATE_PER_MIN || "20", 10) || 20,
+    message: 'Translation rate limit exceeded. Please try again shortly.',
+  }),
+
+  aiSessionIssue: createRateLimiter({
+    name: "aiSessionIssue",
+    windowMs: 60 * 1000,
+    max: Number.parseInt(process.env.RATE_LIMIT_AI_SESSION_PER_MIN || "30", 10) || 30,
+    message: 'Too many AI session token requests.',
+  }),
 };
 
 // Helper to clear rate limit store (useful for development)
@@ -581,6 +697,12 @@ const getCorsConfig = () => {
     'Content-Type',
     'Authorization',
     'X-Requested-With',
+    'X-Request-Source',
+    'x-request-source',
+    'X-Client-Source',
+    'x-client-source',
+    'X-App-Source',
+    'x-app-source',
     'Accept',
     'Origin',
     'X-Session-Token',
@@ -596,6 +718,10 @@ const getCorsConfig = () => {
     'x-session-id',
     'X-Anonymous-Session-Id',
     'x-anonymous-session-id',
+    'X-Terra-Ai-Session',
+    'x-terra-ai-session',
+    'X-Request-Id',
+    'x-request-id',
   ];
   const allowedOrigins = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
@@ -619,7 +745,7 @@ const getCorsConfig = () => {
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders,
-      exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+      exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'X-Request-Id'],
       maxAge: 86400,
       preflightContinue: false,
       optionsSuccessStatus: 204
@@ -641,7 +767,7 @@ const getCorsConfig = () => {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders,
-    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset'],
+    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'X-Request-Id'],
     maxAge: 86400,
     preflightContinue: false,
     optionsSuccessStatus: 204

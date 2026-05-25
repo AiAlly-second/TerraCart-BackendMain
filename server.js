@@ -35,6 +35,11 @@ const {
   getCorsConfig,
 } = require("./middleware/securityMiddleware");
 const {
+  requestCorrelationMiddleware,
+} = require("./middleware/requestCorrelationMiddleware");
+const { requestContextMiddleware } = require("./logging/logger");
+const { quitRedisAppClient } = require("./services/redisAppClient");
+const {
   createSlowApiLogger,
   createRequestTimeoutGuard,
   createWarmupGuard,
@@ -288,7 +293,10 @@ const normalizeSocketRoomValue = (value) => {
   return normalized;
 };
 
-const normalizeSocketRole = (role) => String(role || "").trim().toLowerCase();
+const normalizeSocketRole = (role) => {
+  const normalizedRole = String(role || "").trim().toLowerCase();
+  return normalizedRole === "cart_admin" ? "admin" : normalizedRole;
+};
 
 const toSocketUserRoom = (userId) => {
   const normalized = normalizeSocketRoomValue(userId);
@@ -465,9 +473,27 @@ io.use(async (socket, next) => {
 
 const setupSocketRedisAdapter = async () => {
   const redisUrl = process.env.REDIS_URL;
-  if (!redisUrl) return;
+  const socketRedisAdapterEnabled =
+    String(
+      process.env.SOCKET_REDIS_ADAPTER_ENABLED ??
+        (process.env.NODE_ENV === "production" ? "true" : "false")
+    ).toLowerCase() !== "false";
 
-  const pubClient = createClient({ url: redisUrl });
+  if (!redisUrl || !socketRedisAdapterEnabled) return;
+
+  const connectTimeoutMs = Number.parseInt(
+    process.env.SOCKET_REDIS_CONNECT_TIMEOUT_MS || "3000",
+    10
+  );
+  const redisConnectTimeoutMs =
+    Number.isNaN(connectTimeoutMs) || connectTimeoutMs <= 0
+      ? 3000
+      : connectTimeoutMs;
+
+  const pubClient = createClient({
+    url: redisUrl,
+    socket: { connectTimeout: redisConnectTimeoutMs },
+  });
   const subClient = pubClient.duplicate();
 
   pubClient.on("error", (err) => {
@@ -477,7 +503,33 @@ const setupSocketRedisAdapter = async () => {
     console.error("[REDIS] Socket sub client error:", err.message);
   });
 
-  await Promise.all([pubClient.connect(), subClient.connect()]);
+  let timeoutId;
+  const connectTimeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(
+        new Error(
+          `Socket Redis adapter connect timed out after ${redisConnectTimeoutMs}ms`
+        )
+      );
+    }, redisConnectTimeoutMs);
+    if (typeof timeoutId.unref === "function") timeoutId.unref();
+  });
+
+  try {
+    await Promise.race([
+      Promise.all([pubClient.connect(), subClient.connect()]),
+      connectTimeout,
+    ]);
+  } catch (error) {
+    await Promise.allSettled([
+      pubClient.isOpen ? pubClient.quit() : pubClient.destroy?.(),
+      subClient.isOpen ? subClient.quit() : subClient.destroy?.(),
+    ]);
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
   io.adapter(createAdapter(pubClient, subClient));
 
   redisPubClient = pubClient;
@@ -515,6 +567,15 @@ let rootHealthCachePayload = null;
 let rootHealthCacheStatus = 200;
 let rootHealthCacheDbState = null;
 let rootHealthCacheExpiresAt = 0;
+const parsedDbRetryMs = Number.parseInt(
+  process.env.DB_CONNECT_RETRY_MS || "10000",
+  10
+);
+const dbConnectRetryMs =
+  Number.isNaN(parsedDbRetryMs) || parsedDbRetryMs < 1000
+    ? 10000
+    : parsedDbRetryMs;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Middleware
 app.use(
@@ -527,6 +588,8 @@ app.use(
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(requestCorrelationMiddleware);
+app.use(requestContextMiddleware);
 app.use(cors(getCorsConfig()));
 app.use(securityHeaders);
 app.use(sanitizeInput);
@@ -541,12 +604,30 @@ app.use(requestDeduper);
 app.use(rateLimiters.api);
 app.use("/api/print", rateLimiters.system);
 
+// Avoid request hangs while backend is booting and MongoDB is not connected yet.
+app.use((req, res, next) => {
+  const reqPath = String(req.path || "");
+  const isApiRoute = reqPath.startsWith("/api/");
+  const isHealthRoute =
+    reqPath === "/health" || /^\/api\/health(?:\/|$)/i.test(reqPath);
+
+  if (!isApiRoute || isHealthRoute || mongoose.connection.readyState === 1) {
+    return next();
+  }
+
+  return res.status(503).json({
+    success: false,
+    message: "Backend is starting. Database connection is not ready yet.",
+  });
+});
+
 // Routes
 app.use("/api/users", require("./routes/userRoutes"));
 app.use("/api/menu", require("./routes/menuRoutes"));
 app.use("/api/voice-order", require("./routes/voiceOrderRoutes"));
 app.use("/api/voice-inventory", require("./routes/voiceInventoryRoutes"));
 app.use("/api/voice-command", require("./routes/voiceCommandRoutes"));
+app.use("/api/ai-session", require("./routes/aiSessionRoutes"));
 app.use("/api/translations", require("./routes/translationRoutes"));
 app.use("/api/addons", require("./routes/addonRoutes"));
 app.use("/api/default-menu", require("./routes/defaultMenuRoutes"));
@@ -1033,13 +1114,30 @@ app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
 });
 
-// Connect to database and start server
+const connectDbWithRetry = async () => {
+  while (true) {
+    try {
+      await connectDB();
+      return;
+    } catch (error) {
+      const message = error?.message || "unknown database error";
+      writeLogLine(`[STARTUP] Database connection failed: ${message}`);
+
+      if (process.env.NODE_ENV === "production") {
+        throw error;
+      }
+
+      writeLogLine(
+        `[STARTUP] Retrying database connection in ${dbConnectRetryMs}ms...`
+      );
+      await sleep(dbConnectRetryMs);
+    }
+  }
+};
+
+// Start HTTP server, then bootstrap database-dependent services
 const startServer = async () => {
   try {
-    await connectDB();
-    await setupSocketRedisAdapter();
-    startAttendanceTaskSchedulers({ io, emitToCafe });
-
     const PORT = process.env.PORT || 5001;
     const keepAliveTimeoutMs = Number.parseInt(
       process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || "65000",
@@ -1064,6 +1162,18 @@ const startServer = async () => {
       writeLogLine(`[STARTUP] Environment: ${process.env.NODE_ENV || "development"}`);
       writeLogLine(`[STARTUP] Booted at: ${new Date(SERVER_BOOT_AT).toISOString()}`);
     });
+
+    await connectDbWithRetry();
+    try {
+      await setupSocketRedisAdapter();
+    } catch (redisAdapterError) {
+      writeLogLine(
+        `[STARTUP] Socket.IO Redis adapter disabled: ${
+          redisAdapterError?.message || redisAdapterError
+        }. Continuing single-node mode.`
+      );
+    }
+    startAttendanceTaskSchedulers({ io, emitToCafe });
   } catch (error) {
     process.exit(1);
   }
@@ -1086,6 +1196,7 @@ const closeRedisClients = async () => {
   await Promise.allSettled([
     redisPubClient?.quit?.(),
     redisSubClient?.quit?.(),
+    quitRedisAppClient(),
   ]);
   await Promise.allSettled([mongoose.connection.close()]);
 };

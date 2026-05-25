@@ -1,3 +1,4 @@
+const { sendJsonWithOptionalPrivateCache } = require("../utils/menuHttpCache");
 const Addon = require("../models/addonModel");
 const User = require("../models/userModel");
 const Cart = require("../models/cartModel");
@@ -226,7 +227,7 @@ exports.getPublicAddons = async (req, res) => {
 
     const resolved = await resolveCartAdminFromRef(cartRef);
     if (!resolved || !resolved.cartAdminId) {
-      return res.json({
+      return sendJsonWithOptionalPrivateCache(req, res, {
         success: true,
         data: [],
       });
@@ -274,7 +275,7 @@ exports.getPublicAddons = async (req, res) => {
       ...addon,
       name: sanitizeAddonName(addon?.name),
     }));
-    res.json({
+    return sendJsonWithOptionalPrivateCache(req, res, {
       success: true,
       data: normalizedAddons,
     });
