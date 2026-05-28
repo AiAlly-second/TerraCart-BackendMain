@@ -8,6 +8,11 @@ const { notifyNextWaitlist } = require("./waitlistController");
 const {
   shouldDisplayInActiveQueues,
 } = require("../utils/orderContract");
+const { STABILITY_FLAGS } = require("../config/stabilityFlags");
+
+const TABLE_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "table.updated"
+  : "table:status:updated";
 
 const activeWaitlistStatuses = ["WAITING", "NOTIFIED"];
 
@@ -923,15 +928,11 @@ exports.lookupTableBySlug = async (req, res) => {
         emitToCafe(
           io,
           currentTable.cartId.toString(),
-          "table:status:updated",
+          TABLE_UPDATED_EVENT,
           tableStatusPayload
         );
       }
 
-      // Also emit globally so customers can receive real-time updates
-      if (io) {
-        io.emit("table:status:updated", tableStatusPayload);
-      }
     };
 
     // Check if user has a SEATED waitlist entry
@@ -1101,7 +1102,11 @@ exports.lookupTableBySlug = async (req, res) => {
       if (waitingCount > 0) {
         // There are people waiting - notify the next one
         const io = req.app?.get("io");
-        const nextNotified = await notifyNextWaitlist(table._id, io);
+        const nextNotified = await notifyNextWaitlist(
+          table._id,
+          io,
+          emitToCafe,
+        );
 
         if (nextNotified) {
           // Someone was just notified - check if it's this user
@@ -1681,14 +1686,11 @@ exports.occupyTable = async (req, res) => {
           emitToCafe(
             io,
             table.cartId.toString(),
-            "table:status:updated",
+            TABLE_UPDATED_EVENT,
             tableStatusPayload
           );
         }
 
-        if (io) {
-          io.emit("table:status:updated", tableStatusPayload);
-        }
       }
 
       return res.json({
@@ -1723,15 +1725,11 @@ exports.occupyTable = async (req, res) => {
         emitToCafe(
           io,
           table.cartId.toString(),
-          "table:status:updated",
+          TABLE_UPDATED_EVENT,
           tableStatusPayload
         );
       }
 
-      // Also emit globally so customers can receive real-time updates
-      if (io) {
-        io.emit("table:status:updated", tableStatusPayload);
-      }
     }
     // If table is already OCCUPIED, do nothing
 
@@ -1996,17 +1994,11 @@ exports.updateTable = async (req, res) => {
       emitToCafe(
         io,
         tableCartId,
-        "table:status:updated",
+        TABLE_UPDATED_EVENT,
         tableStatusPayload
       );
     } else if (io && emitToCafe) {
       console.warn(`[TABLE] Table ${table.number} has no cartId - cannot emit to admin room`);
-    }
-
-    // Also emit globally so customers can receive real-time updates
-    if (io) {
-      console.log(`[TABLE] Emitting table:status:updated globally for table ${table.number}`);
-      io.emit("table:status:updated", tableStatusPayload);
     }
 
     // When table becomes AVAILABLE, notify next waitlist person
@@ -2028,7 +2020,7 @@ exports.updateTable = async (req, res) => {
       // Only notify if there's no existing NOTIFIED entry
       // notifyNextWaitlist already has this check, but adding it here prevents unnecessary calls
       if (!existingNotified) {
-        await notifyNextWaitlist(table._id, io);
+        await notifyNextWaitlist(table._id, io, emitToCafe);
       } else {
         console.log(
           `[TABLE] Table ${table.number} became AVAILABLE but already has NOTIFIED waitlist entry - skipping notification`
@@ -2321,25 +2313,6 @@ exports.mergeTables = async (req, res) => {
       );
     }
 
-    // Also emit globally for real-time updates
-    if (io) {
-      const mergePayload = {
-        primaryTable: {
-          id: updatedPrimaryTable._id,
-          number: updatedPrimaryTable.number,
-          status: updatedPrimaryTable.status,
-          capacity: updatedPrimaryTable.capacity,
-          mergedTables: updatedPrimaryTable.mergedTables || [],
-        },
-        secondaryTables: secondaryTables.map((t) => ({
-          id: t._id,
-          number: t.number,
-          status: t.status,
-        })),
-      };
-      io.emit("table:merged", mergePayload);
-    }
-
     return res.json({
       message: "Tables merged successfully",
       primaryTable: updatedPrimaryTable,
@@ -2516,11 +2489,6 @@ exports.unmergeTables = async (req, res) => {
         );
       }
 
-      // Also emit globally for real-time updates
-      if (io) {
-        io.emit("table:unmerged", unmergePayload);
-      }
-
       return res.json({ message: "Table unmerged successfully", table });
     }
 
@@ -2592,11 +2560,6 @@ exports.unmergeTables = async (req, res) => {
           "table:unmerged",
           unmergePayload
         );
-      }
-
-      // Also emit globally for real-time updates
-      if (io) {
-        io.emit("table:unmerged", unmergePayload);
       }
 
       return res.json({

@@ -5,6 +5,7 @@ const {
   addKot,
   finalizeOrder,
   getOrders,
+  getDashboardOrderSummary,
   getOrderById,
   getKotPrintTemplate,
   updateOrderStatus,
@@ -54,6 +55,20 @@ router.get(
     "manager",
   ]),
   getOrders,
+);
+router.get(
+  "/dashboard-summary",
+  protect,
+  authorize([
+    "admin",
+    "franchise_admin",
+    "super_admin",
+    "waiter",
+    "cook",
+    "captain",
+    "manager",
+  ]),
+  getDashboardOrderSummary,
 );
 router.get(
   "/:id/kot-print",

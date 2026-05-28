@@ -6,6 +6,23 @@ const {
   notifyAssistanceRequestCreated,
   notifyCustomerRequestCreated,
 } = require("../services/notificationEventService");
+const {
+  STABILITY_FLAGS,
+} = require("../config/stabilityFlags");
+
+const CUSTOMER_REQUEST_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "customer_request.updated"
+  : "request:updated";
+
+const emitCustomerRequestUpdated = (io, emitToCafe, cartId, payload) => {
+  if (!io || !emitToCafe || !cartId) return;
+  emitToCafe(
+    io,
+    cartId.toString(),
+    CUSTOMER_REQUEST_UPDATED_EVENT,
+    payload,
+  );
+};
 
 // Helper function to build query based on user role
 const buildHierarchyQuery = async (user) => {
@@ -179,9 +196,7 @@ exports.createRequest = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
-    if (io && emitToCafe && requestCartId) {
-      emitToCafe(io, requestCartId.toString(), "request:created", request);
-    }
+    emitCustomerRequestUpdated(io, emitToCafe, requestCartId, request);
 
     try {
       await notifyCustomerRequestCreated({ request });
@@ -194,13 +209,16 @@ exports.createRequest = async (req, res) => {
 
     if (request.requestType === "assistance") {
       try {
-        if (io) {
-          console.log("[ASSISTANCE_REQUEST] emitting assistance_request_created", {
+        if (io && emitToCafe && requestCartId) {
+          console.log("[ASSISTANCE_REQUEST] emitting customer_request.updated", {
             requestId: request._id?.toString?.() || null,
             cartId: requestCartId?.toString?.() || null,
-            tableId: request.tableId?._id?.toString?.() || request.tableId?.toString?.() || null,
+            tableId:
+              request.tableId?._id?.toString?.() ||
+              request.tableId?.toString?.() ||
+              null,
           });
-          io.emit("assistance_request_created", request);
+          emitCustomerRequestUpdated(io, emitToCafe, requestCartId, request);
         }
         console.log("[ASSISTANCE_REQUEST] dispatching notification service", {
           requestId: request._id?.toString?.() || null,
@@ -278,10 +296,7 @@ exports.acknowledgeRequest = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
-    if (io && emitToCafe && requestCartId) {
-      emitToCafe(io, requestCartId.toString(), "request:acknowledged", request);
-      emitToCafe(io, requestCartId.toString(), "request:updated", request);
-    }
+    emitCustomerRequestUpdated(io, emitToCafe, requestCartId, request);
 
     return res.json(request);
   } catch (err) {
@@ -338,10 +353,7 @@ exports.resolveRequest = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
-    if (io && emitToCafe && requestCartId) {
-      emitToCafe(io, requestCartId.toString(), "request:resolved", request);
-      emitToCafe(io, requestCartId.toString(), "request:updated", request);
-    }
+    emitCustomerRequestUpdated(io, emitToCafe, requestCartId, request);
 
     return res.json(request);
   } catch (err) {
@@ -379,9 +391,7 @@ exports.updateRequest = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     const requestCartId = request.cartId || request.cafeId; // Support old cafeId field for backward compatibility
-    if (io && emitToCafe && requestCartId) {
-      emitToCafe(io, requestCartId.toString(), "request:updated", request);
-    }
+    emitCustomerRequestUpdated(io, emitToCafe, requestCartId, request);
 
     return res.json(request);
   } catch (err) {
@@ -407,9 +417,10 @@ exports.deleteRequest = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
-    if (io && emitToCafe && requestCartId) {
-      emitToCafe(io, requestCartId.toString(), "request:deleted", { id });
-    }
+    emitCustomerRequestUpdated(io, emitToCafe, requestCartId, {
+      id,
+      status: "deleted",
+    });
 
     return res.json({ message: "Customer request deleted successfully" });
   } catch (err) {

@@ -3,6 +3,42 @@ const mongoose = require("mongoose");
 const Waitlist = require("../models/waitlistModel");
 const { Table } = require("../models/tableModel");
 
+const resolveTableCartId = async (tableOrId) => {
+  if (!tableOrId) return null;
+  if (typeof tableOrId === "object") {
+    const cartId =
+      tableOrId.cartId?._id || tableOrId.cartId || tableOrId.cafeId || null;
+    return cartId ? String(cartId) : null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(String(tableOrId))) return null;
+  const table = await Table.findById(tableOrId).select("cartId cafeId").lean();
+  if (!table) return null;
+  const cartId = table.cartId || table.cafeId || null;
+  return cartId ? String(cartId) : null;
+};
+
+const emitWaitlistUpdated = async ({
+  io,
+  emitToCafe,
+  table,
+  tableId,
+  token,
+  status,
+}) => {
+  if (!io) return;
+  if (!emitToCafe) return;
+
+  const resolvedCartId = await resolveTableCartId(table || tableId);
+  if (!resolvedCartId) return;
+
+  emitToCafe(io, resolvedCartId, "waitlistUpdated", {
+    tableId: String(tableId || table?._id || table || ""),
+    token,
+    status,
+  });
+};
+
 function buildWaitlistResponse(entry, position, table) {
   return {
     token: entry.token,
@@ -233,8 +269,11 @@ exports.joinWaitlist = async (req, res) => {
 
     const io = req.app?.get("io");
     if (io) {
-      io.emit("waitlistUpdated", {
-        tableId: table._id.toString(),
+      await emitWaitlistUpdated({
+        io,
+        emitToCafe: req.app?.get("emitToCafe"),
+        table,
+        tableId: table._id,
         token: entry.token,
         status: entry.status,
       });
@@ -310,15 +349,21 @@ exports.cancelWaitlistEntry = async (req, res) => {
 
     const io = req.app?.get("io");
     if (io) {
-      io.emit("waitlistUpdated", {
-        tableId: entry.table.toString(),
+      await emitWaitlistUpdated({
+        io,
+        emitToCafe: req.app?.get("emitToCafe"),
+        tableId: entry.table,
         token: entry.token,
         status: entry.status,
       });
 
       // If cancelled entry was NOTIFIED, notify next person
       if (wasNotified) {
-        await exports.notifyNextWaitlist(entry.table, io);
+        await exports.notifyNextWaitlist(
+          entry.table,
+          io,
+          req.app?.get("emitToCafe"),
+        );
       }
     }
 
@@ -398,8 +443,11 @@ exports.seatWaitlistEntry = async (req, res) => {
 
     const io = req.app?.get("io");
     if (io) {
-      io.emit("waitlistUpdated", {
-        tableId: entry.table.toString(),
+      await emitWaitlistUpdated({
+        io,
+        emitToCafe: req.app?.get("emitToCafe"),
+        table,
+        tableId: entry.table,
         token: entry.token,
         status: entry.status,
       });
@@ -460,7 +508,7 @@ exports.listWaitlistForTable = async (req, res) => {
  * Returns the notified entry or null if no one is waiting
  * IMPORTANT: Only one person can be NOTIFIED at a time per table
  */
-exports.notifyNextWaitlist = async (tableId, io) => {
+exports.notifyNextWaitlist = async (tableId, io, emitToCafe = null) => {
   try {
     // First check if there's already a NOTIFIED entry (they have priority)
     const alreadyNotified = await Waitlist.findOne({
@@ -490,8 +538,10 @@ exports.notifyNextWaitlist = async (tableId, io) => {
     await next.save();
 
     if (io) {
-      io.emit("waitlistUpdated", {
-        tableId: tableId.toString(),
+      await emitWaitlistUpdated({
+        io,
+        emitToCafe,
+        tableId,
         token: next.token,
         status: next.status,
       });
@@ -523,7 +573,11 @@ exports.notifyNextWaitlistRoute = async (req, res) => {
     }
 
     const io = req.app?.get("io");
-    const entry = await exports.notifyNextWaitlist(id, io);
+    const entry = await exports.notifyNextWaitlist(
+      id,
+      io,
+      req.app?.get("emitToCafe"),
+    );
     if (!entry) {
       return res
         .status(404)
@@ -575,8 +629,10 @@ exports.notifyWaitlistEntry = async (req, res) => {
 
     const io = req.app?.get("io");
     if (io) {
-      io.emit("waitlistUpdated", {
-        tableId: entry.table.toString(),
+      await emitWaitlistUpdated({
+        io,
+        emitToCafe: req.app?.get("emitToCafe"),
+        tableId: entry.table,
         token: entry.token,
         status: entry.status,
       });

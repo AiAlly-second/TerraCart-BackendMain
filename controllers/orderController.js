@@ -37,6 +37,23 @@ const {
   buildActiveOrderMongoFilter,
   shouldDisplayInActiveQueues,
 } = require("../utils/orderContract");
+const { STABILITY_FLAGS } = require("../config/stabilityFlags");
+
+const TABLE_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "table.updated"
+  : "table:status:updated";
+const ORDER_CREATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "order.created"
+  : "order:created";
+const ORDER_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "order.updated"
+  : "orderUpdated";
+const PAYMENT_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "payment.updated"
+  : "paymentUpdated";
+const PAYMENT_CREATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "payment.created"
+  : "paymentCreated";
 
 // Simple in-memory cache for franchise and cafe data to prevent repeated DB queries
 const invoiceDataCache = {
@@ -415,6 +432,154 @@ const parseDateOnly = (value, { endOfDay = false } = {}) => {
   }
   return parsed;
 };
+
+const parseBooleanQuery = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase();
+  return (
+    normalized === "true" ||
+    normalized === "1" ||
+    normalized === "yes" ||
+    normalized === "y"
+  );
+};
+
+const normalizeServiceTypeFilter = (value) => {
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "_");
+
+  if (!normalized) return null;
+
+  if (
+    normalized === "TAKEAWAY" ||
+    normalized === "PICKUP" ||
+    normalized === "TAKE_AWAY"
+  ) {
+    return "TAKEAWAY";
+  }
+
+  if (
+    normalized === "DINE_IN" ||
+    normalized === "DINE-IN" ||
+    normalized === "DINEIN"
+  ) {
+    return "DINE_IN";
+  }
+
+  if (normalized === "DELIVERY") {
+    return "DELIVERY";
+  }
+
+  return null;
+};
+
+const resolveOrderTotalAmount = (orderLike) => {
+  const directTotal = Number(orderLike?.totalAmount);
+  if (Number.isFinite(directTotal) && directTotal >= 0) {
+    return Number(directTotal.toFixed(2));
+  }
+
+  const kotTotal = Array.isArray(orderLike?.kotLines)
+    ? orderLike.kotLines.reduce(
+        (sum, kot) => sum + Number(kot?.totalAmount || 0),
+        0,
+      )
+    : 0;
+
+  const addonTotal = Array.isArray(orderLike?.selectedAddons)
+    ? orderLike.selectedAddons.reduce((sum, addon) => {
+        const qty = Number(addon?.quantity || 1);
+        const price = Number(addon?.price || 0);
+        if (!Number.isFinite(qty) || !Number.isFinite(price)) return sum;
+        return sum + qty * price;
+      }, 0)
+    : 0;
+
+  return Number((kotTotal + addonTotal).toFixed(2));
+};
+
+const buildLightweightOrderPayload = (orderLike) => {
+  const payload = orderToPlainPayload(orderLike) || {};
+
+  const tablePayload =
+    payload?.table && typeof payload.table === "object"
+      ? {
+          _id: payload.table._id || payload.table.id || null,
+          number: payload.table.number ?? null,
+          name: payload.table.name ?? null,
+          status: payload.table.status ?? null,
+        }
+      : null;
+
+  return {
+    _id: payload._id || payload.orderId || null,
+    orderId: payload.orderId || payload._id || null,
+    orderNumber: payload.orderNumber || null,
+    takeawayToken:
+      payload.takeawayToken !== undefined ? payload.takeawayToken : null,
+    cartId: payload.cartId || payload.cafeId || null,
+    cafeId: payload.cafeId || payload.cartId || null,
+    franchiseId: payload.franchiseId || null,
+    table: tablePayload,
+    tableNumber: payload.tableNumber || tablePayload?.number || null,
+    status: payload.status || null,
+    lifecycleStatus: payload.lifecycleStatus || payload.status || null,
+    paymentStatus: normalizePaymentStatus(
+      payload.paymentStatus,
+      PAYMENT_STATUSES.PENDING,
+    ),
+    isPaid: payload.isPaid === true,
+    serviceType: payload.serviceType || null,
+    orderType: payload.orderType || null,
+    sourceQrType: payload.sourceQrType || null,
+    totalAmount: resolveOrderTotalAmount(payload),
+    customerName: payload.customerName || null,
+    customerMobile: payload.customerMobile || null,
+    officeName: payload.officeName || null,
+    officePaymentMode: payload.officePaymentMode || null,
+    officeDeliveryCharge: Number(payload.officeDeliveryCharge || 0),
+    waiterName: payload.waiterName || null,
+    cancellationReason: payload.cancellationReason || null,
+    createdAt: payload.createdAt || null,
+    updatedAt: payload.updatedAt || null,
+    paidAt: payload.paidAt || null,
+    returnedAt: payload.returnedAt || null,
+  };
+};
+
+const ORDER_LIGHTWEIGHT_SELECT = [
+  "_id",
+  "orderId",
+  "orderNumber",
+  "takeawayToken",
+  "cartId",
+  "cafeId",
+  "franchiseId",
+  "table",
+  "tableNumber",
+  "status",
+  "lifecycleStatus",
+  "paymentStatus",
+  "isPaid",
+  "serviceType",
+  "orderType",
+  "sourceQrType",
+  "totalAmount",
+  "customerName",
+  "customerMobile",
+  "officeName",
+  "officePaymentMode",
+  "officeDeliveryCharge",
+  "waiterName",
+  "cancellationReason",
+  "createdAt",
+  "updatedAt",
+  "paidAt",
+  "returnedAt",
+].join(" ");
 
 const buildOrderListSearchExpression = ({
   orderSearch = "",
@@ -1015,8 +1180,13 @@ const emitOrderUpsert = ({
   const resolvedCartId = toSocketIdString(cartId || payload.cartId);
   if (!resolvedCartId || !payload.orderId) return;
 
-  emitToCafe(io, resolvedCartId, "order:upsert", payload);
-  emitToOrderAudienceRooms(io, order, "order:upsert", payload);
+  if (STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS) {
+    emitToCafe(io, resolvedCartId, "order.updated", payload);
+    emitToOrderAudienceRooms(io, order, "order.updated", payload);
+  } else {
+    emitToCafe(io, resolvedCartId, "order:upsert", payload);
+    emitToOrderAudienceRooms(io, order, "order:upsert", payload);
+  }
 
   if (payload.status) {
     emitToOrderAudienceRooms(io, order, "order_status_updated", payload);
@@ -1042,10 +1212,14 @@ const emitCanonicalOrderStatusUpdate = ({
   );
   if (!resolvedCartId || !payload.orderId) return;
 
-  emitToCafe(io, resolvedCartId, "order_status_updated", payload);
-  // Legacy admin-web listeners still consume these full-order events.
-  emitToCafe(io, resolvedCartId, "order:status:updated", source);
-  emitToCafe(io, resolvedCartId, "orderUpdated", source);
+  if (STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS) {
+    emitToCafe(io, resolvedCartId, "order.updated", payload);
+  } else {
+    emitToCafe(io, resolvedCartId, "order_status_updated", payload);
+    // Legacy admin-web listeners still consume these full-order events.
+    emitToCafe(io, resolvedCartId, "order:status:updated", source);
+    emitToCafe(io, resolvedCartId, "orderUpdated", source);
+  }
   emitToOrderAudienceRooms(io, source, "order_status_updated", payload);
 
   writeSocketEmitDebugLog(
@@ -2714,17 +2888,7 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
 
     // Emit socket event for table status update to notify cart admin and customers
     if (io && table.cartId && emitToCafe) {
-      emitToCafe(io, table.cartId.toString(), "table:status:updated", {
-        id: table._id,
-        number: table.number,
-        status: table.status,
-        currentOrder: null,
-      });
-    }
-
-    // Also emit globally so customers can receive real-time updates
-    if (io) {
-      io.emit("table:status:updated", {
+      emitToCafe(io, table.cartId.toString(), TABLE_UPDATED_EVENT, {
         id: table._id,
         number: table.number,
         status: table.status,
@@ -2747,7 +2911,7 @@ async function releaseTableForOrder(order, io, emitToCafe = null) {
       // Only notify if there's no existing NOTIFIED entry
       if (!existingNotified) {
         const { notifyNextWaitlist } = require("./waitlistController");
-        await notifyNextWaitlist(tableId, io);
+        await notifyNextWaitlist(tableId, io, emitToCafe);
       } else {
         console.log(
           `[TABLE] Table ${table.number} released but already has NOTIFIED waitlist entry - skipping notification`,
@@ -3908,7 +4072,7 @@ const createOrder = async (req, res) => {
       const io = req.app?.get("io");
       const emitToCafe = req.app?.get("emitToCafe");
       if (io && tableDoc.cartId && emitToCafe) {
-        emitToCafe(io, tableDoc.cartId.toString(), "table:status:updated", {
+        emitToCafe(io, tableDoc.cartId.toString(), TABLE_UPDATED_EVENT, {
           id: tableDoc._id,
           number: tableDoc.number,
           status: tableDoc.status,
@@ -4260,7 +4424,7 @@ const createOrder = async (req, res) => {
       } else {
         // Emit for admin dashboards and printing clients.
         emitToCafe(io, cartIdStr, "kot:created", payload || order);
-        emitToCafe(io, cartIdStr, "order:created", payload || order);
+        emitToCafe(io, cartIdStr, ORDER_CREATED_EVENT, payload || order);
         emitToCafe(io, cartIdStr, "newOrder", payload || order); // Legacy support
         emitOrderUpsert({
           io,
@@ -4883,6 +5047,199 @@ const finalizeOrder = async (req, res) => {
   }
 };
 
+// ---------------- GET DASHBOARD ORDER SUMMARY ----------------
+// Returns a lightweight, recent window of orders for dashboard visualization.
+const getDashboardOrderSummary = async (req, res) => {
+  try {
+    const query = {};
+    let requiredCartScope = null;
+    let mobileCartScopeId = null;
+
+    if (req.user && req.user.role === "admin" && req.user._id) {
+      requiredCartScope = buildCartOwnershipFilter(req.user._id);
+      if (!requiredCartScope) {
+        return res.json({
+          success: true,
+          data: {
+            orders: [],
+            windowHours: 24,
+            limit: 0,
+          },
+        });
+      }
+    } else if (
+      req.user &&
+      req.user.role === "franchise_admin" &&
+      req.user._id
+    ) {
+      query.franchiseId = req.user._id;
+    } else if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
+      const mobileCartId = await resolveMobileCartId(req.user);
+      if (mobileCartId) {
+        mobileCartScopeId = mobileCartId.toString();
+        requiredCartScope = buildCartOwnershipFilter(mobileCartId);
+        if (!requiredCartScope) {
+          return res.json({
+            success: true,
+            data: {
+              orders: [],
+              windowHours: 24,
+              limit: 0,
+            },
+          });
+        }
+      } else {
+        return res.json({
+          success: true,
+          data: {
+            orders: [],
+            windowHours: 24,
+            limit: 0,
+          },
+        });
+      }
+    }
+
+    if (requiredCartScope) {
+      query.$and = query.$and || [];
+      query.$and.push(requiredCartScope);
+    }
+
+    const requestedCartId =
+      String(req.query?.cartId || "")
+        .trim() || null;
+    if (requestedCartId) {
+      if (req.user?.role === "admin" && req.user?._id) {
+        if (requestedCartId !== req.user._id.toString()) {
+          return res
+            .status(403)
+            .json({ message: "Requested cartId does not match your cart access." });
+        }
+      } else if (req.user && MOBILE_ORDER_ROLES.has(req.user.role)) {
+        if (!mobileCartScopeId || requestedCartId !== mobileCartScopeId) {
+          return res
+            .status(403)
+            .json({ message: "Requested cartId does not match your cart access." });
+        }
+      }
+
+      const requestedCartFilter = buildCartOwnershipFilter(requestedCartId);
+      if (requestedCartFilter) {
+        query.$and = query.$and || [];
+        query.$and.push(requestedCartFilter);
+      }
+    }
+
+    const windowHours = toBoundedPositiveInt(req.query?.windowHours, 24, {
+      min: 2,
+      max: 720,
+    });
+    const limit = toBoundedPositiveInt(req.query?.limit, 160, {
+      min: 20,
+      max: 1200,
+    });
+    const serviceTypeFilter = normalizeServiceTypeFilter(
+      req.query?.serviceType || req.query?.orderType,
+    );
+    const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000);
+
+    query.$and = query.$and || [];
+    query.$and.push({
+      $or: [
+        { createdAt: { $gte: windowStart } },
+        { updatedAt: { $gte: windowStart } },
+        { paidAt: { $gte: windowStart } },
+      ],
+    });
+    if (serviceTypeFilter) {
+      query.serviceType = serviceTypeFilter;
+    }
+
+    const recentOrders = await Order.find(query)
+      .sort({ updatedAt: -1, createdAt: -1 })
+      .limit(limit)
+      .populate("table", "number name status")
+      .select(ORDER_LIGHTWEIGHT_SELECT)
+      .lean();
+
+    const orders = recentOrders.map(buildLightweightOrderPayload);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const byStatus = {};
+    const byServiceType = {};
+    let activeOrders = 0;
+    let paidOrders = 0;
+    let totalRevenue = 0;
+    let todayOrders = 0;
+    let todayRevenue = 0;
+
+    for (const order of orders) {
+      if (!order) continue;
+
+      const normalizedStatus = String(order.status || "UNKNOWN")
+        .trim()
+        .toUpperCase();
+      byStatus[normalizedStatus] = (byStatus[normalizedStatus] || 0) + 1;
+
+      const normalizedServiceType = String(order.serviceType || "DINE_IN")
+        .trim()
+        .toUpperCase();
+      byServiceType[normalizedServiceType] =
+        (byServiceType[normalizedServiceType] || 0) + 1;
+
+      if (shouldDisplayInActiveQueues(order)) {
+        activeOrders += 1;
+      }
+
+      const createdAt = order.createdAt ? new Date(order.createdAt) : null;
+      const isToday =
+        createdAt instanceof Date &&
+        !Number.isNaN(createdAt.getTime()) &&
+        createdAt >= todayStart;
+      if (isToday) {
+        todayOrders += 1;
+      }
+
+      const orderIsPaid =
+        normalizePaymentStatus(order.paymentStatus, PAYMENT_STATUSES.PENDING) ===
+          PAYMENT_STATUSES.PAID ||
+        order.isPaid === true;
+      if (orderIsPaid) {
+        paidOrders += 1;
+        totalRevenue += Number(order.totalAmount || 0);
+        if (isToday) {
+          todayRevenue += Number(order.totalAmount || 0);
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        orders,
+        summary: {
+          totalOrders: orders.length,
+          activeOrders,
+          paidOrders,
+          totalRevenue: Number(totalRevenue.toFixed(2)),
+          todayOrders,
+          todayRevenue: Number(todayRevenue.toFixed(2)),
+          byStatus,
+          byServiceType,
+        },
+        windowHours,
+        limit,
+        truncated: orders.length >= limit,
+        fetchedAt: new Date().toISOString(),
+      },
+    });
+  } catch (err) {
+    console.error("[GET_DASHBOARD_ORDER_SUMMARY] Error:", err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
 // ---------------- GET ORDERS ----------------
 // IMPORTANT: This function returns ALL orders permanently - no date filtering or time limits
 // Orders are stored permanently in the database and will never be automatically deleted
@@ -4991,6 +5348,15 @@ const getOrders = async (req, res) => {
 
     const includeHistory =
       String(req.query?.includeHistory || "").trim().toLowerCase() === "true";
+    const lightweightRequested =
+      parseBooleanQuery(req.query?.lightweight) ||
+      String(req.query?.view || "").trim().toLowerCase() === "summary";
+    const serviceTypeFilter = normalizeServiceTypeFilter(
+      req.query?.serviceType || req.query?.orderType || req.query?.service,
+    );
+    if (serviceTypeFilter) {
+      query.serviceType = serviceTypeFilter;
+    }
 
     if (!includeHistory) {
       query.$and = query.$and || [];
@@ -5042,15 +5408,15 @@ const getOrders = async (req, res) => {
 
     let ordersQuery = Order.find(query)
       .sort({ createdAt: -1 }) // Sort by newest first (uses index)
-      .populate("table", "number name status") // Only populate needed fields
-      .select("-__v") // Exclude version field
+      .populate("table", "number name status") // Keep enough context for cards and summaries
+      .select(lightweightRequested ? ORDER_LIGHTWEIGHT_SELECT : "-__v") // Preserve full payload for legacy detail/export flows
       .lean();
 
     if (paginationRequested) {
       ordersQuery = ordersQuery.skip(skip).limit(limit);
     } else {
       // Preserve existing behavior for legacy callers.
-      ordersQuery = ordersQuery.limit(10000); // Safety limit to prevent infinite queries
+      ordersQuery = ordersQuery.limit(lightweightRequested ? 1000 : 10000); // Safety limit to prevent infinite queries
     }
 
     const orders = await ordersQuery;
@@ -5118,10 +5484,20 @@ const getOrders = async (req, res) => {
       return !isCompletedOrder && !isPaidOrder;
     };
 
-    const responseOrders = orders.map((order) => orderToPlainPayload(order));
+    const responseOrders = lightweightRequested
+      ? orders.map((order) => buildLightweightOrderPayload(order))
+      : orders.map((order) => orderToPlainPayload(order));
     responseOrders.sort(
       (a, b) => Number(isVipActiveOrder(b)) - Number(isVipActiveOrder(a)),
     );
+
+    if (!paginationRequested && !lightweightRequested && responseOrders.length >= 1000) {
+      console.warn("[GET_ORDERS] High-volume full payload response detected", {
+        count: responseOrders.length,
+        includeHistory,
+        role: req.user?.role || "unknown",
+      });
+    }
     if (paginationRequested) {
       const totalPages = Math.max(1, Math.ceil((totalCount || 0) / limit));
       return res.json({
@@ -6046,7 +6422,15 @@ const updateOrderStatus = async (req, res) => {
         if (payment && io) {
           const payload = formatPaymentPayload(payment, updatedOrder);
           if (payload) {
-            io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
+            const paymentEvent = created
+              ? PAYMENT_CREATED_EVENT
+              : PAYMENT_UPDATED_EVENT;
+            const paymentCartId = toSocketIdString(
+              updatedOrder?.cartId || updatedOrder?.cafeId,
+            );
+            if (paymentCartId && emitToCafe) {
+              emitToCafe(io, paymentCartId, paymentEvent, payload);
+            }
           }
         }
       } catch (paymentError) {
@@ -6264,7 +6648,13 @@ const cancelOrderByCustomer = async (req, res) => {
         if (io) {
           const payload = formatPaymentPayload(payment, order);
           if (payload) {
-            io.emit("paymentUpdated", payload);
+            const paymentCartId = toSocketIdString(order?.cartId || order?.cafeId);
+            if (paymentCartId) {
+              const emitToCafe = req.app.get("emitToCafe");
+              if (emitToCafe) {
+                emitToCafe(io, paymentCartId, PAYMENT_UPDATED_EVENT, payload);
+              }
+            }
           }
         }
       }
@@ -6436,7 +6826,16 @@ const confirmPaymentByCustomer = async (req, res) => {
     if (payment && io) {
       const payload = formatPaymentPayload(payment, order);
       if (payload) {
-        io.emit(created ? "paymentCreated" : "paymentUpdated", payload);
+        const paymentEvent = created
+          ? PAYMENT_CREATED_EVENT
+          : PAYMENT_UPDATED_EVENT;
+        const paymentCartId = toSocketIdString(order?.cartId || order?.cafeId);
+        if (paymentCartId) {
+          const emitToCafe = req.app.get("emitToCafe");
+          if (emitToCafe) {
+            emitToCafe(io, paymentCartId, paymentEvent, payload);
+          }
+        }
       }
     }
 
@@ -6527,8 +6926,16 @@ const deleteOrder = async (req, res) => {
         const io = req.app.get("io");
         if (io) {
           const payload = formatPaymentPayload(payment, order);
-          if (payload) {
-            io.emit("paymentUpdated", payload);
+          if (payload && order.cartId) {
+            const emitToCafe = req.app.get("emitToCafe");
+            if (emitToCafe) {
+              emitToCafe(
+                io,
+                order.cartId.toString(),
+                PAYMENT_UPDATED_EVENT,
+                payload,
+              );
+            }
           }
         }
       }
@@ -6869,7 +7276,11 @@ const convertToTakeaway = async (req, res) => {
           if (io) {
             const payload = formatPaymentPayload(originalPayment, order);
             if (payload) {
-              io.emit("paymentUpdated", payload);
+              const paymentCartId = toSocketIdString(order?.cartId || order?.cafeId);
+              const emitToCafe = req.app.get("emitToCafe");
+              if (paymentCartId && emitToCafe) {
+                emitToCafe(io, paymentCartId, PAYMENT_UPDATED_EVENT, payload);
+              }
             }
           }
         }
@@ -7422,17 +7833,39 @@ const getPendingKots = async (req, res) => {
       });
     }
 
-    const orders = await Order.find({
+    const parsedBatchLimit = Number.parseInt(req.query?.limit, 10);
+    const batchLimit = Number.isFinite(parsedBatchLimit)
+      ? Math.max(1, Math.min(parsedBatchLimit, 200))
+      : 50;
+    const parsedLineLimit = Number.parseInt(req.query?.lineLimit, 10);
+    const lineLimit = Number.isFinite(parsedLineLimit)
+      ? Math.max(1, Math.min(parsedLineLimit, 500))
+      : 200;
+
+    const cursorRaw = String(req.query?.cursor || "").trim();
+    const hasCursor = mongoose.Types.ObjectId.isValid(cursorRaw);
+
+    const query = {
       cartId,
       "kotLines.printStatus": { $in: ["pending", "failed"] },
+      ...(hasCursor
+        ? { _id: { $gt: new mongoose.Types.ObjectId(cursorRaw) } }
+        : {}),
+    };
+
+    const orders = await Order.find({
+      ...query,
     })
       .select("_id cartId kotLines.printKey kotLines.printStatus")
+      .sort({ _id: 1 }) // oldest-first batching
+      .limit(batchLimit)
       .lean();
 
     const pendingKots = [];
     for (const order of orders) {
       const lines = order.kotLines || [];
       for (let i = 0; i < lines.length; i++) {
+        if (pendingKots.length >= lineLimit) break;
         const status = (lines[i].printStatus || "").toString().toLowerCase();
         if (status !== "pending" && status !== "failed") continue;
         const printKey = (lines[i].printKey || "").toString().trim();
@@ -7444,9 +7877,23 @@ const getPendingKots = async (req, res) => {
           cartId: order.cartId || cartId,
         });
       }
+      if (pendingKots.length >= lineLimit) break;
     }
 
-    return res.json({ pendingKots });
+    const lastOrder = orders.length > 0 ? orders[orders.length - 1] : null;
+    const nextCursor = lastOrder?._id ? String(lastOrder._id) : null;
+    const hasMore =
+      orders.length === batchLimit || pendingKots.length >= lineLimit;
+
+    return res.json({
+      pendingKots,
+      pagination: {
+        batchLimit,
+        lineLimit,
+        nextCursor,
+        hasMore,
+      },
+    });
   } catch (err) {
     console.error("[PRINT_PENDING_KOTS]", err?.message, err?.stack);
     return res.status(500).json({ message: err.message });
@@ -7460,6 +7907,7 @@ module.exports = {
   addItemsToOrder,
   updateOrderAddons,
   finalizeOrder,
+  getDashboardOrderSummary,
   getOrders,
   getOrderById,
   getKotPrintTemplate,

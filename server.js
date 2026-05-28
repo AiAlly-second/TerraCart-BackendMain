@@ -48,6 +48,13 @@ const {
   createShutdownGuard,
   writeLogLine,
 } = require("./middleware/reliabilityMiddleware");
+const {
+  STABILITY_FLAGS,
+  STABILITY_THRESHOLDS,
+} = require("./config/stabilityFlags");
+const {
+  emitEventWithCompatibility,
+} = require("./utils/realtimeStability");
 
 // Always load backend/.env (do not use .env.production)
 dotenv.config({ path: path.join(__dirname, ".env") });
@@ -728,6 +735,61 @@ if (
 }
 
 // Socket.IO connection handling with room support
+const socketJoinWindows = new Map();
+
+const markSocketJoin = (socketId) => {
+  if (!STABILITY_FLAGS.ENABLE_STABILITY_OBSERVABILITY || !socketId) return;
+  if (!socketJoinWindows.has(socketId)) {
+    socketJoinWindows.set(socketId, []);
+  }
+  const timestamps = socketJoinWindows.get(socketId);
+  const now = Date.now();
+  timestamps.push(now);
+  const cutoff = now - 60_000;
+  while (timestamps.length > 0 && timestamps[0] < cutoff) {
+    timestamps.shift();
+  }
+  if (timestamps.length > STABILITY_THRESHOLDS.MAX_ROOM_JOINS_PER_MINUTE) {
+    console.warn("[SocketStability] room-join amplification risk", {
+      socketId,
+      joinsPerMinute: timestamps.length,
+      threshold: STABILITY_THRESHOLDS.MAX_ROOM_JOINS_PER_MINUTE,
+    });
+  }
+};
+
+const ensureJoinedRoomsSet = (socket) => {
+  if (!socket?.data) return null;
+  if (!socket.data.__joinedRooms) {
+    socket.data.__joinedRooms = new Set();
+  }
+  return socket.data.__joinedRooms;
+};
+
+const joinRoomIfNeeded = (socket, room, context = "unknown") => {
+  if (!socket || !room) return false;
+  const joinedSet = ensureJoinedRoomsSet(socket);
+  if (
+    joinedSet &&
+    STABILITY_FLAGS.ENABLE_SOCKET_ROOM_JOIN_DEDUPE &&
+    joinedSet.has(room)
+  ) {
+    if (STABILITY_FLAGS.ENABLE_STABILITY_OBSERVABILITY) {
+      writeSocketTraceLog("duplicate room join prevented", {
+        socketId: socket.id,
+        room,
+        context,
+      });
+    }
+    return false;
+  }
+
+  socket.join(room);
+  joinedSet?.add(room);
+  markSocketJoin(socket.id);
+  return true;
+};
+
 io.on("connection", (socket) => {
   const trackedSocketUserId =
     socket.data?.socketUserId ||
@@ -750,7 +812,7 @@ io.on("connection", (socket) => {
 
       const role = normalizeSocketRole(user.role);
       if (role && SOCKET_ROLE_ALLOWLIST.has(role)) {
-        socket.join(`role:${role}`);
+        joinRoomIfNeeded(socket, `role:${role}`, "auto:role");
         writeSocketTraceLog("joined role room", {
           socketId: socket.id,
           room: `role:${role}`,
@@ -759,7 +821,7 @@ io.on("connection", (socket) => {
 
       const userRoom = toSocketUserRoom(user?._id);
       if (userRoom) {
-        socket.join(userRoom);
+        joinRoomIfNeeded(socket, userRoom, "auto:user");
         writeSocketTraceLog("joined user room", {
           socketId: socket.id,
           room: userRoom,
@@ -773,8 +835,8 @@ io.on("connection", (socket) => {
       for (const cartId of allowedCartIds) {
         const normalizedCartId = normalizeSocketRoomValue(cartId);
         if (!normalizedCartId) continue;
-        socket.join(`cart:${normalizedCartId}`);
-        socket.join(`cafe:${normalizedCartId}`);
+        joinRoomIfNeeded(socket, `cart:${normalizedCartId}`, "auto:cart");
+        joinRoomIfNeeded(socket, `cafe:${normalizedCartId}`, "auto:cafe");
         writeSocketTraceLog("joined cart/cafe rooms", {
           socketId: socket.id,
           cartId: normalizedCartId,
@@ -787,7 +849,7 @@ io.on("connection", (socket) => {
 
   const initialAnonymousSessionId = extractSocketAnonymousSessionId(socket);
   if (initialAnonymousSessionId) {
-    socket.join(`anon_${initialAnonymousSessionId}`);
+    joinRoomIfNeeded(socket, `anon_${initialAnonymousSessionId}`, "auto:anon");
     writeSocketTraceLog("joined anon room on connect", {
       socketId: socket.id,
       room: `anon_${initialAnonymousSessionId}`,
@@ -819,7 +881,7 @@ io.on("connection", (socket) => {
     }
 
     const room = `cafe:${normalizedCafeId}`;
-    socket.join(room);
+    joinRoomIfNeeded(socket, room, "join:cafe");
     writeSocketTraceLog("join:cafe", {
       socketId: socket.id,
       room,
@@ -848,7 +910,11 @@ io.on("connection", (socket) => {
 
     const role = normalizeSocketRole(user.role);
     if (role === "super_admin") {
-      socket.join(`franchise:${normalizedFranchiseId}`);
+      joinRoomIfNeeded(
+        socket,
+        `franchise:${normalizedFranchiseId}`,
+        "join:franchise:super_admin"
+      );
       return;
     }
 
@@ -858,7 +924,7 @@ io.on("connection", (socket) => {
       user.franchiseId && String(user.franchiseId) === normalizedFranchiseId;
 
     if ((role === "franchise_admin" && sameFranchiseId) || (role === "admin" && adminFranchiseId)) {
-      socket.join(`franchise:${normalizedFranchiseId}`);
+      joinRoomIfNeeded(socket, `franchise:${normalizedFranchiseId}`, "join:franchise");
       writeSocketTraceLog("join:franchise", {
         socketId: socket.id,
         room: `franchise:${normalizedFranchiseId}`,
@@ -899,7 +965,7 @@ io.on("connection", (socket) => {
       normalizedUserRole === "super_admin" ||
       normalizedUserRole === normalizedRequestedRole
     ) {
-      socket.join(`role:${normalizedRequestedRole}`);
+      joinRoomIfNeeded(socket, `role:${normalizedRequestedRole}`, "join:role");
       writeSocketTraceLog("join:role", {
         socketId: socket.id,
         room: `role:${normalizedRequestedRole}`,
@@ -940,8 +1006,8 @@ io.on("connection", (socket) => {
 
     const cartRoom = `cart:${normalizedCartId}`;
     const cafeRoom = `cafe:${normalizedCartId}`;
-    socket.join(cartRoom);
-    socket.join(cafeRoom);
+    joinRoomIfNeeded(socket, cartRoom, "join:cart");
+    joinRoomIfNeeded(socket, cafeRoom, "join:cart");
     writeSocketTraceLog("join:cart", {
       socketId: socket.id,
       cartRoom,
@@ -968,7 +1034,7 @@ io.on("connection", (socket) => {
         socketUserId &&
         (socketUserId === requestedUserId || socketUserRole === "super_admin");
       if (canJoinUserRoom) {
-        socket.join(`user_${requestedUserId}`);
+        joinRoomIfNeeded(socket, `user_${requestedUserId}`, "join_room:user");
         writeSocketTraceLog("join_room user", {
           socketId: socket.id,
           room: `user_${requestedUserId}`,
@@ -984,7 +1050,11 @@ io.on("connection", (socket) => {
     }
 
     if (requestedAnonymousSessionId) {
-      socket.join(`anon_${requestedAnonymousSessionId}`);
+      joinRoomIfNeeded(
+        socket,
+        `anon_${requestedAnonymousSessionId}`,
+        "join_room:anon"
+      );
       writeSocketTraceLog("join_room anon", {
         socketId: socket.id,
         room: `anon_${requestedAnonymousSessionId}`,
@@ -1012,7 +1082,7 @@ io.on("connection", (socket) => {
       return;
     }
 
-    socket.join(`kiosk:${normalizedKioskId}`);
+    joinRoomIfNeeded(socket, `kiosk:${normalizedKioskId}`, "join:kiosk");
     writeSocketTraceLog("join:kiosk", {
       socketId: socket.id,
       room: `kiosk:${normalizedKioskId}`,
@@ -1042,10 +1112,17 @@ io.on("connection", (socket) => {
 // Helper function to emit to cafe room
 const emitToCafe = (io, cafeId, event, data) => {
   if (cafeId) {
-    const cafeRoom = `cafe:${cafeId}`;
-    const cartRoom = `cart:${cafeId}`;
-    io.to(cafeRoom).emit(event, data);
-    io.to(cartRoom).emit(event, data); // Also emit to cart room
+    const normalizedCafeId = normalizeSocketRoomValue(cafeId);
+    if (!normalizedCafeId) return;
+    const cartRoom = `cart:${normalizedCafeId}`;
+    const cafeRoom = `cafe:${normalizedCafeId}`;
+    emitEventWithCompatibility({
+      io,
+      event,
+      payload: data,
+      room: cartRoom,
+      roomFallback: cafeRoom,
+    });
     writeSocketTraceLog("emitToCafe", {
       event,
       cafeRoom,
@@ -1069,10 +1146,17 @@ const emitToFranchise = (io, franchiseId, event, data) => {
 // Helper function to emit to cart room
 const emitToCart = (io, cartId, event, data) => {
   if (cartId) {
-    const cartRoom = `cart:${cartId}`;
-    const cafeRoom = `cafe:${cartId}`;
-    io.to(cartRoom).emit(event, data);
-    io.to(cafeRoom).emit(event, data); // Also emit to cafe room for backward compatibility
+    const normalizedCartId = normalizeSocketRoomValue(cartId);
+    if (!normalizedCartId) return;
+    const cartRoom = `cart:${normalizedCartId}`;
+    const cafeRoom = `cafe:${normalizedCartId}`;
+    emitEventWithCompatibility({
+      io,
+      event,
+      payload: data,
+      room: cartRoom,
+      roomFallback: cafeRoom,
+    });
     writeSocketTraceLog("emitToCart", {
       event,
       cartRoom,
