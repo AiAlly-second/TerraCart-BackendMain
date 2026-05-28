@@ -1,9 +1,9 @@
 {
-    "latestVersion":  "1.0.14",
+    "latestVersion":  "1.0.15",
     "minimumSupportedVersion":  "1.0.12",
     "apkUrl":  "",
     "releaseNotes":  " Ai Tap to order added \n Added VIP order feature \n Added Sort in the order screen",
-    "sha256":  "b60aa864532d04cccf0a80339b9611d957d7736233d01429a9bf173ca1523d6b",
+    "sha256":  "52bc3789db03867638e9c47d52aa54549f350eb6d5669b3f7118c12c711795b0",
     "forceUpdate":  false,
     "updateUrl":  ""
 }

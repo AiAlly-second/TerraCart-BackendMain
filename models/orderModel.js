@@ -280,6 +280,8 @@ orderSchema.index({ franchiseId: 1, status: 1, createdAt: -1 });
 orderSchema.index({ status: 1, createdAt: -1 });
 // Index for date-based queries
 orderSchema.index({ createdAt: -1 });
+orderSchema.index({ updatedAt: -1 });
+orderSchema.index({ paidAt: -1 });
 // Compound index for cart and date queries
 orderSchema.index({ cartId: 1, createdAt: -1 });
 // Index for service type queries

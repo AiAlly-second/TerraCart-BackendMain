@@ -21,8 +21,22 @@ const {
   notifyPaymentRequest,
   notifyPaymentReceived,
 } = require("../services/notificationEventService");
+const { STABILITY_FLAGS } = require("../config/stabilityFlags");
 const { Jimp } = require("jimp");
 const jsQR = require("jsqr");
+
+const PAYMENT_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "payment.updated"
+  : "paymentUpdated";
+const PAYMENT_CREATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "payment.created"
+  : "paymentCreated";
+const ORDER_UPDATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "order.updated"
+  : "orderUpdated";
+const ORDER_CREATED_EVENT = STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS
+  ? "order.created"
+  : "order:created";
 
 const toObjectIdIfValid = (value) => {
   if (!value) return value;
@@ -155,7 +169,12 @@ const emitOrderUpsert = ({ io, emitToCafe, order, cartId = null }) => {
   const payload = buildOrderUpsertPayload(order);
   const resolvedCartId = toSocketIdString(cartId || payload.cartId);
   if (!resolvedCartId || !payload.orderId) return;
-  emitToCafe(io, resolvedCartId, "order:upsert", payload);
+  emitToCafe(
+    io,
+    resolvedCartId,
+    STABILITY_FLAGS.ENABLE_CANONICAL_EVENTS ? "order.updated" : "order:upsert",
+    payload,
+  );
 };
 
 const emitOrderReleaseEvents = ({
@@ -170,7 +189,7 @@ const emitOrderReleaseEvents = ({
   const orderPayload = toClientOrderPayload(order);
 
   emitToCafe(io, cartId, "kot:created", orderPayload);
-  emitToCafe(io, cartId, "order:created", orderPayload);
+  emitToCafe(io, cartId, ORDER_CREATED_EVENT, orderPayload);
   emitToCafe(io, cartId, "newOrder", orderPayload); // Legacy support
   emitOrderUpsert({ io, emitToCafe, order: orderPayload, cartId });
 
@@ -926,18 +945,14 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   const emitToCafe = req.app.get("emitToCafe");
   const orderPayload = toClientOrderPayload(order);
   const paymentPayload = formatPaymentResponse(payment, order);
-  if (io) {
-    io.emit("paymentUpdated", paymentPayload);
-    io.emit("orderUpdated", orderPayload);
-  }
   const orderScopeCartId = toSocketIdString(order?.cartId || order?.cafeId);
   if (orderScopeCartId && io && emitToCafe) {
     const cartId = orderScopeCartId;
-    emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
+    emitToCafe(io, cartId, PAYMENT_UPDATED_EVENT, paymentPayload);
     const statusPayload = buildOrderStatusUpdatedPayload(orderPayload);
     emitToCafe(io, cartId, "order:status:updated", orderPayload);
     emitToCafe(io, cartId, "order_status_updated", statusPayload);
-    emitToCafe(io, cartId, "orderUpdated", orderPayload);
+    emitToCafe(io, cartId, ORDER_UPDATED_EVENT, orderPayload);
     emitOrderUpsert({ io, emitToCafe, order: orderPayload, cartId });
     notifyPaymentReceived({
       io,
@@ -1174,16 +1189,9 @@ exports.createPaymentIntent = async (req, res) => {
         })
       : formatPaymentResponse(payment, order);
 
-    if (io) {
-      io.emit("paymentCreated", paymentCreatedPayload);
-      if (shouldAdvanceOrderForCashSelection) {
-        io.emit("orderUpdated", toClientOrderPayload(order));
-      }
-    }
-
     const paymentCreatedCartId = toSocketIdString(order?.cartId || order?.cafeId);
     if (paymentCreatedCartId && io && emitToCafe) {
-      emitToCafe(io, paymentCreatedCartId, "paymentCreated", paymentCreatedPayload);
+      emitToCafe(io, paymentCreatedCartId, PAYMENT_CREATED_EVENT, paymentCreatedPayload);
     }
 
     if (isEmployeePaymentRequest) {
@@ -1209,7 +1217,7 @@ exports.createPaymentIntent = async (req, res) => {
         buildOrderStatusUpdatedPayload(orderPayload),
       );
       emitToCafe(io, order.cartId.toString(), "order:status:updated", orderPayload);
-      emitToCafe(io, order.cartId.toString(), "orderUpdated", orderPayload);
+      emitToCafe(io, order.cartId.toString(), ORDER_UPDATED_EVENT, orderPayload);
       emitOrderUpsert({
         io,
         emitToCafe,
@@ -1580,11 +1588,10 @@ exports.cancelPayment = async (req, res) => {
     const io = req.app.get("io");
     if (io) {
       const paymentPayload = formatPaymentResponse(payment, order);
-      io.emit("paymentUpdated", paymentPayload);
       const emitToCafe = req.app.get("emitToCafe");
       const cartId = toSocketIdString(order?.cartId || order?.cafeId);
       if (emitToCafe && cartId) {
-        emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
+        emitToCafe(io, cartId, PAYMENT_UPDATED_EVENT, paymentPayload);
       }
     }
 
@@ -1709,11 +1716,10 @@ exports.verifyRazorpayPayment = async (req, res) => {
       const io = req.app.get("io");
       if (io) {
         const paymentPayload = formatPaymentResponse(payment, order);
-        io.emit("paymentUpdated", paymentPayload);
         const emitToCafe = req.app.get("emitToCafe");
         const cartId = toSocketIdString(order?.cartId || order?.cafeId);
         if (emitToCafe && cartId) {
-          emitToCafe(io, cartId, "paymentUpdated", paymentPayload);
+          emitToCafe(io, cartId, PAYMENT_UPDATED_EVENT, paymentPayload);
         }
       }
 
