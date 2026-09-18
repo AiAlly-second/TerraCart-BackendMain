@@ -25,6 +25,9 @@ const {
 const {
   startAttendanceTaskSchedulers,
 } = require("./services/attendanceTaskSchedulerService");
+const {
+  startBackupSchedulerService,
+} = require("./services/backupRestore/backupSchedulerService");
 
 // Security middleware
 const {
@@ -673,6 +676,10 @@ app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queu
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
 app.use("/api/app", require("./routes/appUpdateRoutes"));
 app.use("/api", require("./routes/notificationRoutes"));
+app.use(
+  "/api/admin/superadmin/backup-restore",
+  require("./routes/backupRestoreRoutes")
+);
 
 
 // Health check endpoints (both /health and /api/health for compatibility)
@@ -1258,6 +1265,7 @@ const startServer = async () => {
       );
     }
     startAttendanceTaskSchedulers({ io, emitToCafe });
+    await startBackupSchedulerService();
   } catch (error) {
     process.exit(1);
   }
