@@ -3,8 +3,10 @@ const mongoose = require("mongoose");
 const LOCAL_MONGO_URI = "mongodb://127.0.0.1:27017/terra-cart";
 
 const connectWithUri = async (mongoUri) => {
-  const maxPoolSize = Number.parseInt(process.env.MONGO_MAX_POOL_SIZE || "100", 10);
-  const minPoolSize = Number.parseInt(process.env.MONGO_MIN_POOL_SIZE || "5", 10);
+  // A t3.small does not need a 100-connection default pool. Deployments can
+  // override these values, while this default preserves host memory.
+  const maxPoolSize = Number.parseInt(process.env.MONGO_MAX_POOL_SIZE || "20", 10);
+  const minPoolSize = Number.parseInt(process.env.MONGO_MIN_POOL_SIZE || "0", 10);
   const maxIdleTimeMS = Number.parseInt(process.env.MONGO_MAX_IDLE_TIME_MS || "30000", 10);
   const connectTimeoutMS = Number.parseInt(process.env.MONGO_CONNECT_TIMEOUT_MS || "10000", 10);
   const isAtlas = mongoUri.includes("mongodb+srv://");
@@ -70,12 +72,5 @@ const connectDB = async () => {
     throw error;
   }
 };
-
-// Graceful shutdown
-process.on("SIGINT", async () => {
-  await mongoose.connection.close();
-  console.log("[DB] MongoDB disconnected on app termination");
-  process.exit(0);
-});
 
 module.exports = connectDB;

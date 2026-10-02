@@ -42,12 +42,15 @@ const {
   requestCorrelationMiddleware,
 } = require("./middleware/requestCorrelationMiddleware");
 const { requestContextMiddleware } = require("./logging/logger");
-const { quitRedisAppClient } = require("./services/redisAppClient");
+const {
+  ensureRedisAppClientConnection,
+  getRedisAppStatus,
+  quitRedisAppClient,
+} = require("./services/redisAppClient");
 const {
   createSlowApiLogger,
   createRequestTimeoutGuard,
   createWarmupGuard,
-  createRequestDeduplicationMiddleware,
   createGetResponseCache,
   createShutdownGuard,
   writeLogLine,
@@ -564,13 +567,6 @@ const getResponseCache = createGetResponseCache({
     return routePath === "/api/menu/public" || routePath === "/api/menu/meta/spice-levels";
   },
 });
-const requestDeduper = createRequestDeduplicationMiddleware({
-  pendingTtlMs: Number.parseInt(process.env.REQUEST_DEDUP_TTL_MS || "20000", 10),
-  skip: (req) =>
-    req.method === "OPTIONS" ||
-    req.path.startsWith("/uploads") ||
-    req.is("multipart/form-data"),
-});
 const shutdownGuard = createShutdownGuard(() => isShuttingDown);
 
 const ROOT_HEALTH_CACHE_TTL_MS = 5000;
@@ -609,7 +605,6 @@ app.use(warmupGuard);
 app.use(requestTimeoutGuard);
 app.use(slowApiLogger);
 app.use(getResponseCache);
-app.use(requestDeduper);
 
 // Apply rate limiting to all routes
 app.use(rateLimiters.api);
@@ -701,12 +696,15 @@ app.get("/health", (req, res) => {
   ) {
     rootHealthCacheStatus = dbReady ? 200 : 503;
     rootHealthCacheDbState = dbState;
+    const redis = getRedisAppStatus();
     rootHealthCachePayload = {
-      status: dbReady ? "healthy" : "degraded",
+      status: dbReady ? (redis.configured && !redis.ready ? "degraded" : "healthy") : "unhealthy",
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: process.env.NODE_ENV || "development",
       dbState,
+      mongo: { ready: dbReady },
+      redis,
     };
     rootHealthCacheExpiresAt = now + ROOT_HEALTH_CACHE_TTL_MS;
   }
@@ -1257,6 +1255,10 @@ const startServer = async () => {
     if (!Number.isNaN(requestTimeoutMs) && requestTimeoutMs > 0) {
       server.requestTimeout = requestTimeoutMs;
     }
+
+    // Begin the optional Redis attempt before listening so health reports its
+    // real startup state. This promise is intentionally never awaited.
+    void ensureRedisAppClientConnection();
 
     // CRITICAL: Bind explicitly for PM2/Nginx deployments.
     server.listen(PORT, "0.0.0.0", () => {
