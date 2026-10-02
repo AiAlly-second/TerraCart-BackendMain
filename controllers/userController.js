@@ -697,6 +697,18 @@ exports.createUser = async (req, res) => {
 
     const user = await User.create(userData);
 
+    if (role === "franchise_admin") {
+      // Feature rows are inert until later phases wire runtime enforcement.
+      // A missing row also resolves disabled if this initialization fails.
+      try {
+        await require("../services/featureService").createNewFranchiseDefaults(user._id);
+      } catch (featureError) {
+        console.error("[FEATURE_DEFAULT] Failed to initialize new franchise feature", {
+          franchiseAdminId: String(user._id), message: featureError.message,
+        });
+      }
+    }
+
     // CRITICAL: When a new franchise is created, automatically clone the global default menu
     // This gives the franchise its own default menu template (independent from global)
     // The franchise admin can then customize this menu, and it will be used for all carts

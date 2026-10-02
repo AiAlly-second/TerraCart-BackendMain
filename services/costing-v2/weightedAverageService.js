@@ -1,5 +1,6 @@
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
+const { resolveCartScope, assertIngredientMutable } = require("../../utils/costing-v2/inventoryScope");
 
 const STOCK_EPSILON = 1e-3;
 
@@ -96,6 +97,7 @@ class WeightedAverageService {
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
+    assertIngredientMutable(ingredient, await resolveCartScope(cartId, { ingredientId, operation: "purchase" }), "purchase");
 
     // Fix baseUnit if it's invalid (should be g, ml, or pcs)
     if (!['g', 'ml', 'pcs'].includes(ingredient.baseUnit)) {
@@ -149,7 +151,7 @@ class WeightedAverageService {
         const outletTransactions = await InventoryTransaction.find({
           ingredientId: ingredientId,
           cartId: cartId,
-        }).sort({ date: 1 });
+        }).sort({ date: 1, _id: 1 });
 
         let totalQty = 0;
         let totalValue = 0; // Total value of inventory in base unit
@@ -157,7 +159,10 @@ class WeightedAverageService {
         // Calculate weighted average from all transactions
         for (const txn of outletTransactions) {
           const txnQty = txn.qtyInBaseUnit || txn.qty;
-          if (txn.type === "IN" || txn.type === "RETURN") {
+          if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+            totalQty = Number(txn.physicalQtyAfter);
+            totalValue = totalQty * (existingAvgCost || ingredient.currentCostPerBaseUnit || 0);
+          } else if (txn.type === "IN" || txn.type === "RETURN") {
             // Add to inventory - calculate weighted average
             // Calculate cost per base unit for this transaction
             let txnCostPerBaseUnit = 0;
@@ -330,6 +335,7 @@ class WeightedAverageService {
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
+    assertIngredientMutable(ingredient, await resolveCartScope(cartId, { ingredientId, operation: "consume" }), "consume");
 
     // Fix baseUnit if it's invalid (should be g, ml, or pcs)
     if (!['g', 'ml', 'pcs'].includes(ingredient.baseUnit)) {
@@ -360,13 +366,15 @@ class WeightedAverageService {
       const outletTransactions = await InventoryTransaction.find({
         ingredientId: ingredientId,
         cartId: cartId,
-      }).sort({ date: 1 }); // Sort ascending to process chronologically
+      }).sort({ date: 1, _id: 1 }); // Sort ascending to process chronologically
 
       // SIMPLE: Calculate stock from transactions (no weighted average)
       let totalQty = 0;
       for (const txn of outletTransactions) {
         const txnQty = txn.qtyInBaseUnit || txn.qty;
-        if (txn.type === "IN" || txn.type === "RETURN") {
+        if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+          totalQty = Number(txn.physicalQtyAfter);
+        } else if (txn.type === "IN" || txn.type === "RETURN") {
           totalQty += txnQty;
         } else if (txn.type === "OUT" || txn.type === "WASTE") {
           totalQty -= txnQty;
@@ -493,6 +501,7 @@ class WeightedAverageService {
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
+    assertIngredientMutable(ingredient, await resolveCartScope(cartId, { ingredientId, operation: "return" }), "return");
 
     // Fix baseUnit if it's invalid (should be g, ml, or pcs)
     if (!['g', 'ml', 'pcs'].includes(ingredient.baseUnit)) {
@@ -521,14 +530,17 @@ class WeightedAverageService {
       const outletTransactions = await InventoryTransaction.find({
         ingredientId: ingredientId,
         cartId: cartId,
-      }).sort({ date: 1 }); // Sort ascending to process chronologically
+      }).sort({ date: 1, _id: 1 }); // Sort ascending to process chronologically
 
       let totalQty = 0;
       let weightedAvgCost = 0;
 
       for (const txn of outletTransactions) {
         const txnQty = txn.qtyInBaseUnit || txn.qty;
-        if (txn.type === "IN" || txn.type === "RETURN") {
+        if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+          totalQty = Number(txn.physicalQtyAfter);
+          weightedAvgCost = ingredient.currentCostPerBaseUnit || weightedAvgCost;
+        } else if (txn.type === "IN" || txn.type === "RETURN") {
           // Add to inventory - recalculate weighted average
           const txnCost = txn.costAllocated || 0;
           if (totalQty > 0 && txnQty > 0) {
@@ -595,12 +607,14 @@ class WeightedAverageService {
       const outletTransactions = await InventoryTransaction.find({
         ingredientId: ingredientId,
         cartId: cartId,
-      }).sort({ date: 1 });
+      }).sort({ date: 1, _id: 1 });
 
       let totalQty = 0;
       for (const txn of outletTransactions) {
         const txnQty = txn.qtyInBaseUnit || txn.qty;
-        if (txn.type === "IN" || txn.type === "RETURN") {
+        if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+          totalQty = Number(txn.physicalQtyAfter);
+        } else if (txn.type === "IN" || txn.type === "RETURN") {
           totalQty += txnQty;
         } else if (txn.type === "OUT" || txn.type === "WASTE") {
           totalQty -= txnQty;

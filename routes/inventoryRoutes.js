@@ -10,11 +10,14 @@ const {
   getAvailableIngredients,
 } = require("../controllers/inventoryController");
 const { protect, authorize } = require("../middleware/authMiddleware");
+const { requireInventoryEnabled } = require("../middleware/inventoryFeatureMiddleware");
 
 const router = express.Router();
 
 // All routes require authentication
 router.use(protect);
+// Legacy Inventory is a direct Inventory surface end-to-end: guard the whole router.
+router.use(requireInventoryEnabled({ operation: "legacy-inventory" }));
 
 // Get available ingredients from costing-v2 for managers
 router.get("/available-ingredients", authorize(["admin", "franchise_admin", "super_admin", "manager"]), getAvailableIngredients);

@@ -232,6 +232,26 @@ const orderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Reliable Inventory side-effect state (Phase 03). A missing value on a
+    // historical order is interpreted, never backfilled: inventoryDeducted
+    // true -> treat as "deducted"; otherwise treat as "pending".
+    inventoryProcessingState: {
+      type: String,
+      enum: ["pending", "processing", "deducted", "partial", "skipped_feature_disabled", "failed"],
+      default: "pending",
+    },
+    // Set the moment an Inventory operation was intentionally skipped
+    // because the Inventory feature was disabled for the order's franchise.
+    inventorySkippedAt: {
+      type: Date,
+      default: null,
+    },
+    // KOTs and add-on quantities intentionally skipped while Inventory was OFF.
+    // These are never converted into stock consumption after reconciliation.
+    inventorySkippedKotIndexes: { type: [Number], default: [] },
+    inventorySkippedAddonQuantities: {
+      type: [{ key: String, qty: Number }], default: [],
+    },
     paidAt: Date,
     returnedAt: Date,
     autoReleasedAt: Date,

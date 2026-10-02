@@ -5,8 +5,9 @@ const inventoryTransactionSchema = new mongoose.Schema(
     ingredientId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ingredient",
-      required: true,
+      required: false,
     },
+    inventoryItemId: { type: mongoose.Schema.Types.ObjectId, ref: "InventoryItem", default: null },
     cartId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User", // Kiosk/Cafe reference
@@ -56,7 +57,6 @@ inventoryTransactionSchema.index({ changeType: 1 });
 inventoryTransactionSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model("InventoryTransaction", inventoryTransactionSchema);
-
 
 
 

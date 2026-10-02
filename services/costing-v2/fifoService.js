@@ -1,6 +1,7 @@
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 const Purchase = require("../../models/costing-v2/purchaseModel");
+const { resolveCartScope, assertIngredientMutable, id } = require("../../utils/costing-v2/inventoryScope");
 
 /**
  * FIFO Service
@@ -20,6 +21,10 @@ class FIFOService {
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
+    const purchase = await Purchase.findById(purchaseId).select("cartId franchiseId");
+    const scope = await resolveCartScope(purchase?.cartId, { ingredientId, operation: "fifo-purchase" });
+    if (id(purchase.franchiseId) !== id(scope.franchiseId)) throw new Error("INVENTORY_SCOPE_MISMATCH");
+    assertIngredientMutable(ingredient, scope, "fifo-purchase");
 
     // Add new FIFO layer
     ingredient.fifoLayers.push({
@@ -63,6 +68,7 @@ class FIFOService {
     if (!ingredient) {
       throw new Error("Ingredient not found");
     }
+    assertIngredientMutable(ingredient, await resolveCartScope(cartId, { ingredientId, operation: "fifo-consume" }), "fifo-consume");
 
     // For cart-specific consumption, check available quantity from cart's layers only
     // cartId is the cart admin user ID

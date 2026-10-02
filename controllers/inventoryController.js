@@ -4,6 +4,13 @@ const User = require("../models/userModel");
 const Employee = require("../models/employeeModel");
 const IngredientV2 = require("../models/costing-v2/ingredientModel");
 const { buildCostingQuery } = require("../utils/costing-v2/accessControl");
+const { resolveOperationalScope, assertLegacyItemScope, assertIngredientMutable, isIngredientAccessible, id } = require("../utils/costing-v2/inventoryScope");
+
+const assertLinkedIngredientScope = async (item, scope) => {
+  if (!item.ingredientId) return;
+  const ingredient = await IngredientV2.findById(item.ingredientId);
+  assertIngredientMutable(ingredient, scope, "legacy-linked-item");
+};
 
 // Helper to get cartId based on user role
 // Note: Returns cartId for Inventory model (which uses cartId, not cafeId)
@@ -44,71 +51,24 @@ const getCafeId = async (user) => {
 // Get all inventory items
 exports.getAllInventory = async (req, res) => {
   try {
-    const query = {};
-
-    // Filter based on user role
-    // Inventory model uses cartId, not cafeId
-    if (req.user && req.user.role === "admin" && req.user._id) {
-      query.cartId = req.user._id; // Inventory model uses cartId, not cafeId
-    } else if (req.user && req.user.role === "franchise_admin" && req.user._id) {
-      query.franchiseId = req.user._id;
-    } else if (["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      // Mobile users - get cartId from employee record (Employee uses cartId)
-      let cartId = await getCafeId(req.user);
-      const franchiseId = req.user?.franchiseId || (await Employee.findOne({
-        $or: [{ email: req.user?.email?.toLowerCase() }, { userId: req.user?._id }]
-      }).lean())?.franchiseId;
-
-      console.log('[INVENTORY] getAllInventory - Mobile user:', req.user?.role, 'userId:', req.user?._id, 'cartId:', cartId?.toString(), 'franchiseId:', franchiseId?.toString());
-
-      if (cartId) {
-        // Ensure ObjectId for query (handles string/ObjectId mismatch)
-        query.cartId = mongoose.Types.ObjectId.isValid(cartId)
-          ? (cartId instanceof mongoose.Types.ObjectId ? cartId : new mongoose.Types.ObjectId(cartId.toString()))
-          : cartId;
-      } else {
-        console.log('[INVENTORY] getAllInventory - No cartId for mobile user, returning empty.');
-        return res.json({ success: true, data: [] });
-      }
-    } else if (req.user?.role === "employee") {
-      const cartId = await getCafeId(req.user);
-      if (cartId) {
-        query.cartId = mongoose.Types.ObjectId.isValid(cartId)
-          ? (cartId instanceof mongoose.Types.ObjectId ? cartId : new mongoose.Types.ObjectId(cartId.toString()))
-          : cartId;
-      }
-    }
-
-    let items = await InventoryItem.find(query)
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || null,
+      requireCart: req.user.role !== "franchise_admin",
+      operation: "legacy-list",
+    });
+    const query = scope.cartId
+      ? { cartId: scope.cartId, $or: [{ franchiseId: scope.franchiseId }, { franchiseId: null }] }
+      : { franchiseId: scope.franchiseId };
+    const rawItems = await InventoryItem.find(query)
       .sort({ category: 1, name: 1 })
       .lean();
-
-    console.log('[INVENTORY] getAllInventory - Query:', JSON.stringify(query), 'Found items:', items.length);
-
-    // Fallback for mobile users: if 0 items by cartId, try franchiseId (items may have wrong cartId)
-    if (items.length === 0 && query.cartId && ["waiter", "cook", "captain", "manager"].includes(req.user?.role)) {
-      const franchiseId = req.user?.franchiseId || (await Employee.findOne({
-        $or: [{ email: req.user?.email?.toLowerCase() }, { userId: req.user?._id }]
-      }).lean())?.franchiseId;
-
-      if (franchiseId) {
-        const franchiseQuery = { franchiseId: mongoose.Types.ObjectId.isValid(franchiseId) ? (franchiseId instanceof mongoose.Types.ObjectId ? franchiseId : new mongoose.Types.ObjectId(franchiseId.toString())) : franchiseId };
-        items = await InventoryItem.find(franchiseQuery)
-          .sort({ category: 1, name: 1 })
-          .lean();
-        console.log('[INVENTORY] getAllInventory - Fallback by franchiseId:', franchiseId.toString(), 'Found items:', items.length);
-        if (items.length > 0) {
-          console.log('[INVENTORY] getAllInventory - Items have wrong cartId. Run: node scripts/fix-inventory-cartid.js', query.cartId.toString(), 'to fix.');
-        }
-      }
-    }
-
-    if (items.length === 0 && query.cartId) {
-      const totalInDb = await InventoryItem.countDocuments({});
-      const forThisCart = await InventoryItem.countDocuments({ cartId: query.cartId });
-      const distinctCartIds = await InventoryItem.distinct('cartId');
-      console.log('[INVENTORY] getAllInventory - DB has', totalInDb, 'total items,', forThisCart, 'for cartId', query.cartId.toString(), '| Item cartIds in DB:', distinctCartIds.map((id) => id?.toString()).filter(Boolean));
-    }
+    const linkedIds = rawItems.map(item => item.ingredientId).filter(Boolean);
+    const linkedIngredients = linkedIds.length
+      ? await IngredientV2.find({ _id: { $in: linkedIds } }).select("_id cartId franchiseId").lean()
+      : [];
+    const linkedById = new Map(linkedIngredients.map(ingredient => [id(ingredient._id), ingredient]));
+    const items = rawItems.filter(item => !item.ingredientId ||
+      isIngredientAccessible({ ingredient: linkedById.get(id(item.ingredientId)), scope, mutation: true }));
 
     // Return in consistent format for both admin app and admin site
     return res.json({
@@ -127,6 +87,13 @@ exports.getInventoryItem = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Inventory item not found" });
     }
+
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || req.body?.cartId || (req.user.role === "franchise_admin" ? item.cartId : null),
+      operation: "legacy-item",
+    });
+    assertLegacyItemScope(item, scope, "legacy-item");
+    await assertLinkedIngredientScope(item, scope);
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
@@ -162,7 +129,14 @@ exports.getInventoryItem = async (req, res) => {
 // Create inventory item
 exports.createInventoryItem = async (req, res) => {
   try {
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.body.cartId || null,
+      operation: "legacy-create",
+    });
     const itemData = { ...req.body };
+    itemData.cartId = scope.cartId;
+    itemData.franchiseId = scope.franchiseId;
+    delete itemData.cafeId;
 
     // Ensure required fields have defaults
     if (itemData.unitPrice === undefined || itemData.unitPrice === null) {
@@ -184,6 +158,7 @@ exports.createInventoryItem = async (req, res) => {
       if (!ingredient) {
         return res.status(404).json({ message: "Ingredient not found" });
       }
+      assertIngredientMutable(ingredient, scope, "legacy-link");
       
       // Sync data from ingredient
       if (!itemData.name) itemData.name = ingredient.name;
@@ -256,6 +231,8 @@ exports.createInventoryItem = async (req, res) => {
       }
     }
 
+    itemData.cartId = scope.cartId;
+    itemData.franchiseId = scope.franchiseId;
     const item = await InventoryItem.create(itemData);
     
     // Emit socket event to cafe room
@@ -282,6 +259,13 @@ exports.updateInventoryItem = async (req, res) => {
       return res.status(404).json({ message: "Inventory item not found" });
     }
 
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || req.body?.cartId || (req.user.role === "franchise_admin" ? item.cartId : null),
+      operation: "legacy-item",
+    });
+    assertLegacyItemScope(item, scope, "legacy-item");
+    await assertLinkedIngredientScope(item, scope);
+
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
       const itemCartId = item.cartId || item.cafeId; // Support old cafeId field for backward compatibility
@@ -307,7 +291,8 @@ exports.updateInventoryItem = async (req, res) => {
       }
     }
 
-    Object.assign(item, req.body);
+    const { cartId, cafeId, franchiseId, ingredientId, ...safeUpdate } = req.body;
+    Object.assign(item, safeUpdate);
     await item.save();
     
     // Emit socket event to cafe room
@@ -332,6 +317,13 @@ exports.deleteInventoryItem = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Inventory item not found" });
     }
+
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || req.body?.cartId || (req.user.role === "franchise_admin" ? item.cartId : null),
+      operation: "legacy-item",
+    });
+    assertLegacyItemScope(item, scope, "legacy-item");
+    await assertLinkedIngredientScope(item, scope);
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
@@ -381,6 +373,13 @@ exports.updateStock = async (req, res) => {
     if (!item) {
       return res.status(404).json({ message: "Inventory item not found" });
     }
+
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || req.body?.cartId || (req.user.role === "franchise_admin" ? item.cartId : null),
+      operation: "legacy-item",
+    });
+    assertLegacyItemScope(item, scope, "legacy-item");
+    await assertLinkedIngredientScope(item, scope);
 
     // Check access permissions
     if (req.user && req.user.role === "admin" && req.user._id) {
@@ -460,7 +459,7 @@ exports.getAvailableIngredients = async (req, res) => {
     }
     
     // Build costing query (will handle admin, franchise_admin, super_admin)
-    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: false });
+    const costingFilter = await buildCostingQuery(req.user, filter, { skipOutletFilter: false, includeShared: true });
     
     console.log('[INVENTORY] getAvailableIngredients - Final filter:', JSON.stringify(costingFilter));
 
@@ -621,4 +620,3 @@ exports.getInventoryStats = async (req, res) => {
     return res.status(500).json({ message: err.message });
   }
 };
-

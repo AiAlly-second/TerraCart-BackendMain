@@ -6,6 +6,10 @@
 const mongoose = require("mongoose");
 const User = require("../../models/userModel");
 const Employee = require("../../models/employeeModel");
+const {
+  resolveOperationalScope,
+  buildIngredientScopeQuery,
+} = require("./inventoryScope");
 
 const resolveManagerCartId = async (user) => {
   if (!user) return null;
@@ -51,6 +55,26 @@ const buildCostingQuery = async (user, additionalFilter = {}, options = {}) => {
   // - includeShared: for franchise_admin to also see global (franchiseId=null) records
   const skipOutletFilter = options.skipOutletFilter || false;
   const includeShared = options.includeShared || false;
+
+  // Ingredient reads have one ownership policy. Never let caller-supplied
+  // cartId/franchiseId/$or replace the server-resolved scope.
+  if (includeShared) {
+    const scope = await resolveOperationalScope(user, {
+      cartId: additionalFilter.cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(user.role),
+      operation: "ingredient-read",
+    });
+    const allowed = buildIngredientScopeQuery(scope, {
+      includeTemplates: options.includeTemplates === true,
+    });
+    const safeFilter = {};
+    for (const [key, value] of Object.entries(filter)) {
+      if (!["cartId", "franchiseId", "$or", "$and"].includes(key)) {
+        safeFilter[key] = value;
+      }
+    }
+    return Object.keys(safeFilter).length ? { $and: [allowed, safeFilter] } : allowed;
+  }
 
   if (user.role === "admin" || user.role === "manager") {
     // Cart/Kiosk admin and manager (manager is scoped to one cart)
@@ -271,11 +295,11 @@ const setOutletContext = async (user, data = {}, outletRequired = true) => {
   } else if (user.role === "manager") {
     // Manager - always scoped to their assigned cart
     let managerCartId = await resolveManagerCartId(user);
-    if (!managerCartId && data.cartId) {
-      managerCartId = data.cartId;
-    }
     if (!managerCartId) {
       throw new Error("No cart associated with manager");
+    }
+    if (data.cartId && data.cartId.toString() !== managerCartId.toString()) {
+      throw new Error("Access denied: Cart does not match manager assignment");
     }
     data.cartId = managerCartId;
 

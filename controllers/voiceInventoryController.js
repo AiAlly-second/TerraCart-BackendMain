@@ -9,7 +9,7 @@ const {
   combineVoiceResponses,
   getTtsLocaleForLanguage,
 } = require("../services/voiceResponseService");
-const { setOutletContext } = require("../utils/costing-v2/accessControl");
+const { resolveOperationalScope } = require("../utils/costing-v2/inventoryScope");
 
 const inventoryResponseKey = (action) => {
   const normalized = String(action || "").trim().toLowerCase();
@@ -172,8 +172,15 @@ exports.createVoiceInventory = async (req, res) => {
       cartId: req.body?.cartId,
     });
 
-    // Apply role-aware cart/franchise context (shared for super admin by default).
-    const ingredientData = await setOutletContext(req.user, basePayload, false);
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.body?.cartId || null,
+      operation: "voice-inventory-create",
+    });
+    const ingredientData = {
+      ...basePayload,
+      cartId: scope.cartId,
+      franchiseId: scope.franchiseId,
+    };
 
     const ingredient = new Ingredient(ingredientData);
     await ingredient.save();

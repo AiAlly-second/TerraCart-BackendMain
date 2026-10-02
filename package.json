@@ -4,7 +4,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"No automated tests configured yet\"",
-    "test:integration": "node tests/integration/mobile-app-integration.test.js",
+    "test:integration": "NODE_ENV=test node --test tests/integration/inventory-isolation.test.js tests/integration/feature-framework.test.js tests/integration/inventory-feature-enforcement.test.js tests/integration/feature-socket.test.js",
     "verify:sync": "node tests/integration/component-sync-verification.js",
     "build": "echo \"Building backend...\" && node -c server.js && echo \"Build completed successfully\"",
     "start": "node server.js",
@@ -53,7 +53,9 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "mongodb-memory-server": "^11.3.0",
+    "nodemon": "^3.1.14",
+    "socket.io-client": "^4.8.4"
   },
   "overrides": {
     "form-data": ">=2.5.4",
