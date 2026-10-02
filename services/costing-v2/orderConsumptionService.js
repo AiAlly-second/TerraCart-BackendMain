@@ -16,6 +16,7 @@ const InventoryTransactionV2 = require("../../models/costing-v2/inventoryTransac
 const { MenuItem } = require("../../models/menuItemModel");
 const MenuCategory = require("../../models/menuCategoryModel");
 const User = require("../../models/userModel");
+const { resolveCartScope, assertIngredientMutable, id, logInventoryScope } = require("../../utils/costing-v2/inventoryScope");
 
 const escapeRegex = (value) =>
   String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -66,7 +67,6 @@ const buildRecipeScopeClauses = (cartIdObj, cartId, franchiseId) => {
   if (cartIdObj || cartId) clauses.push({ cartId: cartIdObj || cartId });
   if (franchiseId) {
     clauses.push({ cartId: null, franchiseId });
-    clauses.push({ franchiseId });
   }
   clauses.push({ cartId: null, franchiseId: null });
   clauses.push({
@@ -114,6 +114,21 @@ async function consumeIngredientsForOrder(order, userId) {
         success: false,
         message: "Order has no cartId association",
       };
+    }
+
+    // Resolve from the cart admin User, never from a caller-supplied franchise.
+    let inventoryScope;
+    try {
+      inventoryScope = await resolveCartScope(cartId, { orderId: order._id, operation: "order-consume" });
+      if (!order.franchiseId || id(order.franchiseId) !== id(inventoryScope.franchiseId)) {
+        logInventoryScope("INVENTORY_SCOPE_MISMATCH", {
+          orderId: order._id, cartId, franchiseId: order.franchiseId,
+          operation: "order-consume",
+        });
+        return { success: false, message: "Order franchise scope mismatch" };
+      }
+    } catch (scopeError) {
+      return { success: false, message: scopeError.code || "Inventory scope unavailable" };
     }
 
     // recordedBy must be valid ObjectId (required by InventoryTransactionV2) - use cartId as fallback
@@ -187,6 +202,9 @@ async function consumeIngredientsForOrder(order, userId) {
     if (hasLegacyTransactions) {
         processedKotIds.add("0");
     }
+    for (const index of order.inventorySkippedKotIndexes || []) {
+      processedKotIds.add(String(index));
+    }
 
     const consumptionSummary = {
       orderId: order._id,
@@ -254,13 +272,16 @@ async function consumeIngredientsForOrder(order, userId) {
             menuItem = await MenuItemV2.findOne({
               _id: menuItemId,
               isActive: true,
-              $or: [{ cartId: cartIdObj || cartId }, { cartId: null }],
+              cartId: cartIdObj || cartId,
+              franchiseId: inventoryScope.franchiseId,
             });
           }
 
           // Strategy 2: Lookup by name + cartId (cart-specific)
           if (!menuItem) {
             menuItem = await MenuItemV2.findOne({
+              cartId: cartIdObj || cartId,
+              franchiseId: inventoryScope.franchiseId,
               $or: [
                 { name: normalizedItemName, cartId: cartIdObj || cartId, isActive: true },
                 {
@@ -346,7 +367,6 @@ async function consumeIngredientsForOrder(order, userId) {
                         $or: [
                           { cartId: cartIdObj },
                           { cartId: null, franchiseId },
-                          { franchiseId },
                           { cartId: null, franchiseId: null },
                           { cartId: { $exists: false }, franchiseId: { $exists: false } },
                         ],
@@ -381,9 +401,11 @@ async function consumeIngredientsForOrder(order, userId) {
             }
           }
 
-          // Strategy 5: Shared menu items (no cartId filter) as last resort
+          // Strategy 5: final name lookup remains within the order's cart.
           if (!menuItem) {
             menuItem = await MenuItemV2.findOne({
+              cartId: cartIdObj || cartId,
+              franchiseId: inventoryScope.franchiseId,
               $or: [
                 { name: normalizedItemName, isActive: true },
                 { name: { $regex: nameRegex }, isActive: true },
@@ -412,7 +434,6 @@ async function consumeIngredientsForOrder(order, userId) {
                   $or: [
                     { cartId: cartIdObj || cartId },
                     { cartId: null, franchiseId: orderFranchiseId },
-                    { franchiseId: orderFranchiseId },
                     { cartId: null, franchiseId: null },
                     { cartId: { $exists: false }, franchiseId: { $exists: false } },
                   ],
@@ -463,7 +484,6 @@ async function consumeIngredientsForOrder(order, userId) {
                   $or: [
                     { cartId: cartIdObj || cartId },
                     { cartId: null, franchiseId: menuItem.franchiseId || orderFranchiseId },
-                    { franchiseId: menuItem.franchiseId || orderFranchiseId },
                     { cartId: null, franchiseId: null },
                     { cartId: { $exists: false }, franchiseId: { $exists: false } },
                   ],
@@ -498,6 +518,8 @@ async function consumeIngredientsForOrder(order, userId) {
           const recipe = await RecipeV2.findById(menuItem.recipeId);
           if (
             !recipe ||
+            (recipe.cartId && id(recipe.cartId) !== id(inventoryScope.cartId)) ||
+            (recipe.franchiseId && id(recipe.franchiseId) !== id(inventoryScope.franchiseId)) ||
             !recipe.ingredients ||
             recipe.ingredients.length === 0
           ) {
@@ -527,6 +549,7 @@ async function consumeIngredientsForOrder(order, userId) {
                 );
                 continue;
               }
+              assertIngredientMutable(ingredient, inventoryScope, "order-consume");
 
               // Calculate quantity to consume (scaled by order quantity)
               const qtyPerPortion = recipeIngredient.qty;
@@ -604,6 +627,10 @@ async function consumeIngredientsForOrder(order, userId) {
 
               consumptionSummary.totalCost += consumeResult.costAllocated;
             } catch (ingredientError) {
+              if (ingredientError.code) logInventoryScope(ingredientError.code, {
+                orderId: order._id, cartId, franchiseId: inventoryScope.franchiseId,
+                ingredientId: recipeIngredient.ingredientId, operation: "order-consume",
+              });
               console.error(
                 `[COSTING] Error consuming ingredient ${recipeIngredient.ingredientId} for order ${order._id}:`,
                 ingredientError.message
@@ -650,7 +677,9 @@ async function consumeIngredientsForOrder(order, userId) {
         const addonKey = buildAddonConsumptionKey(addon);
         if (!addonKey) continue;
 
-        const alreadyConsumedQty = consumedAddonQtyByKey.get(addonKey) || 0;
+        const skippedAddonQty = Number((order.inventorySkippedAddonQuantities || [])
+          .find(entry => entry.key === addonKey)?.qty || 0);
+        const alreadyConsumedQty = Math.max(consumedAddonQtyByKey.get(addonKey) || 0, skippedAddonQty);
         const currentOrderQty = Number(addon.quantity) || 0;
         const qtyToConsume = currentOrderQty - alreadyConsumedQty;
         if (qtyToConsume <= 0) continue;
@@ -716,6 +745,7 @@ async function consumeIngredientsForOrder(order, userId) {
                 recipeIngredient.ingredientId
               );
               if (!ingredient) continue;
+              assertIngredientMutable(ingredient, inventoryScope, "order-addon-consume");
 
               const qtyPerPortion = recipeIngredient.qty;
               const totalQtyToConsume = qtyPerPortion * scaleFactor;
@@ -775,6 +805,10 @@ async function consumeIngredientsForOrder(order, userId) {
 
               consumptionSummary.totalCost += consumeResult.costAllocated;
             } catch (ingredientError) {
+              if (ingredientError.code) logInventoryScope(ingredientError.code, {
+                orderId: order._id, cartId, franchiseId: inventoryScope.franchiseId,
+                ingredientId: recipeIngredient.ingredientId, operation: "order-addon-consume",
+              });
               consumptionSummary.errors.push({
                 item: addonLabel,
                 ingredient: recipeIngredient.ingredientId,
@@ -843,4 +877,6 @@ async function consumeIngredientsForOrder(order, userId) {
 
 module.exports = {
   consumeIngredientsForOrder,
+  normalizeAddonForConsumption,
+  buildAddonConsumptionKey,
 };

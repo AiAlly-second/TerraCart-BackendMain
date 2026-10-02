@@ -91,6 +91,33 @@ const {
   validateOutletAccess,
   setOutletContext,
 } = require("../../utils/costing-v2/accessControl");
+const { resolveOperationalScope, resolveCartScope, assertIngredientMutable, assertIngredientReadable, isIngredientAccessible, buildIngredientScopeQuery, id } = require("../../utils/costing-v2/inventoryScope");
+
+const assertRecipeLinesScoped = async (lines, scope) => {
+  const ingredientIds = (lines || []).map(line => line?.ingredientId).filter(Boolean);
+  const documents = await Ingredient.find({ _id: { $in: ingredientIds } });
+  const byId = new Map(documents.map(ingredient => [id(ingredient._id), ingredient]));
+  for (const ingredientId of ingredientIds) {
+    const ingredient = byId.get(id(ingredientId));
+    if (!ingredient) throw new Error("Recipe ingredient not found");
+    assertIngredientReadable(ingredient, {
+      ...scope, allowTemplates: !scope.franchiseId,
+    }, "recipe-ingredient-link");
+  }
+};
+
+const assertRecipeOwner = async (recipe, user, cartId, operation) => {
+  const scope = await resolveOperationalScope(user, {
+    cartId: cartId || (user.role === "franchise_admin" ? recipe.cartId : null),
+    requireCart: !["franchise_admin", "super_admin"].includes(user.role),
+    operation,
+  });
+  if (!isIngredientAccessible({ ingredient: recipe, scope: { ...scope, allowTemplates: true } }) ||
+      (!recipe.franchiseId && user.role !== "super_admin")) {
+    throw new Error("INVENTORY_SCOPE_MISMATCH");
+  }
+  return scope;
+};
 
 /** Safe ObjectId conversion - returns null for invalid IDs instead of throwing. */
 const toObjectIdSafe = (id) => {
@@ -627,311 +654,11 @@ exports.getIngredients = async (req, res) => {
       includeShared: true,
     });
 
-    // Enhanced logging for debugging
-    console.log(`[GET_INGREDIENTS] User: ${req.user?.role} (${req.user?._id})`);
-    console.log(`[GET_INGREDIENTS] Input filter:`, JSON.stringify(filter, null, 2));
-    console.log(`[GET_INGREDIENTS] Final costingFilter:`, JSON.stringify(costingFilter, null, 2));
-
-    if (req.user.role === "admin") {
-      // Check what ingredients exist before query
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-        ? new mongoose.Types.ObjectId(userCartId)
-        : userCartId;
-
-      const cartSpecificCount = await Ingredient.countDocuments({ cartId: userCartIdObj });
-      const sharedCount = await Ingredient.countDocuments({ cartId: null });
-      const noCartIdCount = await Ingredient.countDocuments({ cartId: { $exists: false } });
-
-      console.log(`[GET_INGREDIENTS] Cart admin ${req.user._id} - Before query:`);
-      console.log(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecificCount}`);
-      console.log(`  - Shared (cartId=null): ${sharedCount}`);
-      console.log(`  - Legacy (no cartId): ${noCartIdCount}`);
-      console.log(`  - Total: ${cartSpecificCount + sharedCount + noCartIdCount}`);
-    }
-
-    // CRITICAL: For cart admins, test the query directly before executing
-    if (req.user.role === "admin") {
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-        ? new mongoose.Types.ObjectId(userCartId)
-        : userCartId;
-
-      // Test direct queries
-      const directTest1 = await Ingredient.find({ cartId: userCartIdObj }).countDocuments();
-      const directTest2 = await Ingredient.find({ cartId: null }).countDocuments();
-      const directTest3 = await Ingredient.find({
-        $or: [
-          { cartId: userCartIdObj },
-          { cartId: null },
-          { cartId: { $exists: false } }
-        ]
-      }).countDocuments();
-
-      console.log(`[GET_INGREDIENTS] Direct query tests:`);
-      console.log(`  - {cartId: ObjectId("${userCartIdObj}")}: ${directTest1} results`);
-      console.log(`  - {cartId: null}: ${directTest2} results`);
-      console.log(`  - {$or: [...]}: ${directTest3} results`);
-      console.log(`[GET_INGREDIENTS] Executing query with filter:`, JSON.stringify(costingFilter, null, 2));
-    }
-
-    // CRITICAL: For cart admins, use a SIMPLIFIED and DIRECT query (like recipes)
-    let ingredients = [];
-
-    // CRITICAL FIX: For cart admin, use a simple direct query that definitely works
-    let ingredientsFetched = false;
-    if (req.user.role === "admin") {
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-        ? new mongoose.Types.ObjectId(userCartId)
-        : userCartId;
-
-      // FIRST: Check what actually exists in the database
-      const dbCheckCart = await Ingredient.countDocuments({ cartId: userCartIdObj });
-      const dbCheckNull = await Ingredient.countDocuments({ cartId: null });
-      const dbCheckNullActive = await Ingredient.countDocuments({ cartId: null, isActive: true });
-      const dbCheckNullInactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
-      const dbCheckExists = await Ingredient.countDocuments({ cartId: { $exists: false } });
-
-      console.log(`[GET_INGREDIENTS] 🔍 DATABASE STATE CHECK:`);
-      console.log(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheckCart}`);
-      console.log(`  - Ingredients with cartId=null (ALL): ${dbCheckNull}`);
-      console.log(`  - Ingredients with cartId=null AND isActive=true: ${dbCheckNullActive}`);
-      console.log(`  - Ingredients with cartId=null AND isActive=false: ${dbCheckNullInactive}`);
-      console.log(`  - Ingredients without cartId field: ${dbCheckExists}`);
-      console.log(`  - TOTAL SHARED (null + no field): ${dbCheckNull + dbCheckExists}`);
-
-      // Build a simple, direct query similar to recipes
-      // Get ingredients with cartId = userCartId OR cartId = null (shared from super admin)
-      // CRITICAL: This query ensures cart admin sees:
-      // 1. Ingredients created by super admin (cartId: null) - SHARED
-      // 2. Ingredients specific to this cart (cartId: userCartId)
-      // 3. Legacy ingredients without cartId field
-      const baseQuery = {
-        $or: [
-          { cartId: null },                    // Shared ingredients from super admin
-          { cartId: userCartIdObj },           // Cart-specific ingredients
-          { cartId: { $exists: false } }       // Legacy ingredients
-        ]
-      };
-
-      console.log(`[GET_INGREDIENTS] 🔗 CONNECTION: Cart admin query will find:`);
-      console.log(`   - Shared ingredients (cartId: null) from super admin`);
-      console.log(`   - Cart-specific ingredients (cartId: ${userCartIdObj})`);
-      console.log(`   - Legacy ingredients (no cartId field)`);
-
-      // Apply other filters (category, search, etc.) using $and
-      // NOTE: Don't apply isActive filter here - we want to see ALL shared ingredients
-      // Cart admin can filter by isActive on the frontend if needed
-      const otherFilters = {};
-      // Skip isActive filter to ensure shared ingredients are visible
-      if (filter.name) {
-        otherFilters.name = filter.name;
-      }
-      if (filter.category) {
-        otherFilters.category = filter.category;
-      }
-      if (filter.storageLocation) {
-        otherFilters.storageLocation = filter.storageLocation;
-      }
-      if (filter.uom) {
-        otherFilters.uom = filter.uom;
-      }
-
-      // Combine base query with other filters
-      if (Object.keys(otherFilters).length > 0) {
-        costingFilter = {
-          $and: [
-            baseQuery,
-            otherFilters
-          ]
-        };
-      } else {
-        costingFilter = baseQuery;
-      }
-
-      console.log(`[GET_INGREDIENTS] ⚠️ NOT applying isActive filter - showing ALL shared ingredients (active + inactive)`);
-
-      console.log(`[GET_INGREDIENTS] ✅ Using simplified direct query for cart admin`);
-      console.log(`[GET_INGREDIENTS] Final filter:`, JSON.stringify(costingFilter, null, 2));
-
-      // Test the query before executing
-      const testCount = await Ingredient.countDocuments(costingFilter);
-      console.log(`[GET_INGREDIENTS] Test query count: ${testCount}`);
-
-      // Also test without any filters to see total
-      const testAllCount = await Ingredient.countDocuments(baseQuery);
-      console.log(`[GET_INGREDIENTS] Test base query (no other filters) count: ${testAllCount}`);
-
-      // If test count is 0 but we know ingredients exist, use emergency fallback
-      if (testCount === 0 && (dbCheckNull > 0 || dbCheckExists > 0)) {
-        console.error(`[GET_INGREDIENTS] ⚠️⚠️⚠️ CRITICAL: Query returns 0 but ingredients exist!`);
-        console.error(`[GET_INGREDIENTS] Using emergency fallback: Fetching shared ingredients directly...`);
-
-        // Emergency fallback: fetch shared ingredients directly
-        const sharedIngredients = await Ingredient.find({ cartId: null })
-          .populate("preferredSupplierId", "name")
-          .populate("cartId", "name cafeName")
-          .sort({ category: 1, name: 1 });
-
-        // Also get cart-specific ingredients
-        const cartSpecificIngredients = await Ingredient.find({ cartId: userCartIdObj })
-          .populate("preferredSupplierId", "name")
-          .populate("cartId", "name cafeName")
-          .sort({ category: 1, name: 1 });
-
-        // Combine both
-        ingredients = [...sharedIngredients, ...cartSpecificIngredients];
-        ingredientsFetched = true;
-        console.error(`[GET_INGREDIENTS] ✅ Emergency fetch: ${sharedIngredients.length} shared + ${cartSpecificIngredients.length} cart-specific = ${ingredients.length} total`);
-      }
-    }
-
-    // Unified query execution for all roles (only if not already fetched)
-    if (!ingredientsFetched) {
-      // Ensure costingFilter is defined (for non-admin users, it's set by buildCostingQuery above)
-      if (!costingFilter) {
-        costingFilter = await buildCostingQuery(req.user, filter, {
-          skipOutletFilter: shouldSkipCartFilter,
-          includeShared: true,
-        });
-      }
-      ingredients = await Ingredient.find(costingFilter)
-        .populate("preferredSupplierId", "name")
-        .populate("cartId", "name cafeName")
-        .sort({ category: 1, name: 1 });
-    }
-
-    // CRITICAL: Log final count before processing
-    console.log(`[GET_INGREDIENTS] Final ingredients count before processing: ${ingredients.length}`);
-
-    // CRITICAL: If ingredients is empty, log detailed debugging info
-    if (ingredients.length === 0) {
-      console.warn(`[GET_INGREDIENTS] ⚠️⚠️⚠️ NO INGREDIENTS FOUND!`);
-      console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
-      console.warn(`[GET_INGREDIENTS] Query filter used:`, JSON.stringify(costingFilter, null, 2));
-      console.warn(`[GET_INGREDIENTS] ingredientsFetched: ${ingredientsFetched}`);
-
-      // Check database directly
-      const totalInDB = await Ingredient.countDocuments({});
-      console.warn(`[GET_INGREDIENTS] Total ingredients in database: ${totalInDB}`);
-
-      if (req.user.role === "admin") {
-        const userCartId = req.user._id;
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-          ? new mongoose.Types.ObjectId(userCartId)
-          : userCartId;
-
-        const cartSpecific = await Ingredient.countDocuments({ cartId: userCartIdObj });
-        const shared = await Ingredient.countDocuments({ cartId: null });
-        const noCartId = await Ingredient.countDocuments({ cartId: { $exists: false } });
-
-        console.warn(`[GET_INGREDIENTS] Cart admin breakdown:`);
-        console.warn(`  - Cart-specific (cartId=${userCartIdObj}): ${cartSpecific}`);
-        console.warn(`  - Shared (cartId=null): ${shared}`);
-        console.warn(`  - Legacy (no cartId): ${noCartId}`);
-        console.warn(`  - Total should be visible: ${cartSpecific + shared + noCartId}`);
-
-        // Try the exact query we're using
-        const testQueryResult = await Ingredient.find(costingFilter).limit(5);
-        console.warn(`[GET_INGREDIENTS] Test query result count: ${testQueryResult.length}`);
-        if (testQueryResult.length > 0) {
-          console.warn(`[GET_INGREDIENTS] Test query found ingredients! Sample:`, testQueryResult[0].name);
-        }
-      }
-    }
-
-    // If no ingredients found, log detailed info and try without isActive filter
-    if (ingredients.length === 0 && req.user.role === "admin") {
-      console.warn(`[GET_INGREDIENTS] ⚠️ No ingredients found with current filter!`);
-      console.warn(`[GET_INGREDIENTS] User role: ${req.user.role}, User ID: ${req.user._id}`);
-
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-        ? new mongoose.Types.ObjectId(userCartId)
-        : userCartId;
-
-      // Check database directly
-      const dbCheck1 = await Ingredient.countDocuments({ cartId: userCartIdObj });
-      const dbCheck2 = await Ingredient.countDocuments({ cartId: null });
-      const dbCheck2Active = await Ingredient.countDocuments({ cartId: null, isActive: true });
-      const dbCheck2Inactive = await Ingredient.countDocuments({ cartId: null, isActive: false });
-      const dbCheck3 = await Ingredient.countDocuments({});
-
-      console.warn(`[GET_INGREDIENTS] Database check:`);
-      console.warn(`  - Total ingredients in DB: ${dbCheck3}`);
-      console.warn(`  - Ingredients with cartId=${userCartIdObj}: ${dbCheck1}`);
-      console.warn(`  - Ingredients with cartId=null (all): ${dbCheck2}`);
-      console.warn(`  - Ingredients with cartId=null AND isActive=true: ${dbCheck2Active}`);
-      console.warn(`  - Ingredients with cartId=null AND isActive=false: ${dbCheck2Inactive}`);
-
-      // If shared ingredients exist but are inactive, try query without isActive filter
-      if (dbCheck2 > 0 && dbCheck2Active === 0 && filter.isActive === true) {
-        console.warn(`[GET_INGREDIENTS] ⚠️ Shared ingredients exist but are INACTIVE!`);
-        console.warn(`[GET_INGREDIENTS] Retrying query without isActive filter...`);
-
-        // Retry without isActive filter
-        const retryFilter = { ...costingFilter };
-        if (retryFilter.$and) {
-          retryFilter.$and = retryFilter.$and.filter(f => f.isActive === undefined);
-          if (retryFilter.$and.length === 0) {
-            delete retryFilter.$and;
-          }
-        }
-        if (retryFilter.isActive) {
-          delete retryFilter.isActive;
-        }
-
-        const retryIngredients = await Ingredient.find(retryFilter)
-          .populate("preferredSupplierId", "name")
-          .populate("cartId", "name cafeName")
-          .sort({ category: 1, name: 1 });
-
-        console.warn(`[GET_INGREDIENTS] Retry query found ${retryIngredients.length} ingredients`);
-        if (retryIngredients.length > 0) {
-          ingredients = retryIngredients;
-        }
-      }
-    }
-
-    // Debug logging for cart admin
-    if (req.user.role === "admin") {
-      console.log(`[GET_INGREDIENTS] Cart admin ${req.user._id} found ${ingredients.length} ingredients`);
-      if (ingredients.length === 0) {
-        // Check if there are any ingredients at all for debugging
-        const allIngredientsCount = await Ingredient.countDocuments({});
-        const cartIngredientsCount = await Ingredient.countDocuments({ cartId: req.user._id });
-        const sharedIngredientsCount = await Ingredient.countDocuments({ cartId: null });
-        console.log(`[GET_INGREDIENTS] Debug - Total ingredients: ${allIngredientsCount}, Cart-specific: ${cartIngredientsCount}, Shared: ${sharedIngredientsCount}`);
-
-        // Try the query manually to see what's wrong
-        const userCartId = req.user._id;
-        const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-          ? new mongoose.Types.ObjectId(userCartId)
-          : userCartId;
-
-        const testQuery1 = { cartId: userCartIdObj };
-        const testQuery2 = { cartId: null };
-        const testQuery3 = { $or: [{ cartId: userCartIdObj }, { cartId: null }, { cartId: { $exists: false } }] };
-
-        const test1 = await Ingredient.countDocuments(testQuery1);
-        const test2 = await Ingredient.countDocuments(testQuery2);
-        const test3 = await Ingredient.countDocuments(testQuery3);
-
-        console.log(`[GET_INGREDIENTS] Test queries:`);
-        console.log(`  - Query {cartId: ObjectId("${userCartIdObj}")}: ${test1} results`);
-        console.log(`  - Query {cartId: null}: ${test2} results`);
-        console.log(`  - Query {$or: [...]}: ${test3} results`);
-      } else {
-        // Log sample ingredients to verify they're correct
-        const sample = ingredients.slice(0, 3).map(ing => ({
-          name: ing.name,
-          cartId: ing.cartId ? (ing.cartId._id || ing.cartId) : null,
-          cartIdType: ing.cartId ? typeof ing.cartId : 'null'
-        }));
-        console.log(`[GET_INGREDIENTS] Sample ingredients:`, sample);
-      }
-    }
+    // The server-resolved franchise and cart scope remains in every query.
+    const ingredients = await Ingredient.find(costingFilter)
+      .populate("preferredSupplierId", "name")
+      .populate("cartId", "name cafeName")
+      .sort({ category: 1, name: 1 });
 
     // REDESIGNED: Simple and reliable inventory calculation for Cart Admin
     // Calculate everything directly from transactions - no complex logic, no database syncing
@@ -944,24 +671,6 @@ exports.getIngredients = async (req, res) => {
         : cartId;
       const cartIdString = cartId.toString();
 
-      // DEBUG: First, let's see what transactions actually exist
-      if (process.env.NODE_ENV === 'development') {
-        const allTransactionsSample = await InventoryTransaction.find({}).limit(5).select('cartId ingredientId type qty qtyInBaseUnit').lean();
-        console.log(`[DEBUG] Sample of ALL transactions in database:`, allTransactionsSample.map(t => ({
-          cartId: t.cartId ? (t.cartId.toString ? t.cartId.toString() : String(t.cartId)) : 'null',
-          cartIdType: t.cartId ? (t.cartId.constructor.name) : 'null',
-          ingredientId: t.ingredientId ? t.ingredientId.toString() : 'null',
-          type: t.type,
-          qty: t.qty,
-          qtyInBaseUnit: t.qtyInBaseUnit
-        })));
-        console.log(`[DEBUG] Looking for cartId matching:`, {
-          cartId: cartId.toString(),
-          cartObjectId: cartObjectId.toString(),
-          cartIdString: cartIdString
-        });
-      }
-
       // CRITICAL: Get all transactions for this cart
       // Try multiple query strategies to ensure we find transactions
       let allCartTransactions = [];
@@ -969,7 +678,7 @@ exports.getIngredients = async (req, res) => {
       // Strategy 1: Direct ObjectId match (most reliable)
       allCartTransactions = await InventoryTransaction.find({
         cartId: cartObjectId
-      }).sort({ date: 1 }).lean();
+      }).sort({ date: 1, _id: 1 }).lean();
 
       // Strategy 2: If no results, try aggregation with string comparison
       if (allCartTransactions.length === 0) {
@@ -984,7 +693,7 @@ exports.getIngredients = async (req, res) => {
               }
             }
           },
-          { $sort: { date: 1 } }
+          { $sort: { date: 1, _id: 1 } }
         ]);
         allCartTransactions = aggResults;
       }
@@ -993,41 +702,7 @@ exports.getIngredients = async (req, res) => {
       if (allCartTransactions.length === 0) {
         allCartTransactions = await InventoryTransaction.find({
           cartId: cartIdString
-        }).sort({ date: 1 }).lean();
-      }
-
-      // Strategy 4: Try null/undefined cartId (legacy transactions)
-      if (allCartTransactions.length === 0) {
-        allCartTransactions = await InventoryTransaction.find({
-          $or: [
-            { cartId: null },
-            { cartId: { $exists: false } }
-          ]
-        }).sort({ date: 1 }).lean();
-      }
-
-      // If no results, log for debugging
-      if (allCartTransactions.length === 0 && process.env.NODE_ENV === 'development') {
-        const totalTransactions = await InventoryTransaction.countDocuments({});
-        console.warn(`[DEBUG] No transactions found for cartId. Total transactions in DB: ${totalTransactions}`);
-
-        // Get sample transactions to see what cartIds exist
-        const sampleTransactions = await InventoryTransaction.find({}).limit(10).select('cartId ingredientId type qty qtyInBaseUnit').lean();
-        const uniqueCartIds = [...new Set(sampleTransactions.map(t => t.cartId ? t.cartId.toString() : 'null'))];
-        console.log(`[DEBUG] Sample cartIds in transactions:`, uniqueCartIds);
-        console.log(`[DEBUG] Looking for:`, { cartId: cartId.toString(), cartObjectId: cartObjectId.toString(), cartIdString });
-
-        // Check if any transactions exist for this ingredient at all
-        if (ingredients.length > 0) {
-          const firstIngId = ingredients[0]._id;
-          const ingTransactions = await InventoryTransaction.find({ ingredientId: firstIngId }).limit(5).select('cartId type qty qtyInBaseUnit').lean();
-          console.log(`[DEBUG] Sample transactions for ingredient ${ingredients[0].name}:`, ingTransactions.map(t => ({
-            cartId: t.cartId ? t.cartId.toString() : 'null',
-            type: t.type,
-            qty: t.qty,
-            qtyInBaseUnit: t.qtyInBaseUnit
-          })));
-        }
+        }).sort({ date: 1, _id: 1 }).lean();
       }
 
       // Create a Set of ingredient IDs for fast lookup (convert all to strings)
@@ -1044,34 +719,6 @@ exports.getIngredients = async (req, res) => {
         const txnIngId = txn.ingredientId.toString ? txn.ingredientId.toString() : String(txn.ingredientId);
         return ingredientIdSet.has(txnIngId);
       });
-
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`[INVENTORY] Cart admin ${cartId}: Found ${allCartTransactions.length} total transactions, ${filteredTransactions.length} for ${ingredients.length} ingredients`);
-        console.log(`[INVENTORY] Cart admin cartId: ${cartId}, cartObjectId: ${cartObjectId}, cartIdString: ${cartIdString}`);
-        if (allCartTransactions.length === 0) {
-          console.warn(`[INVENTORY] No transactions found for cartId. Checking all transactions...`);
-          // Check what cartIds exist in transactions
-          const sampleTransactions = await InventoryTransaction.find({}).limit(10).select('cartId ingredientId type').lean();
-          console.log(`[INVENTORY] Sample transactions in database:`, sampleTransactions.map(t => ({
-            cartId: t.cartId ? (t.cartId.toString ? t.cartId.toString() : String(t.cartId)) : 'null',
-            cartIdType: typeof t.cartId,
-            ingredientId: t.ingredientId ? (t.ingredientId.toString ? t.ingredientId.toString() : String(t.ingredientId)) : 'null',
-            type: t.type
-          })));
-        } else {
-          // Log sample transaction to verify structure
-          const sampleTxn = allCartTransactions[0];
-          console.log(`[INVENTORY] Sample transaction:`, {
-            cartId: sampleTxn.cartId ? (sampleTxn.cartId.toString ? sampleTxn.cartId.toString() : String(sampleTxn.cartId)) : 'null',
-            cartIdType: typeof sampleTxn.cartId,
-            ingredientId: sampleTxn.ingredientId ? (sampleTxn.ingredientId.toString ? sampleTxn.ingredientId.toString() : String(sampleTxn.ingredientId)) : 'null',
-            type: sampleTxn.type,
-            qty: sampleTxn.qty,
-            qtyInBaseUnit: sampleTxn.qtyInBaseUnit,
-            unitPrice: sampleTxn.unitPrice
-          });
-        }
-      }
 
       // Use filtered transactions
       const allCartTransactionsFiltered = filteredTransactions;
@@ -1204,7 +851,9 @@ exports.getIngredients = async (req, res) => {
             continue;
           }
 
-          if (txn.type === "IN") {
+          if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+            stock = Number(txn.physicalQtyAfter);
+          } else if (txn.type === "IN") {
             stock += qty;
             stockDetails.in += qty;
             if (process.env.NODE_ENV === 'development') {
@@ -1270,8 +919,10 @@ exports.getIngredients = async (req, res) => {
           // Calculate weighted average from all transactions
           for (const txn of transactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
-
-            if (txn.type === "IN" || txn.type === "RETURN") {
+            if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+              totalQty = Number(txn.physicalQtyAfter);
+              totalValue = totalQty * (weightedAvgCost || ingredient.currentCostPerBaseUnit || 0);
+            } else if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               let txnCostPerBaseUnit = 0;
               if (txn.unitPrice != null && txn.unitPrice > 0) {
@@ -1392,7 +1043,7 @@ exports.getIngredients = async (req, res) => {
       // Get all transactions for this cart in one query
       const allCartTransactions = await InventoryTransaction.find({
         cartId: cartId,
-      }).sort({ date: 1 }).lean();
+      }).sort({ date: 1, _id: 1 }).lean();
 
       // Group transactions by ingredientId
       const transactionsByIngredient = {};
@@ -1412,7 +1063,9 @@ exports.getIngredients = async (req, res) => {
         let stock = 0;
         for (const txn of transactions) {
           const qty = txn.qtyInBaseUnit || txn.qty || 0;
-          if (txn.type === "IN" || txn.type === "RETURN") {
+          if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+            stock = Number(txn.physicalQtyAfter);
+          } else if (txn.type === "IN" || txn.type === "RETURN") {
             stock += qty;
           } else if (txn.type === "OUT" || txn.type === "WASTE") {
             stock -= qty;
@@ -1430,8 +1083,10 @@ exports.getIngredients = async (req, res) => {
           // Calculate weighted average from all transactions
           for (const txn of transactions) {
             const txnQty = txn.qtyInBaseUnit || txn.qty || 0;
-
-            if (txn.type === "IN" || txn.type === "RETURN") {
+            if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+              totalQty = Number(txn.physicalQtyAfter);
+              totalValue = totalQty * (weightedAvgCost || ingredient.currentCostPerBaseUnit || 0);
+            } else if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               if (totalQty > 0 && txnQty > 0) {
                 // Calculate cost per base unit for this transaction
@@ -1479,52 +1134,28 @@ exports.getIngredients = async (req, res) => {
         ingredient.currentCostPerBaseUnit = cost;
       }
     } else if (req.user.role === "franchise_admin" || req.user.role === "super_admin") {
-      // For shared ingredients without cart filter, use existing logic
-      const cartIdParamForShared = req.query.cartId || req.query.outletId; // Backward compatibility
+      const cartIdParamForShared = req.query.cartId || req.query.outletId;
+      const franchiseIds = [...new Set(ingredients.map(ingredient => id(ingredient.franchiseId)).filter(Boolean))];
+      const franchiseCarts = cartIdParamForShared ? [] : await User.find({
+        role: "admin", franchiseId: { $in: franchiseIds },
+      }).select("_id franchiseId").lean();
+      const cartsByFranchise = new Map();
+      for (const cart of franchiseCarts) {
+        const key = id(cart.franchiseId);
+        if (!cartsByFranchise.has(key)) cartsByFranchise.set(key, []);
+        cartsByFranchise.get(key).push(cart._id);
+      }
 
       for (const ingredient of ingredients) {
         let cartSpecificQty = 0;
         let cartSpecificCost = 0;
-
-        // For shared ingredients, calculate cart-specific values from transactions
-        // This uses weighted average costing (same as BOM calculation)
-        // IMPORTANT: For shared ingredients, we need to check BOTH:
-        // 1. Cart-specific transactions (cartId = cartIdParamForShared)
-        // 2. Global transactions (cartId = null or missing) - for shared ingredients purchased globally
+        const allowedCartIds = cartIdParamForShared
+          ? [cartIdParamForShared]
+          : (cartsByFranchise.get(id(ingredient.franchiseId)) || []);
         const cartTransactions = await InventoryTransaction.find({
           ingredientId: ingredient._id,
-          $or: [
-            { cartId: cartIdParamForShared },
-            { cartId: null }, // Global transactions
-            { cartId: { $exists: false } } // Also check for missing cartId field
-          ]
-        }).sort({ date: 1 }); // Sort by date ascending to calculate weighted average
-
-        // Debug: Check transaction counts
-        const cartSpecificTransactions = await InventoryTransaction.find({
-          ingredientId: ingredient._id,
-          cartId: cartIdParamForShared,
-        });
-        const globalTransactions = await InventoryTransaction.find({
-          ingredientId: ingredient._id,
-          cartId: null,
-        });
-        const allTransactions = await InventoryTransaction.find({
-          ingredientId: ingredient._id,
-        });
-
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`[STOCK DEBUG] Shared ingredient ${ingredient.name}:`, {
-            ingredientId: ingredient._id,
-            cartId: ingredient.cartId,
-            cartIdParam: cartIdParamForShared,
-            cartSpecificTransactions: cartSpecificTransactions.length,
-            globalTransactions: globalTransactions.length,
-            totalTransactions: cartTransactions.length,
-            allTransactions: allTransactions.length,
-            qtyOnHand: ingredient.qtyOnHand,
-          });
-        }
+          cartId: { $in: allowedCartIds },
+        }).sort({ date: 1, _id: 1 });
 
         let totalQty = 0;
         let weightedAvgCost = 0;
@@ -1544,7 +1175,10 @@ exports.getIngredients = async (req, res) => {
               console.log(`[STOCK CALC] ${ingredient.name}: ${txnType} transaction - qty=${txnQty} ${ingredient.baseUnit}, date=${txn.date}, cartId=${txn.cartId}`);
             }
 
-            if (txn.type === "IN" || txn.type === "RETURN") {
+            if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+              totalQty = Number(txn.physicalQtyAfter);
+              totalValue = totalQty * (weightedAvgCost || ingredient.currentCostPerBaseUnit || 0);
+            } else if (txn.type === "IN" || txn.type === "RETURN") {
               // Add to inventory - calculate weighted average
               if (totalQty > 0 && txnQty > 0) {
                 // Calculate cost per base unit for this transaction
@@ -1838,209 +1472,43 @@ exports.getIngredients = async (req, res) => {
  */
 exports.createIngredient = async (req, res) => {
   try {
-    // Decode HTML entities in category field if present
-    let bodyData = { ...req.body };
-    if (bodyData.category) {
-      bodyData.category = decodeHtmlEntities(bodyData.category);
-    }
-
-    // Ingredients can be shared (cartId optional) or kiosk-specific
-    const data = await setOutletContext(req.user, bodyData, false);
-
-    // CRITICAL: For super admin, ALWAYS set cartId to null for shared ingredients
-    // This ensures all super admin ingredients are visible to cart admins
-    if (req.user.role === "super_admin") {
-      // Super admin ingredients should ALWAYS be shared (cartId: null)
-      // Unless explicitly setting cartId for a specific cart
-      if (!bodyData.cartId && data.cartId !== null) {
-        data.cartId = null;
-        console.log(`[CREATE_INGREDIENT] ✅ Super admin creating shared ingredient - cartId explicitly set to null`);
-      }
-      console.log(`[CREATE_INGREDIENT] Super admin - Final cartId value: ${data.cartId === null ? 'null (SHARED)' : data.cartId}`);
-    }
-
-    console.log(`[CREATE_INGREDIENT] Creating ingredient: ${bodyData.name}`);
-    console.log(`[CREATE_INGREDIENT] User role: ${req.user.role}`);
-    console.log(`[CREATE_INGREDIENT] Final cartId: ${data.cartId === null ? 'null (SHARED - visible to all cart admins)' : data.cartId}`);
-    console.log(`[CREATE_INGREDIENT] Body cartId: ${bodyData.cartId || 'not provided'}`);
-
-    // Check if ingredient with same name and cartId already exists
-    // The database has a unique index on name + cartId (legacy) or name + cartId
-    const existingQuery = {
-      name: { $regex: new RegExp(`^${data.name.trim()}$`, 'i') }, // Case-insensitive match
-    };
-
-    // Add cartId to query if it exists, otherwise check for null
-    if (data.cartId) {
-      existingQuery.cartId = data.cartId;
-    } else {
-      // For shared ingredients (cartId: null), check for null or missing cartId
-      existingQuery.$or = [
-        { cartId: null },
-        { cartId: { $exists: false } }
-      ];
-    }
-
-    const existingIngredient = await Ingredient.findOne(existingQuery);
-
-    if (existingIngredient) {
-      // Return existing ingredient with a warning instead of error
-      await existingIngredient.populate("cartId", "name cafeName");
-      await existingIngredient.populate("preferredSupplierId", "name");
-
-      // Convert to plain object to ensure all fields are included
-      const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
-
-      const isShared = !data.cartId || data.cartId === null;
-      console.log(`[CREATE_INGREDIENT] Returning existing ingredient: ${ingredientData.name} (ID: ${ingredientData._id})`);
-
-      return res.status(200).json({
-        success: true,
-        message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
-        warning: 'INGREDIENT_ALREADY_EXISTS',
-        data: ingredientData,
-        isExisting: true
-      });
-    }
-
-    const ingredient = new Ingredient(data);
-
-    // CRITICAL: Log before saving to verify cartId
-    console.log(`[CREATE_INGREDIENT] About to save ingredient:`, {
-      name: ingredient.name,
-      cartId: ingredient.cartId === null ? 'null (SHARED)' : ingredient.cartId,
-      role: req.user.role
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.body.cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "ingredient-create",
     });
-
-    try {
-      await ingredient.save();
-
-      // CRITICAL: Verify what was actually saved
-      const savedIngredient = await Ingredient.findById(ingredient._id);
-      console.log(`[CREATE_INGREDIENT] ✅ Ingredient saved successfully!`);
-      console.log(`[CREATE_INGREDIENT] Saved ingredient details:`, {
-        _id: savedIngredient._id,
-        name: savedIngredient.name,
-        cartId: savedIngredient.cartId === null ? 'null (SHARED)' : savedIngredient.cartId,
-        isActive: savedIngredient.isActive
-      });
-
-      // Verify it's accessible to cart admins
-      if (req.user.role === "super_admin" && savedIngredient.cartId === null) {
-        console.log(`[CREATE_INGREDIENT] ✅✅✅ VERIFIED: Ingredient saved with cartId: null - WILL BE VISIBLE TO ALL CART ADMINS`);
-
-        // Test: Verify a cart admin can see this ingredient
-        const testCartAdminQuery = {
-          $or: [
-            { cartId: null },
-            { cartId: { $exists: false } }
-          ]
-        };
-        const testCount = await Ingredient.countDocuments({
-          ...testCartAdminQuery,
-          _id: savedIngredient._id
-        });
-        console.log(`[CREATE_INGREDIENT] ✅ Test: Cart admin query can find this ingredient: ${testCount > 0 ? 'YES' : 'NO'}`);
-      } else if (req.user.role === "super_admin" && savedIngredient.cartId !== null) {
-        console.error(`[CREATE_INGREDIENT] ⚠️⚠️⚠️ WARNING: Super admin ingredient saved with cartId: ${savedIngredient.cartId} - NOT SHARED!`);
-      }
-    } catch (saveError) {
-      // Handle duplicate key error (unique index violation)
-      if (saveError.code === 11000 || saveError.name === 'MongoServerError') {
-        // Extract the duplicate key from error message
-        const duplicateKeyMatch = saveError.message.match(/dup key: \{ (.+?) \}/);
-        const duplicateKey = duplicateKeyMatch ? duplicateKeyMatch[1] : 'unknown';
-
-        // Check if it's a shared ingredient (cartId: null or cartId: null)
-        const isShared = duplicateKey.includes('cartId: null') || duplicateKey.includes('cartId: null') || !data.cartId;
-
-        // Try to find the existing ingredient to return it
-        let existingIngredient = null;
-        try {
-          const findQuery = { name: data.name.trim() };
-          if (isShared) {
-            findQuery.$or = [
-              { cartId: null },
-              { cartId: { $exists: false } }
-            ];
-          } else {
-            findQuery.cartId = data.cartId;
-          }
-          existingIngredient = await Ingredient.findOne(findQuery)
-            .populate("cartId", "name cafeName")
-            .populate("preferredSupplierId", "name");
-
-          // Fallback for legacy unique index on `name` only:
-          // duplicate can come from a different cart/shared scope.
-          if (!existingIngredient) {
-            existingIngredient = await Ingredient.findOne({
-              name: { $regex: new RegExp(`^${data.name.trim()}$`, "i") },
-            })
-              .populate("cartId", "name cafeName")
-              .populate("preferredSupplierId", "name");
-          }
-        } catch (findError) {
-          console.error('[CREATE_INGREDIENT] Error finding existing ingredient:', findError);
-        }
-
-        // Return existing ingredient with warning instead of error
-        if (existingIngredient) {
-          // Convert to plain object to ensure all fields are included
-          const ingredientData = existingIngredient.toObject ? existingIngredient.toObject({ getters: true, virtuals: false }) : existingIngredient;
-          console.log(`[CREATE_INGREDIENT] Returning existing ingredient from duplicate key error: ${ingredientData.name} (ID: ${ingredientData._id})`);
-
-          return res.status(200).json({
-            success: true,
-            message: `Ingredient "${data.name}" already exists${isShared ? ' as a shared ingredient' : ` for this cart`}. Returning existing ingredient.`,
-            warning: 'INGREDIENT_ALREADY_EXISTS',
-            data: ingredientData,
-            isExisting: true
-          });
-        } else {
-          // If we can't find it, still return success with warning
-          return res.status(200).json({
-            success: true,
-            message: `Ingredient "${data.name}" may already exist. Please check the ingredients list.`,
-            warning: 'POSSIBLE_DUPLICATE',
-            duplicateKey: duplicateKey
-          });
-        }
-      }
-      // Re-throw if it's not a duplicate key error
-      throw saveError;
+    const createFields = [
+      "name", "category", "storageLocation", "uom", "baseUnit",
+      "conversionFactors", "reorderLevel", "shelfTimeDays", "expiryDate",
+      "preferredSupplierId", "currentCostPerBaseUnit", "qtyOnHand", "isActive",
+    ];
+    const data = { cartId: scope.cartId, franchiseId: scope.franchiseId };
+    for (const field of createFields) {
+      if (req.body[field] !== undefined) data[field] = req.body[field];
     }
+    if (data.category) data.category = decodeHtmlEntities(data.category);
+    if (!scope.franchiseId && Number(data.qtyOnHand || 0) !== 0) {
+      return res.status(403).json({ success: false, message: "Global templates cannot hold operational stock" });
+    }
+    const existing = await Ingredient.findOne({
+      name: { $regex: new RegExp(`^${String(data.name || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+      cartId: data.cartId,
+      franchiseId: data.franchiseId,
+    });
+    if (existing) return res.status(200).json({ success: true, isExisting: true, data: existing });
 
-    await ingredient.populate("cartId", "name cafeName");
-    await ingredient.populate("preferredSupplierId", "name");
-
-    // Convert to plain object to ensure all fields are included in response
-    const ingredientData = ingredient.toObject ? ingredient.toObject({ getters: true, virtuals: false }) : ingredient;
-
-    console.log(`[CREATE_INGREDIENT] ✅ Successfully created ingredient: ${ingredientData.name} (ID: ${ingredientData._id}, cartId: ${ingredientData.cartId || 'null'})`);
-
-    // Emit socket event for real-time sync
-    const io = req.app.get("io");
-    const emitToCafe = req.app.get("emitToCafe");
+    const ingredient = await Ingredient.create(data);
     if (ingredient.cartId) {
-      emitToCafe(
-        io,
-        ingredient.cartId.toString(),
-        "ingredient:created",
-        ingredientData
-      );
+      const emitToCafe = req.app.get("emitToCafe");
+      if (emitToCafe) emitToCafe(req.app.get("io"), id(ingredient.cartId), "ingredient:created", ingredient);
     }
-
-    res.status(201).json({
-      success: true,
-      data: ingredientData,
-      message: `Ingredient "${ingredientData.name}" created successfully`
-    });
+    return res.status(201).json({ success: true, data: ingredient });
   } catch (error) {
-    console.error(`[CREATE_INGREDIENT ERROR]`, error);
-    res.status(400).json({
-      success: false,
-      message: error.message || "Failed to create ingredient"
-    });
+    // A global name uniqueness conflict must not reveal a different tenant's record.
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: "Ingredient name unavailable" });
+    }
+    return res.status(error.statusCode || 400).json({ success: false, message: error.message });
   }
 };
 
@@ -2058,113 +1526,39 @@ exports.updateIngredient = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // CRITICAL: Check if this is a SHARED ingredient (cartId: null)
-    const isSharedIngredient = existingIngredient.cartId === null || existingIngredient.cartId === undefined;
-
-    console.log(`[UPDATE_INGREDIENT] Updating ingredient: ${existingIngredient.name}`);
-    console.log(`[UPDATE_INGREDIENT] Current cartId: ${existingIngredient.cartId === null ? 'null (SHARED)' : existingIngredient.cartId}`);
-    console.log(`[UPDATE_INGREDIENT] User role: ${req.user.role} (${req.user._id})`);
-    console.log(`[UPDATE_INGREDIENT] Is shared ingredient: ${isSharedIngredient}`);
-
-    // Check access control
-    if (req.user.role === "admin") {
-      // Cart admins can update:
-      // 1. Their own cart-specific ingredients (cartId matches)
-      // 2. Shared ingredients (cartId is null) - but ONLY certain fields
-      if (existingIngredient.cartId && existingIngredient.cartId.toString() !== req.user._id.toString()) {
-        // This ingredient belongs to a different cart - deny access
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only update ingredients belonging to your cart.",
-        });
-      }
-
-      // If updating a shared ingredient, cart admin can only update certain allowable fields
-      // They CANNOT change name, category, or cartId
-      if (isSharedIngredient) {
-        console.log(`[UPDATE_INGREDIENT] ⚠️ Cart admin updating SHARED ingredient - restricting to allowable fields`);
-        const allowedFields = ['qtyOnHand', 'reorderLevel', 'currentCostPerBaseUnit', 'isActive', 'storageLocation'];
-        const requestedFields = Object.keys(req.body);
-        const disallowedFields = requestedFields.filter(f => !allowedFields.includes(f));
-
-        if (disallowedFields.length > 0) {
-          console.warn(`[UPDATE_INGREDIENT] ⚠️ Cart admin attempted to update disallowed fields on shared ingredient: ${disallowedFields.join(', ')}`);
-          // Allow the update but log warning - or you can reject it
-          // For now, we'll filter out the disallowed fields
-        }
-      }
-    } else if (req.user.role === "manager") {
-      // Manager - can update ingredients for their cart (same logic as getCostingInventory)
-      let managerCartId = req.user.cartId ?? req.user.cafeId;
-      if (!managerCartId && req.user.employeeId) {
-        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
-        managerCartId = employee?.cartId || employee?.cafeId;
-      }
-      if (!managerCartId) {
-        const employee = await require("../../models/employeeModel").findOne({
-          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
-        }).lean();
-        managerCartId = employee?.cartId || employee?.cafeId;
-      }
-      if (!managerCartId) {
-        return res.status(403).json({ success: false, message: "No cart associated with manager" });
-      }
-      // Manager can update: ingredients with cartId matching their cart, or shared (cartId null)
-      if (existingIngredient.cartId && existingIngredient.cartId.toString() !== managerCartId.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only update ingredients belonging to your cart.",
-        });
-      }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.body.cartId || (req.user.role === "franchise_admin" ? existingIngredient.cartId : null),
+      requireCart: req.user.role !== "franchise_admin",
+      operation: "ingredient-update",
+    });
+    assertIngredientMutable(existingIngredient, scope, "ingredient-update");
+    if (!existingIngredient.cartId && !["franchise_admin", "super_admin"].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: "Shared ingredient metadata requires franchise admin" });
     }
-
-    // Decode HTML entities in category field if present
-    let updateData = { ...req.body };
-    if (updateData.category) {
-      updateData.category = decodeHtmlEntities(updateData.category);
+    if (req.body.cartId !== undefined && id(req.body.cartId) !== id(existingIngredient.cartId)) {
+      return res.status(403).json({ success: false, message: "Ingredient ownership cannot be changed" });
     }
-
-    // CRITICAL FIX: Remove cartId from updateData to prevent overwriting
-    // This prevents shared ingredients from being converted to cart-specific
-    // when cart admins update other fields like quantity or reorder level
-    if (updateData.cartId !== undefined) {
-      console.log(`[UPDATE_INGREDIENT] ⚠️ Removing cartId from updateData to prevent overwrite`);
-      console.log(`[UPDATE_INGREDIENT] Original ingredient cartId: ${existingIngredient.cartId === null ? 'null (SHARED)' : existingIngredient.cartId}`);
-      console.log(`[UPDATE_INGREDIENT] Attempted new cartId: ${updateData.cartId}`);
-      delete updateData.cartId;
+    if (req.body.franchiseId !== undefined && id(req.body.franchiseId) !== id(existingIngredient.franchiseId)) {
+      return res.status(403).json({ success: false, message: "Ingredient ownership cannot be changed" });
     }
-
-    // CRITICAL: For shared ingredients, ensure cartId remains null
-    if (isSharedIngredient) {
-      // Explicitly preserve cartId as null
-      updateData.cartId = null;
-      console.log(`[UPDATE_INGREDIENT] ✅ Preserved cartId as null for shared ingredient`);
+    const allowedFields = new Set([
+      "name", "category", "storageLocation", "uom", "baseUnit",
+      "conversionFactors", "reorderLevel", "shelfTimeDays", "lastReceivedAt",
+      "expiryDate", "preferredSupplierId", "currentCostPerBaseUnit",
+      "qtyOnHand", "isActive",
+    ]);
+    const updateData = {};
+    for (const [key, value] of Object.entries(req.body)) {
+      if (["cartId", "franchiseId"].includes(key)) continue;
+      if (!allowedFields.has(key)) {
+        return res.status(400).json({ success: false, message: "Invalid ingredient update field" });
+      }
+      updateData[key] = value;
     }
-
-    // Update the ingredient
+    if (updateData.category) updateData.category = decodeHtmlEntities(updateData.category);
     const ingredient = await Ingredient.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
+      existingIngredient._id, { $set: updateData }, { new: true, runValidators: true }
     );
-
-    // CRITICAL: Verify cartId was not changed
-    if (isSharedIngredient && ingredient.cartId !== null) {
-      console.error(`[UPDATE_INGREDIENT] ❌❌❌ CRITICAL ERROR: Shared ingredient cartId was changed to ${ingredient.cartId}!`);
-      console.error(`[UPDATE_INGREDIENT] This should NEVER happen - investigate immediately!`);
-      // Force it back to null
-      ingredient.cartId = null;
-      await ingredient.save();
-      console.log(`[UPDATE_INGREDIENT] ✅ Forced cartId back to null`);
-    } else if (isSharedIngredient) {
-      console.log(`[UPDATE_INGREDIENT] ✅✅✅ VERIFIED: Shared ingredient cartId remains null after update`);
-    }
-
-    if (!ingredient) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Ingredient not found" });
-    }
 
     // Emit socket event for real-time sync
     const io = req.app.get("io");
@@ -2182,6 +1576,8 @@ exports.updateIngredient = async (req, res) => {
         const InventoryItem = require("../../models/inventoryModel");
         const linkedInventory = await InventoryItem.findOne({
           ingredientId: ingredient._id,
+          cartId: ingredient.cartId,
+          franchiseId: ingredient.franchiseId,
         });
         if (linkedInventory) {
           // Update inventory item with ingredient data
@@ -2232,56 +1628,22 @@ exports.deleteIngredient = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Check access control
-    if (req.user.role === "admin") {
-      // If ingredient has cartId, it must match the cart admin's ID
-      if (
-        ingredient.cartId &&
-        ingredient.cartId.toString() !== req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "Access denied: You can only delete ingredients belonging to your cart",
-        });
-      }
-      // If ingredient is shared (cartId is null), cart admin cannot delete it
-      if (!ingredient.cartId) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied: You cannot delete shared ingredients",
-        });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin can delete ingredients from their franchise carts
-      if (ingredient.cartId) {
-        const outlet = await User.findById(ingredient.cartId);
-        if (
-          !outlet ||
-          outlet.franchiseId?.toString() !== req.user._id.toString()
-        ) {
-          return res.status(403).json({
-            success: false,
-            message:
-              "Access denied: You can only delete ingredients from your franchise carts",
-          });
-        }
-      } else if (
-        ingredient.franchiseId &&
-        ingredient.franchiseId.toString() !== req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "Access denied: You can only delete ingredients from your franchise",
-        });
-      }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || (req.user.role === "franchise_admin" ? ingredient.cartId : null),
+      requireCart: req.user.role !== "franchise_admin",
+      operation: "ingredient-delete",
+    });
+    assertIngredientMutable(ingredient, scope, "ingredient-delete");
+    if (!ingredient.cartId && !["franchise_admin", "super_admin"].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: "Shared ingredient deletion requires franchise admin" });
     }
 
     // Check if ingredient is used in recipes
     const Recipe = require("../../models/costing-v2/recipeModel");
     const recipesUsingIngredient = await Recipe.find({
       "ingredients.ingredientId": ingredient._id,
+      franchiseId: ingredient.franchiseId,
+      ...(ingredient.cartId ? { cartId: ingredient.cartId } : {}),
     });
 
     if (recipesUsingIngredient.length > 0) {
@@ -2350,19 +1712,12 @@ exports.getFIFOLayers = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Check access control - cart admins can only view FIFO for their own ingredients
-    if (req.user.role === "admin") {
-      if (
-        ingredient.cartId &&
-        ingredient.cartId.toString() !== req.user._id.toString()
-      ) {
-        return res.status(403).json({
-          success: false,
-          message:
-            "Access denied. You can only view FIFO layers for ingredients belonging to your cart.",
-        });
-      }
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.query.cartId || (req.user.role === "franchise_admin" ? ingredient.cartId : null),
+      requireCart: req.user.role !== "franchise_admin",
+      operation: "fifo-read",
+    });
+    assertIngredientReadable(ingredient, scope, "fifo-read");
 
     // Get FIFO layers
     const layers = await FIFOService.getLayers(req.params.id);
@@ -2385,6 +1740,11 @@ exports.getFIFOLayers = async (req, res) => {
 exports.getPurchases = async (req, res) => {
   try {
     const { status, supplierId, from, to, cartId } = req.query;
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "purchase-read",
+    });
     const filter = {};
 
     if (status) filter.status = status;
@@ -2401,11 +1761,17 @@ exports.getPurchases = async (req, res) => {
 
     const purchases = await Purchase.find(costingFilter)
       .populate("supplierId", "name")
-      .populate("items.ingredientId", "name uom baseUnit")
+      .populate("items.ingredientId", "name uom baseUnit cartId franchiseId")
       .populate("receivedBy", "name email")
       .populate("cartId", "name cafeName")
       .sort({ date: -1 });
 
+    if (scope.franchiseId) {
+      for (const purchase of purchases) {
+        purchase.items = purchase.items.filter(item =>
+          isIngredientAccessible({ ingredient: item.ingredientId, scope }));
+      }
+    }
     res.json({ success: true, data: purchases });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -2416,7 +1782,29 @@ exports.getPurchases = async (req, res) => {
  * @route   POST /api/costing-v2/purchases
  * @desc    Create purchase order
  */
+const assertPurchaseItemsScope = async (purchase, user, operation) => {
+  const scope = await resolveOperationalScope(user, {
+    cartId: purchase.cartId, operation,
+  });
+  if (!purchase.franchiseId || id(purchase.franchiseId) !== id(scope.franchiseId)) {
+    throw new Error("INVENTORY_SCOPE_MISMATCH");
+  }
+  for (const item of purchase.items) {
+    const ingredient = await Ingredient.findById(item.ingredientId);
+    if (!ingredient) throw new Error("Ingredient not found");
+    assertIngredientMutable(ingredient, scope, operation);
+  }
+  return scope;
+};
+
 const processPurchaseReceipt = async ({ purchase, userId }) => {
+  const scope = await resolveCartScope(purchase.cartId, { operation: "purchase-receipt" });
+  if (id(purchase.franchiseId) !== id(scope.franchiseId)) throw new Error("INVENTORY_SCOPE_MISMATCH");
+  for (const item of purchase.items) {
+    const ingredient = await Ingredient.findById(item.ingredientId);
+    if (!ingredient) throw new Error("Ingredient not found");
+    assertIngredientMutable(ingredient, scope, "purchase-receipt");
+  }
   const purchasedIngredientIds = [];
 
   for (const item of purchase.items) {
@@ -2661,6 +2049,8 @@ exports.createPurchase = async (req, res) => {
       status: "created",
     });
 
+    await assertPurchaseItemsScope(purchase, req.user, "purchase-create");
+
     await purchase.save();
 
     if (shouldAutoReceive) {
@@ -2705,6 +2095,8 @@ exports.receivePurchase = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Purchase already received" });
     }
+
+    await assertPurchaseItemsScope(purchase, req.user, "purchase-receive");
 
     // Track which ingredients were purchased for BOM recalculation
     const purchasedIngredientIds = [];
@@ -2957,55 +2349,11 @@ exports.consumeInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own cartId
-    // For franchise admin and super admin, use provided cartId or validate
-    // For manager (mobile), get cartId from user or employee
-    let finalOutletId = cartId;
-    if (req.user.role === "admin") {
-      // Cart admin - always use their own kiosk
-      finalOutletId = req.user._id;
-    } else if (req.user.role === "manager") {
-      // Manager - use their cart (from user or employee)
-      if (req.user.cartId) {
-        finalOutletId = req.user.cartId;
-      } else if (req.user.cafeId) {
-        finalOutletId = req.user.cafeId;
-      } else if (req.user.employeeId) {
-        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
-      } else {
-        const employee = await require("../../models/employeeModel").findOne({
-          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
-        }).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
-      }
-      if (!finalOutletId) {
-        return res.status(400).json({ success: false, message: "No cart associated with manager" });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for franchise admin",
-        });
-      }
-      if (!(await validateOutletAccess(req.user, cartId))) {
-        return res
-          .status(403)
-          .json({ success: false, message: "Access denied to this kiosk" });
-      }
-      finalOutletId = cartId;
-    } else if (req.user.role === "super_admin") {
-      // Super admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for super admin",
-        });
-      }
-      finalOutletId = cartId;
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId, operation: "consumeInventory",
+    });
+    assertIngredientMutable(ingredient, scope, "consumeInventory");
+    const finalOutletId = scope.cartId;
 
     // Convert to base unit
     const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
@@ -3057,55 +2405,11 @@ exports.returnToInventory = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own cartId
-    // For franchise admin and super admin, use provided cartId or validate
-    // For manager (mobile), get cartId from user or employee
-    let finalOutletId = cartId;
-    if (req.user.role === "admin") {
-      // Cart admin - always use their own kiosk
-      finalOutletId = req.user._id;
-    } else if (req.user.role === "manager") {
-      // Manager - use their cart (from user or employee)
-      if (req.user.cartId) {
-        finalOutletId = req.user.cartId;
-      } else if (req.user.cafeId) {
-        finalOutletId = req.user.cafeId;
-      } else if (req.user.employeeId) {
-        const employee = await require("../../models/employeeModel").findById(req.user.employeeId).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
-      } else {
-        const employee = await require("../../models/employeeModel").findOne({
-          $or: [{ email: req.user.email?.toLowerCase() }, { userId: req.user._id }],
-        }).lean();
-        finalOutletId = employee?.cartId || employee?.cafeId;
-      }
-      if (!finalOutletId) {
-        return res.status(400).json({ success: false, message: "No cart associated with manager" });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for franchise admin",
-        });
-      }
-      if (!(await validateOutletAccess(req.user, cartId))) {
-        return res
-          .status(403)
-          .json({ success: false, message: "Access denied to this kiosk" });
-      }
-      finalOutletId = cartId;
-    } else if (req.user.role === "super_admin") {
-      // Super admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for super admin",
-        });
-      }
-      finalOutletId = cartId;
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId, operation: "returnToInventory",
+    });
+    assertIngredientMutable(ingredient, scope, "returnToInventory");
+    const finalOutletId = scope.cartId;
 
     // Convert to base unit
     const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
@@ -3180,24 +2484,11 @@ exports.directPurchase = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // Determine outlet ID based on role (same logic as consumeInventory)
-    let finalOutletId = cartId;
-    if (req.user.role === "admin") {
-      finalOutletId = req.user._id;
-    } else if (req.user.role === "manager") {
-      finalOutletId = await resolveUserCartId(req.user);
-      if (!finalOutletId && cartId) {
-        finalOutletId = cartId;
-      }
-      if (!finalOutletId) {
-        return res.status(400).json({ success: false, message: "No cart associated with manager" });
-      }
-    } else if (req.user.role === "franchise_admin" || req.user.role === "super_admin") {
-      if (!cartId) {
-        return res.status(400).json({ success: false, message: "cartId is required" });
-      }
-      finalOutletId = cartId; // Assuming validation happens in middleware or trusted
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId, operation: "directPurchase",
+    });
+    assertIngredientMutable(ingredient, scope, "directPurchase");
+    const finalOutletId = scope.cartId;
 
     // Validate inputs
     if (!Number.isFinite(qty) || qty <= 0) {
@@ -3333,50 +2624,24 @@ exports.getInventoryTransactions = async (req, res) => {
       if (to) filter.date.$lte = new Date(to);
     }
 
-    // Apply role-based filtering for cartId only (inventory transactions don't have franchiseId)
-    if (req.user.role === "admin") {
-      // Cart admin - only see their own kiosk's transactions
-      filter.cartId = req.user._id;
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (cartId) {
-        // Validate outlet belongs to their franchise
-        const outlet = await User.findById(cartId);
-        if (
-          !outlet ||
-          outlet.franchiseId?.toString() !== req.user._id.toString()
-        ) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied: Kiosk does not belong to your franchise",
-          });
-        }
-        filter.cartId = cartId;
-      } else {
-        // Get all kiosks under franchise
-        const outlets = await User.find({
-          role: "admin",
-          franchiseId: req.user._id,
-          isActive: true,
-        }).select("_id");
-        filter.cartId = { $in: outlets.map((o) => o._id) };
-      }
-    } else if (req.user.role === "manager") {
-      const managerCartId = await resolveUserCartId(req.user);
-      if (!managerCartId) {
-        return res.status(403).json({
-          success: false,
-          message: "No cart associated with manager",
-        });
-      }
-      filter.cartId = managerCartId;
-    } else if (req.user.role === "super_admin") {
-      // Super admin - can filter by outlet or see all
-      if (cartId) {
-        filter.cartId = cartId;
-      }
-      // If no cartId specified, show all transactions
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "inventory-transactions-read",
+    });
+    if (scope.cartId) {
+      filter.cartId = scope.cartId;
+    } else if (scope.role === "franchise_admin") {
+      const carts = await User.find({ role: "admin", franchiseId: scope.franchiseId }).select("_id").lean();
+      filter.cartId = { $in: carts.map(cart => cart._id) };
     }
+    const visibleIngredients = await Ingredient.find(buildIngredientScopeQuery(scope))
+      .select("_id").lean();
+    const visibleIds = visibleIngredients.map(ingredient => ingredient._id);
+    if (ingredientId && !visibleIds.some(visibleId => id(visibleId) === id(ingredientId))) {
+      return res.status(403).json({ success: false, message: "Ingredient outside Inventory scope" });
+    }
+    filter.ingredientId = ingredientId || { $in: visibleIds };
 
     const transactions = await InventoryTransaction.find(filter)
       .populate("ingredientId", "name uom category storageLocation")
@@ -3598,7 +2863,7 @@ exports.getCostingInventory = async (req, res) => {
       const allCartTransactions = await InventoryTransaction.find({
         cartId: cartObjectId,
       })
-        .sort({ date: 1 })
+        .sort({ date: 1, _id: 1 })
         .lean();
 
       const ingredientIdSet = new Set(
@@ -3649,7 +2914,11 @@ exports.getCostingInventory = async (req, res) => {
             }
           }
 
-          if (txn.type === "IN" || txn.type === "RETURN") {
+          if (txn.type === "ADJUSTMENT" && txn.physicalQtyAfter != null) {
+            stock = Number(txn.physicalQtyAfter);
+            totalQty = stock;
+            totalValue = stock * (weightedAvgCost || ingredient.currentCostPerBaseUnit || 0);
+          } else if (txn.type === "IN" || txn.type === "RETURN") {
             stock += qty;
             let txnCostPerBaseUnit = 0;
             if (txn.unitPrice != null && txn.unitPrice > 0) {
@@ -3774,9 +3043,8 @@ exports.getLowStock = async (req, res) => {
     const shouldSkipOutletFilter =
       req.user.role === "franchise_admin" || req.user.role === "super_admin";
     const filter = await buildCostingQuery(
-      req.user,
-      { isActive: true },
-      { skipOutletFilter: shouldSkipOutletFilter }
+      req.user, { isActive: true, cartId: req.query.cartId },
+      { skipOutletFilter: shouldSkipOutletFilter, includeShared: true }
     );
 
     // Log filtering for debugging
@@ -3816,45 +3084,11 @@ exports.recordWaste = async (req, res) => {
         .json({ success: false, message: "Ingredient not found" });
     }
 
-    // For cart admin, always use their own cartId
-    // For franchise admin and super admin, use provided cartId or validate
-    let finalOutletId = cartId;
-    if (req.user.role === "admin") {
-      // Cart admin - always use their own kiosk
-      finalOutletId = req.user._id;
-    } else if (req.user.role === "manager") {
-      // Manager - use their own cart
-      finalOutletId = await resolveUserCartId(req.user);
-      if (!finalOutletId) {
-        return res.status(400).json({
-          success: false,
-          message: "No cart associated with manager",
-        });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for franchise admin",
-        });
-      }
-      if (!(await validateOutletAccess(req.user, cartId))) {
-        return res
-          .status(403)
-          .json({ success: false, message: "Access denied to this kiosk" });
-      }
-      finalOutletId = cartId;
-    } else if (req.user.role === "super_admin") {
-      // Super admin - must provide cartId
-      if (!cartId) {
-        return res.status(400).json({
-          success: false,
-          message: "cartId is required for super admin",
-        });
-      }
-      finalOutletId = cartId;
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId, operation: "recordWaste",
+    });
+    assertIngredientMutable(ingredient, scope, "recordWaste");
+    const finalOutletId = scope.cartId;
 
     // Convert to base unit
     const qtyInBaseUnit = safeConvertToBaseUnit(ingredient, qty, uom);
@@ -3932,6 +3166,11 @@ exports.recordWaste = async (req, res) => {
 exports.getWaste = async (req, res) => {
   try {
     const { ingredientId, from, to, cartId } = req.query;
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "waste-read",
+    });
     const filter = {};
 
     if (ingredientId) filter.ingredientId = ingredientId;
@@ -3941,59 +3180,23 @@ exports.getWaste = async (req, res) => {
       if (to) filter.date.$lte = new Date(to);
     }
 
-    // Apply role-based filtering for cartId
-    if (req.user.role === "admin") {
-      // Cart admin - only see their own kiosk's waste records
-      filter.cartId = req.user._id;
-    } else if (req.user.role === "manager") {
-      // Manager - only see their own kiosk's waste records
-      const managerCartId = await resolveUserCartId(req.user);
-      if (!managerCartId) {
-        return res.status(403).json({
-          success: false,
-          message: "No cart associated with manager",
-        });
-      }
-      filter.cartId = managerCartId;
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin - can filter by specific outlet or see all their franchise outlets
-      if (cartId) {
-        // Validate outlet belongs to their franchise
-        const outlet = await User.findById(cartId);
-        if (
-          !outlet ||
-          outlet.franchiseId?.toString() !== req.user._id.toString()
-        ) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied: Kiosk does not belong to your franchise",
-          });
-        }
-        filter.cartId = cartId;
-      } else {
-        // Get all kiosks under franchise
-        const outlets = await User.find({
-          role: "admin",
-          franchiseId: req.user._id,
-          isActive: true,
-        }).select("_id");
-        filter.cartId = { $in: outlets.map((o) => o._id) };
-      }
-    } else if (req.user.role === "super_admin") {
-      // Super admin - can filter by outlet or see all
-      if (cartId) {
-        filter.cartId = cartId;
-      }
-      // If no cartId specified, show all waste records
+    if (scope.cartId) {
+      filter.cartId = scope.cartId;
+    } else if (scope.role === "franchise_admin") {
+      const outlets = await User.find({ role: "admin", franchiseId: scope.franchiseId })
+        .select("_id").lean();
+      filter.cartId = { $in: outlets.map(outlet => outlet._id) };
     }
 
     const waste = await Waste.find(filter)
-      .populate("ingredientId", "name uom")
+      .populate("ingredientId", "name uom cartId franchiseId")
       .populate("recordedBy", "name email")
       .populate("cartId", "name cafeName")
       .sort({ date: -1 });
 
-    res.json({ success: true, data: waste });
+    res.json({ success: true, data: scope.franchiseId
+      ? waste.filter(record => isIngredientAccessible({ ingredient: record.ingredientId, scope }))
+      : waste });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -4026,114 +3229,38 @@ exports.getRecipes = async (req, res) => {
       filter.cartId = cartId;
     }
 
-    // Apply role-based filtering (recipes can be shared or cart-specific)
-    // For cart admin: only show recipes for their own cart OR global recipes (cartId: null)
-    // For franchise_admin: show recipes for their franchise carts OR global recipes
-    // For super_admin: only show global BOMs (cartId: null) unless filtering by specific cartId
-    let costingFilter = { ...filter };
-    if (req.user.role === "admin") {
-      console.log(`[GET_RECIPES] ========================================`);
-      console.log(`[GET_RECIPES] CART ADMIN REQUEST - User ID: ${req.user._id}`);
-      console.log(`[GET_RECIPES] ========================================`);
-
-      // Cart admin: only their own cart's recipes OR global recipes (cartId: null)
-      // Remove cartId from filter if it was set, as we'll use $or instead
-      delete costingFilter.cartId;
-
-      const userCartId = req.user._id;
-      const userCartIdObj = mongoose.Types.ObjectId.isValid(userCartId)
-        ? new mongoose.Types.ObjectId(userCartId)
-        : userCartId;
-
-      // Check database state
-      const totalInDB = await Recipe.countDocuments({});
-      const withCartIdNull = await Recipe.countDocuments({ cartId: null });
-      const withCartIdUser = await Recipe.countDocuments({ cartId: userCartIdObj });
-      const withNoCartId = await Recipe.countDocuments({ cartId: { $exists: false } });
-
-      console.log(`[GET_RECIPES] ========== DATABASE STATE ==========`);
-      console.log(`[GET_RECIPES] Total recipes in DB: ${totalInDB}`);
-      console.log(`[GET_RECIPES] Recipes with cartId=null: ${withCartIdNull}`);
-      console.log(`[GET_RECIPES] Recipes with cartId=${userCartIdObj}: ${withCartIdUser}`);
-      console.log(`[GET_RECIPES] Recipes without cartId field: ${withNoCartId}`);
-      console.log(`[GET_RECIPES] =====================================`);
-
-      // Build base query for shared + cart-specific recipes
-      // Use $or to get both shared (cartId: null) and cart-specific (cartId: userCartId) recipes
-      const baseQuery = {
-        $or: [
-          { cartId: null },
-          { cartId: userCartIdObj },
-          { cartId: { $exists: false } }
-        ]
-      };
-
-      // Apply isActive filter if provided
-      if (filter.isActive !== undefined) {
-        if (filter.isActive === true) {
-          baseQuery.isActive = { $ne: false };
-        } else {
-          baseQuery.isActive = false;
-        }
-      }
-
-      // Apply other filters (name/search)
-      const otherFilters = {};
-      if (filter.name) {
-        if (filter.name.$regex) {
-          otherFilters.name = filter.name;
-        } else {
-          otherFilters.name = { $regex: filter.name, $options: "i" };
-        }
-      }
-
-      // Combine all filters
-      if (Object.keys(otherFilters).length > 0) {
-        costingFilter = {
-          $and: [
-            baseQuery,
-            otherFilters
-          ]
-        };
-      } else {
-        costingFilter = baseQuery;
-      }
-
-      console.log(`[GET_RECIPES] Final query:`, JSON.stringify(costingFilter, null, 2));
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin: recipes for their franchise carts OR global recipes
-      const franchiseCarts = await User.find({
-        role: "admin",
-        franchiseId: req.user._id,
-        isActive: true,
-      }).select("_id");
-      const cartIds = franchiseCarts.map((c) => c._id);
-      // Remove cartId from filter if it was set, as we'll use $or instead
-      delete costingFilter.cartId;
-      costingFilter.$or = [
-        { cartId: { $in: cartIds } },
-        { cartId: null },
-        { cartId: { $exists: false } },
-      ];
-      costingFilter.franchiseId = req.user._id;
-    } else if (req.user.role === "super_admin") {
-      // Super admin: only global BOMs (cartId: null) unless filtering by specific outlet
-      if (!cartId) {
-        costingFilter.cartId = null;
-      } else {
-        costingFilter.cartId = cartId;
-      }
-    }
+    const recipeScope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "recipe-read",
+    });
+    const recipeOwnerFilter = req.user.role === "super_admin" && !cartId
+      ? { cartId: null }
+      : buildIngredientScopeQuery(recipeScope, { includeTemplates: true });
+    const costingFilter = Object.keys(filter).length
+      ? { $and: [recipeOwnerFilter, Object.fromEntries(Object.entries(filter).filter(([key]) => key !== "cartId"))] }
+      : recipeOwnerFilter;
 
     let recipes = await Recipe.find(costingFilter)
       .populate(
         "ingredients.ingredientId",
-        "name uom baseUnit currentCostPerBaseUnit"
+        "name uom baseUnit currentCostPerBaseUnit cartId franchiseId"
       )
       .populate("addonId", "name price")
       .populate("cartId", "name cafeName")
       .sort({ name: 1 })
       .lean(); // Use lean() for better performance
+
+    if (!(req.user.role === "super_admin" && !cartId)) {
+      for (const recipe of recipes) {
+        recipe.ingredients = (recipe.ingredients || []).filter(line =>
+          line.ingredientId && isIngredientAccessible({
+            ingredient: line.ingredientId,
+            scope: { ...recipeScope, allowTemplates: true },
+          })
+        );
+      }
+    }
 
     // For Cart Admin, recalculate costs dynamically using their cartId
     // This ensures costs are based on outlet-specific purchases, not cached global values
@@ -4234,6 +3361,13 @@ exports.createRecipe = async (req, res) => {
   try {
     // Set outlet context (recipes can be shared, so cartId is optional)
     const data = await setOutletContext(req.user, { ...req.body }, false);
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: data.cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "recipe-create",
+    });
+    data.cartId = scope.cartId;
+    data.franchiseId = scope.franchiseId;
 
     // Normalize name to prevent duplicates like "Tea" vs "tea" or extra spaces
     const rawName = typeof data.name === "string" ? data.name : "";
@@ -4259,6 +3393,7 @@ exports.createRecipe = async (req, res) => {
       }
       data.ingredients = Array.from(merged.values());
     }
+    await assertRecipeLinesScoped(data.ingredients, scope);
 
     // Check for duplicate BOM name for the same cart before creating
     const existingRecipe = await Recipe.findOne({
@@ -4341,31 +3476,7 @@ exports.updateRecipe = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
-    // Access control: Cart admin can only update their own cart's recipes
-    if (req.user.role === "admin") {
-      if (recipe.cartId && recipe.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only update recipes belonging to your cart.",
-        });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin can only update recipes from their franchise carts or franchise shared recipes
-      if (recipe.cartId) {
-        const cart = await User.findById(recipe.cartId);
-        if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied. You can only update recipes belonging to your franchise carts.",
-          });
-        }
-      } else if (recipe.franchiseId && recipe.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only update recipes belonging to your franchise.",
-        });
-      }
-    }
+    const scope = await assertRecipeOwner(recipe, req.user, req.body.cartId, "recipe-update");
 
     // Prevent changing cartId/franchiseId from the client
     const updateBody = { ...req.body };
@@ -4408,6 +3519,7 @@ exports.updateRecipe = async (req, res) => {
         }
       }
       updateBody.ingredients = Array.from(merged.values());
+      await assertRecipeLinesScoped(updateBody.ingredients, scope);
     }
     if (updateBody.addonId === "") {
       updateBody.addonId = null;
@@ -4502,6 +3614,8 @@ exports.recalculateRecipeCost = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
+    await assertRecipeOwner(recipe, req.user, req.body?.cartId, "recipe-cost-recalculate");
+
     // Recalculate cost - for Cart Admin, use their cartId to check cart-specific purchases
     const cartIdForCost =
       req.user.role === "admin" ? req.user._id : recipe.cartId || null;
@@ -4540,31 +3654,7 @@ exports.deleteRecipe = async (req, res) => {
         .json({ success: false, message: "Recipe not found" });
     }
 
-    // Access control: Cart admin can only delete their own cart's recipes
-    if (req.user.role === "admin") {
-      if (recipe.cartId && recipe.cartId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only delete recipes belonging to your cart.",
-        });
-      }
-    } else if (req.user.role === "franchise_admin") {
-      // Franchise admin can only delete recipes from their franchise carts
-      if (recipe.cartId) {
-        const cart = await User.findById(recipe.cartId);
-        if (!cart || cart.franchiseId?.toString() !== req.user._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied. You can only delete recipes belonging to your franchise carts.",
-          });
-        }
-      } else if (recipe.franchiseId && recipe.franchiseId.toString() !== req.user._id.toString()) {
-        return res.status(403).json({
-          success: false,
-          message: "Access denied. You can only delete recipes belonging to your franchise.",
-        });
-      }
-    }
+    await assertRecipeOwner(recipe, req.user, req.query.cartId, "recipe-delete");
 
     // Find all menu items linked to this recipe
     const linkedMenuItems = await MenuItem.find({ recipeId: recipe._id });
@@ -4639,13 +3729,29 @@ exports.getMenuItems = async (req, res) => {
     if (search) filter.name = { $regex: search, $options: "i" };
     if (cartId) filter.cartId = cartId;
 
-    // Apply role-based filtering (menu items are kiosk-specific)
-    const costingFilter = await buildCostingQuery(req.user, filter);
-
-    const menuItems = await MenuItem.find(costingFilter)
-      .populate("recipeId", "name costPerPortion portions")
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "menu-item-read",
+    });
+    const ownerQuery = scope.cartId
+      ? { cartId: scope.cartId, franchiseId: scope.franchiseId }
+      : scope.franchiseId ? { franchiseId: scope.franchiseId } : {};
+    const safeFilter = { ...filter };
+    delete safeFilter.cartId;
+    const query = Object.keys(safeFilter).length ? { $and: [ownerQuery, safeFilter] } : ownerQuery;
+    const menuItems = await MenuItem.find(query)
+      .populate("recipeId", "name costPerPortion portions cartId franchiseId")
       .populate("cartId", "name cafeName")
       .sort({ category: 1, name: 1 });
+    if (scope.franchiseId) {
+      for (const item of menuItems) {
+        if (item.recipeId && !isIngredientAccessible({
+          ingredient: item.recipeId,
+          scope: { ...scope, allowTemplates: true },
+        })) item.recipeId = null;
+      }
+    }
 
     res.json({ success: true, data: menuItems });
   } catch (error) {
@@ -4671,19 +3777,19 @@ exports.createMenuItem = async (req, res) => {
 
     const { recipeId, sellingPrice } = menuItemData;
 
-    // Recipe is optional - if provided, validate it exists
+    // Set and verify the operational owner before reading a linked BOM.
+    const data = await setOutletContext(req.user, menuItemData, true);
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: data.cartId, operation: "menu-item-create",
+    });
+    data.cartId = scope.cartId;
+    data.franchiseId = scope.franchiseId;
     if (recipeId) {
       const recipe = await Recipe.findById(recipeId);
-      if (!recipe) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Recipe not found" });
-      }
+      if (!recipe) return res.status(404).json({ success: false, message: "Recipe not found" });
+      assertIngredientReadable(recipe, { ...scope, allowTemplates: true }, "menu-recipe-link");
+      await assertRecipeLinesScoped(recipe.ingredients, { ...scope, allowTemplates: true });
     }
-
-    // Set outlet context (menu items are kiosk-specific, outletRequired = true)
-    // This ensures cartId and franchiseId are properly set
-    const data = await setOutletContext(req.user, menuItemData, true);
 
     const menuItem = new MenuItem(data);
 
@@ -4704,7 +3810,7 @@ exports.createMenuItem = async (req, res) => {
         // This ensures the cost matches the cart's purchase prices
         const cartIdForCost = req.user.role === "admin" ? req.user._id : (data.cartId || null);
         await recipe.calculateCost(cartIdForCost);
-        await recipe.save();
+        if (recipe.cartId) await recipe.save();
 
         // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
@@ -4748,8 +3854,22 @@ exports.updateMenuItem = async (req, res) => {
         .json({ success: false, message: "Menu item not found" });
     }
 
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: req.body.cartId || (req.user.role === "franchise_admin" ? menuItem.cartId : null),
+      operation: "menu-item-update",
+    });
+    assertIngredientReadable(menuItem, scope, "menu-item-update");
+    if (req.body.cartId !== undefined && id(req.body.cartId) !== id(menuItem.cartId)) {
+      return res.status(403).json({ success: false, message: "Menu item ownership cannot be changed" });
+    }
+    if (req.body.franchiseId !== undefined && id(req.body.franchiseId) !== id(menuItem.franchiseId)) {
+      return res.status(403).json({ success: false, message: "Menu item ownership cannot be changed" });
+    }
+
     // Convert empty strings to null for optional ObjectId fields
     const updateData = { ...req.body };
+    delete updateData.cartId;
+    delete updateData.franchiseId;
     if (updateData.recipeId === "" || updateData.recipeId === null) {
       updateData.recipeId = null;
     }
@@ -4760,14 +3880,11 @@ exports.updateMenuItem = async (req, res) => {
         ? updateData.recipeId
         : menuItem.recipeId;
 
-    // Validate recipe if provided
     if (recipeIdToUse) {
       const recipe = await Recipe.findById(recipeIdToUse);
-      if (!recipe) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Recipe not found" });
-      }
+      if (!recipe) return res.status(404).json({ success: false, message: "Recipe not found" });
+      assertIngredientReadable(recipe, { ...scope, allowTemplates: true }, "menu-recipe-link");
+      await assertRecipeLinesScoped(recipe.ingredients, { ...scope, allowTemplates: true });
     }
 
     Object.assign(menuItem, updateData);
@@ -4800,7 +3917,7 @@ exports.updateMenuItem = async (req, res) => {
         // This ensures the cost matches the cart's purchase prices
         const cartIdForCost = req.user.role === "admin" ? req.user._id : (menuItem.cartId || null);
         await recipe.calculateCost(cartIdForCost);
-        await recipe.save();
+        if (recipe.cartId) await recipe.save();
 
         // Now use the recalculated cost for menu item metrics
         menuItem.calculateMetrics(recipe.costPerPortion);
@@ -4844,16 +3961,8 @@ exports.deleteMenuItem = async (req, res) => {
         .json({ success: false, message: "Menu item not found" });
     }
 
-    // Verify that the menu item belongs to the cart admin's outlet
-    if (
-      menuItem.cartId &&
-      menuItem.cartId.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied. You can only delete your own menu items.",
-      });
-    }
+    const scope = await resolveOperationalScope(req.user, { operation: "menu-item-delete" });
+    assertIngredientReadable(menuItem, scope, "menu-item-delete");
 
     await MenuItem.findByIdAndDelete(req.params.id);
     res.json({ success: true, message: "Menu item deleted successfully" });
@@ -5081,19 +4190,19 @@ exports.importFromDefaultMenu = async (req, res) => {
           defaultMenuPath: item.defaultMenuPath,
         };
 
+        let linkedRecipe = null;
         if (recipeId) {
-          menuItemData.recipeId = recipeId;
+          linkedRecipe = await Recipe.findById(recipeId);
+          if (!linkedRecipe) throw new Error("Recipe not found");
+          const recipeScope = await assertRecipeOwner(linkedRecipe, req.user, outletData.cartId, "menu-import-recipe");
+          await assertRecipeLinesScoped(linkedRecipe.ingredients, recipeScope);
+          menuItemData.recipeId = linkedRecipe._id;
         }
 
         const menuItem = new MenuItem(menuItemData);
 
         // If a recipe is provided, use its costPerPortion for metrics.
-        if (recipeId) {
-          const recipe = await Recipe.findById(recipeId);
-          if (recipe) {
-            menuItem.calculateMetrics(recipe.costPerPortion);
-          }
-        }
+        if (linkedRecipe) menuItem.calculateMetrics(linkedRecipe.costPerPortion);
 
         await menuItem.save();
 
@@ -6588,16 +5697,10 @@ exports.syncMenuItemsFromDefault = async (req, res) => {
 exports.linkMatchingBoms = async (req, res) => {
   try {
     const { cartId: bodyCartId } = req.body;
-    let cartId = bodyCartId;
-
-    if (req.user.role === "admin") {
-      cartId = req.user._id;
-    } else if (req.user.role === "franchise_admin" && !cartId) {
-      return res.status(400).json({
-        success: false,
-        message: "Franchise admin must provide cartId",
-      });
-    }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: bodyCartId || null,
+      operation: "menu-link-boms",
+    });
 
     const MenuItemV2 = require("../../models/costing-v2/menuItemModel");
     const RecipeV2 = require("../../models/costing-v2/recipeModel");
@@ -6605,8 +5708,9 @@ exports.linkMatchingBoms = async (req, res) => {
     const filter = {
       $or: [{ recipeId: null }, { recipeId: { $exists: false } }],
       isActive: true,
+      cartId: scope.cartId,
+      franchiseId: scope.franchiseId,
     };
-    if (cartId) filter.cartId = cartId;
 
     const menuItemsWithoutRecipe = await MenuItemV2.find(filter).lean();
     let linked = 0;
@@ -6633,19 +5737,19 @@ exports.linkMatchingBoms = async (req, res) => {
             },
             {
               $or: [
-                { cartId: mi.cartId },
-                { cartId: null, franchiseId: mi.franchiseId },
-                { franchiseId: mi.franchiseId },
+                { cartId: scope.cartId, franchiseId: scope.franchiseId },
+                { cartId: null, franchiseId: scope.franchiseId },
                 { cartId: null, franchiseId: null },
-                { cartId: { $exists: false }, franchiseId: { $exists: false } },
               ],
             },
           ],
         });
 
         if (matchingRecipe) {
+          await assertRecipeOwner(matchingRecipe, req.user, scope.cartId, "menu-link-boms");
+          await assertRecipeLinesScoped(matchingRecipe.ingredients, scope);
           await MenuItemV2.updateOne(
-            { _id: mi._id },
+            { _id: mi._id, cartId: scope.cartId, franchiseId: scope.franchiseId },
             { $set: { recipeId: matchingRecipe._id } }
           );
           linked++;
@@ -7157,7 +6261,7 @@ exports.pushToCartAdminsInternal = pushToCartAdminsInternal;
  */
 exports.debugIngredients = async (req, res) => {
   try {
-    if (req.user.role !== "admin" && req.user.role !== "super_admin") {
+    if (req.user.role !== "super_admin") {
       return res.status(403).json({
         success: false,
         message: "Access denied",

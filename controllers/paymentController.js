@@ -9,7 +9,7 @@ const Order = require("../models/orderModel");
 const PaymentQR = require("../models/paymentQrModel");
 const Employee = require("../models/employeeModel");
 const { releaseTableForOrder } = require("./orderController");
-const { consumeIngredientsForOrder } = require("../services/costing-v2/orderConsumptionService");
+const { maybeProcessInitialInventory } = require("../services/costing-v2/orderInventoryCoordinator");
 const {
   ORDER_STATUSES,
   PAYMENT_STATUSES: ORDER_PAYMENT_STATUSES,
@@ -218,31 +218,6 @@ const buildQrScopeOrFilter = (scopeId) => {
     }
   }
   return filters;
-};
-
-const resetInventoryDeductionFlag = async (orderId) => {
-  if (!orderId) return;
-  try {
-    await Order.findByIdAndUpdate(orderId, {
-      inventoryDeducted: false,
-      inventoryDeductedAt: null,
-    });
-  } catch (err) {
-    console.error(
-      `[COSTING] Failed to reset inventoryDeducted for order ${orderId}:`,
-      err.message,
-    );
-  }
-};
-
-const shouldResetInventoryDeduction = (result) => {
-  if (!result) return true;
-  if (result.success || result.alreadyProcessed) return false;
-  const consumedCount = Array.isArray(result.summary?.ingredientsConsumed)
-    ? result.summary.ingredientsConsumed.length
-    : 0;
-  const processedCount = Number(result.summary?.itemsProcessed || 0);
-  return consumedCount === 0 && processedCount === 0;
 };
 
 const parseUpiPayload = (payload) => {
@@ -922,7 +897,6 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
   if (!payment || !order) return;
 
   const isPaymentFirstOrder = requiresPaymentBeforeProceeding(order);
-  let needsFallbackConsumption = false;
 
   order.paidAt = payment.paidAt || new Date();
   order.paymentStatus = "PAID";
@@ -933,11 +907,6 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
     order.paymentRequiredBeforeProceeding = false;
   } else {
     order.status = ORDER_STATUSES.COMPLETED;
-    needsFallbackConsumption = !order.inventoryDeducted;
-    if (needsFallbackConsumption) {
-      order.inventoryDeducted = true;
-      order.inventoryDeductedAt = new Date();
-    }
   }
   await order.save();
 
@@ -992,49 +961,19 @@ const finalizePaidPaymentAndOrder = async ({ payment, order, req, source }) => {
     await releaseTableForOrder(order, io, emitToCafe);
   }
 
-  if (!isPaymentFirstOrder && needsFallbackConsumption) {
+  if (!isPaymentFirstOrder) {
     const userId =
       req.user && req.user._id
         ? req.user._id
         : order.cartId && (order.cartId._id || order.cartId);
-
-    if (userId) {
-      console.log(
-        `[COSTING] Fallback: Order ${order._id} paid via ${source} - triggering consumption`,
+    maybeProcessInitialInventory({
+      order, userId, trigger: `payment_fallback_${source}`,
+    }).catch((coordinatorError) => {
+      console.error(
+        `[COSTING] Fallback consumption error for order ${order._id}:`,
+        coordinatorError,
       );
-      consumeIngredientsForOrder(order, userId)
-        .then(async (consumptionResult) => {
-          if (consumptionResult.success) {
-            console.log(
-              `[COSTING] Fallback consumption success for order ${order._id}`,
-            );
-          } else {
-            const isBenign =
-              consumptionResult.alreadyProcessed ||
-              consumptionResult.message?.includes("No new items");
-            if (!isBenign && consumptionResult.summary?.errors) {
-              consumptionResult.summary.errors.forEach((e) =>
-                console.warn(`[COSTING] ${e.item}: ${e.error}`),
-              );
-            }
-            if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
-              await resetInventoryDeductionFlag(order._id);
-            }
-          }
-        })
-        .catch(async (err) => {
-          console.error(
-            `[COSTING] Fallback consumption error for order ${order._id}:`,
-            err,
-          );
-          await resetInventoryDeductionFlag(order._id);
-        });
-    } else {
-      console.warn(
-        `[COSTING] Skipping fallback consumption for order ${order._id}: no userId`,
-      );
-      await resetInventoryDeductionFlag(order._id);
-    }
+    });
   }
 };
 

@@ -10,6 +10,11 @@
  * - Data isolation (mobile users only see their cart data)
  */
 
+// This legacy suite deletes whole collections. It must never load the app or
+// connect unless explicitly pointed at the isolated Phase 01 test database.
+const { assertIsolatedTestDatabase } = require('../helpers/isolatedMongo');
+assertIsolatedTestDatabase(process.env.MONGO_URI || '');
+
 const mongoose = require('mongoose');
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
@@ -602,4 +607,3 @@ describe('Mobile App Integration Tests', () => {
     });
   });
 });
-

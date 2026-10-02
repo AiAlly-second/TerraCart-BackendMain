@@ -48,6 +48,8 @@ const {
 const { protect } = require("../middleware/authMiddleware");
 const { authorize } = require("../middleware/authMiddleware");
 const { checkCostingPermission } = require("../middleware/costingPermissionMiddleware");
+const { requireInventoryEnabled } = require("../middleware/inventoryFeatureMiddleware");
+const guardInventory = requireInventoryEnabled({ operation: "costing-v1-inventory" });
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
@@ -115,15 +117,18 @@ router.post("/recipes", createRecipe);
 router.put("/recipes/:id", updateRecipe);
 router.delete("/recipes/:id", deleteRecipe);
 
-// Inventory Transactions
-router.post("/inventory/adjust", adjustInventory);
-router.get("/inventory/transactions", getInventoryTransactions);
+// Inventory Transactions - costing-v1's own Inventory authority
+// (FEATURE_COSTING_ENABLED, checked router-wide above) plus the new Inventory
+// feature must both be satisfied for live stock adjustment/movement.
+router.post("/inventory/adjust", guardInventory, adjustInventory);
+router.get("/inventory/transactions", guardInventory, getInventoryTransactions);
 
-// Ingredient Purchases
+// Ingredient Purchases - creating/editing/deleting a purchase moves stock;
+// listing purchase history does not.
 router.get("/ingredient-purchases", getIngredientPurchases);
-router.post("/ingredient-purchases", upload.single("invoice"), createIngredientPurchase);
-router.put("/ingredient-purchases/:id", upload.single("invoice"), updateIngredientPurchase);
-router.delete("/ingredient-purchases/:id", deleteIngredientPurchase);
+router.post("/ingredient-purchases", guardInventory, upload.single("invoice"), createIngredientPurchase);
+router.put("/ingredient-purchases/:id", guardInventory, upload.single("invoice"), updateIngredientPurchase);
+router.delete("/ingredient-purchases/:id", guardInventory, deleteIngredientPurchase);
 
 // Outlet OPEX
 router.get("/outlet-opex", getOutletOPEX);

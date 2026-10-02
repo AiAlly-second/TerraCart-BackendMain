@@ -32,6 +32,11 @@ const inventoryTransactionSchema = new mongoose.Schema(
       required: true,
       // This is the converted quantity in base unit
     },
+    // Absolute physical count after a reconciliation adjustment. Existing
+    // transaction readers may still use the signed adjustment delta.
+    physicalQtyAfter: { type: Number, default: null },
+    previousQty: { type: Number, default: null },
+    reconciliationId: { type: mongoose.Schema.Types.ObjectId, default: null },
     // Reference to the original transaction if this is a return
     originalTransactionId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -107,5 +112,4 @@ inventoryTransactionSchema.index({ cartId: 1 });
 inventoryTransactionSchema.index({ originalTransactionId: 1 }); // For tracking returns
 
 module.exports = mongoose.model("InventoryTransactionV2", inventoryTransactionSchema);
-
 

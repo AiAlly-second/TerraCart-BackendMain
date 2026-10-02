@@ -16,6 +16,7 @@ const { createAdapter } = require("@socket.io/redis-adapter");
 const jwt = require("jsonwebtoken");
 const User = require("./models/userModel");
 const Employee = require("./models/employeeModel");
+const { resolveFranchiseAdminId } = require("./services/featureService");
 const connectDB = require("./config/db");
 const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
 const {
@@ -25,6 +26,9 @@ const {
 const {
   startAttendanceTaskSchedulers,
 } = require("./services/attendanceTaskSchedulerService");
+const {
+  startBackupSchedulerService,
+} = require("./services/backupRestore/backupSchedulerService");
 
 // Security middleware
 const {
@@ -647,7 +651,10 @@ app.use("/api/waitlist", require("./routes/waitlistRoutes"));
 app.use("/api/feedback", require("./routes/feedbackRoutes"));
 app.use("/api/revenue", require("./routes/revenueRoutes"));
 app.use("/api/admin", require("./routes/adminRoutes"));
+app.use("/api/features", require("./routes/featureRoutes"));
+app.use("/api/admin", require("./routes/adminFeatureRoutes"));
 app.use("/api/files", require("./routes/fileRoutes"));
+app.use("/api/inventory/reconciliation", require("./routes/inventoryReconciliationRoutes"));
 app.use("/api/inventory", require("./routes/inventoryRoutes"));
 app.use("/api/kiosk", require("./routes/kioskRoutes"));
 app.use("/api/kiosk-owner", require("./routes/kioskOwnerRoutes"));
@@ -673,6 +680,10 @@ app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queu
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
 app.use("/api/app", require("./routes/appUpdateRoutes"));
 app.use("/api", require("./routes/notificationRoutes"));
+app.use(
+  "/api/admin/superadmin/backup-restore",
+  require("./routes/backupRestoreRoutes")
+);
 
 
 // Health check endpoints (both /health and /api/health for compatibility)
@@ -831,6 +842,19 @@ io.on("connection", (socket) => {
       // Keep super_admin explicit-join only to avoid joining many rooms.
       if (role === "super_admin") return;
 
+      // Feature rooms are derived from the authenticated user and current DB
+      // assignments, never from the client's franchise hint.
+      try {
+        const franchiseAdminId = await resolveFranchiseAdminId(user);
+        if (franchiseAdminId) {
+          joinRoomIfNeeded(socket, `franchise:${franchiseAdminId}`, "auto:franchise");
+        }
+      } catch (error) {
+        writeSocketTraceLog("auto:franchise scope unavailable", {
+          socketId: socket.id, userId: String(user._id), message: error.message,
+        });
+      }
+
       const allowedCartIds = await resolveSocketCartIds(user);
       for (const cartId of allowedCartIds) {
         const normalizedCartId = normalizeSocketRoomValue(cartId);
@@ -889,7 +913,7 @@ io.on("connection", (socket) => {
   });
 
   // Join franchise room
-  socket.on("join:franchise", (franchiseId) => {
+  socket.on("join:franchise", async (franchiseId) => {
     const normalizedFranchiseId = normalizeSocketRoomValue(franchiseId);
     if (!normalizedFranchiseId) {
       writeSocketTraceLog("join:franchise rejected invalid room", {
@@ -909,21 +933,13 @@ io.on("connection", (socket) => {
     }
 
     const role = normalizeSocketRole(user.role);
-    if (role === "super_admin") {
-      joinRoomIfNeeded(
-        socket,
-        `franchise:${normalizedFranchiseId}`,
-        "join:franchise:super_admin"
-      );
-      return;
+    let resolvedFranchiseId = null;
+    try {
+      resolvedFranchiseId = await resolveFranchiseAdminId(user);
+    } catch (_error) {
+      // Unknown or inconsistent assignments cannot grant a room.
     }
-
-    const sameFranchiseId =
-      user._id && String(user._id) === normalizedFranchiseId;
-    const adminFranchiseId =
-      user.franchiseId && String(user.franchiseId) === normalizedFranchiseId;
-
-    if ((role === "franchise_admin" && sameFranchiseId) || (role === "admin" && adminFranchiseId)) {
+    if (resolvedFranchiseId && String(resolvedFranchiseId) === normalizedFranchiseId) {
       joinRoomIfNeeded(socket, `franchise:${normalizedFranchiseId}`, "join:franchise");
       writeSocketTraceLog("join:franchise", {
         socketId: socket.id,
@@ -1187,8 +1203,10 @@ app.set("io", io);
 
 // Schedule background jobs
 // scheduleOrderAutoRelease(io); // DISABLED: Orders should only be cancelled by customer or admin, not automatically
-scheduleDailyRevenue();
-scheduleMonthlyRevenue();
+if (require.main === module) {
+  scheduleDailyRevenue();
+  scheduleMonthlyRevenue();
+}
 
 // Error handling middleware (must be last)
 app.use(errorHandler);
@@ -1258,12 +1276,13 @@ const startServer = async () => {
       );
     }
     startAttendanceTaskSchedulers({ io, emitToCafe });
+    await startBackupSchedulerService();
   } catch (error) {
     process.exit(1);
   }
 };
 
-startServer();
+if (require.main === module) startServer();
 
 const closeRedisClients = async () => {
   isShuttingDown = true;

@@ -4,27 +4,17 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"No automated tests configured yet\"",
-    "test:integration": "node tests/integration/mobile-app-integration.test.js",
+    "test:integration": "NODE_ENV=test node --test tests/integration/inventory-isolation.test.js tests/integration/feature-framework.test.js tests/integration/inventory-feature-enforcement.test.js tests/integration/feature-socket.test.js",
     "verify:sync": "node tests/integration/component-sync-verification.js",
     "build": "echo \"Building backend...\" && node -c server.js && echo \"Build completed successfully\"",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "start:5001": "set PORT=5001&& node server.js",
     "dev:5001": "set PORT=5001&& nodemon server.js",
-    "seed:menu": "node scripts/seedMenu.js",
     "setup:admins": "node scripts/setup-atlas-admins.js",
     "verify:admins": "node scripts/verify-and-create-admins.js",
     "verify:menu": "node scripts/verify-menu-sync.js",
-    "sync:menu": "node scripts/force-menu-sync.js",
-    "cleanup:menu": "node scripts/cleanup-cart-menu.js",
-    "cleanup:cart-menu": "node scripts/cleanup-cart-menu-data.js",
-    "test:cart-cleanup": "node scripts/test-cart-menu-cleanup.js",
-    "fix:cart-menu": "node scripts/diagnose-and-fix-cart-menu.js",
-    "fix:tables": "node scripts/fix-table-database.js",
-    "fix:table-indexes": "node scripts/fix-table-indexes.js",
-    "reset:cart-operational": "node scripts/reset-cart-operational-data.js",
-    "migrate:codes": "node scripts/migrate-codes.js",
-    "fix:duplicate-codes": "node scripts/fix-duplicate-codes.js"
+    "sync:menu": "node scripts/force-menu-sync.js"
   },
   "keywords": [],
   "author": "",
@@ -35,6 +25,7 @@
     "@aws-sdk/lib-storage": "^3.893.0",
     "@aws-sdk/s3-request-presigner": "^3.893.0",
     "@socket.io/redis-adapter": "^8.3.0",
+    "archiver": "^8.0.0",
     "bcryptjs": "^3.0.2",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
@@ -53,7 +44,9 @@
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "mongodb-memory-server": "^11.3.0",
+    "nodemon": "^3.1.14",
+    "socket.io-client": "^4.8.4"
   },
   "overrides": {
     "form-data": ">=2.5.4",

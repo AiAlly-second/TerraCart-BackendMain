@@ -2,7 +2,22 @@ const Preparation = require("../../models/costing-v2/preparationModel");
 const Ingredient = require("../../models/costing-v2/ingredientModel");
 const InventoryTransaction = require("../../models/costing-v2/inventoryTransactionModel");
 const WeightedAverageService = require("../../services/costing-v2/weightedAverageService");
-const { validateOutletAccess, setOutletContext } = require("../../utils/costing-v2/accessControl");
+const { setOutletContext } = require("../../utils/costing-v2/accessControl");
+const { resolveOperationalScope, assertIngredientMutable, isIngredientAccessible, id } = require("../../utils/costing-v2/inventoryScope");
+
+const redactPreparationLines = async (preparation, scope) => {
+  const plain = preparation.toObject ? preparation.toObject() : { ...preparation };
+  const lines = [...(plain.issuedIngredients || []), ...(plain.returnedIngredients || [])];
+  const ingredientIds = lines.map(line => line.ingredientId).filter(Boolean);
+  const ingredients = await Ingredient.find({ _id: { $in: ingredientIds } })
+    .select("_id cartId franchiseId").lean();
+  const byId = new Map(ingredients.map(ingredient => [id(ingredient._id), ingredient]));
+  plain.issuedIngredients = (plain.issuedIngredients || []).filter(line =>
+    isIngredientAccessible({ ingredient: byId.get(id(line.ingredientId)), scope }));
+  plain.returnedIngredients = (plain.returnedIngredients || []).filter(line =>
+    isIngredientAccessible({ ingredient: byId.get(id(line.ingredientId)), scope }));
+  return plain;
+};
 
 /**
  * @route   GET /api/costing-v2/preparations
@@ -15,41 +30,31 @@ exports.getPreparations = async (req, res) => {
 
     if (status) filter.status = status;
 
-    // Apply role-based filtering
-    if (req.user.role === "admin") {
-      // Cart admin - only their own preparations
-      filter.cartId = req.user._id;
-    } else if (req.user.role === "franchise_admin") {
-      if (cartId) {
-        // Validate outlet belongs to franchise
-        if (!(await validateOutletAccess(req.user, cartId))) {
-          return res.status(403).json({
-            success: false,
-            message: "Access denied to this outlet",
-          });
-        }
-        filter.cartId = cartId;
-      } else {
-        // Get all outlets in franchise
-        const User = require("../../models/userModel");
-        const outlets = await User.find({
-          role: "admin",
-          franchiseId: req.user._id,
-          isActive: true,
-        }).select("_id");
-        filter.cartId = { $in: outlets.map((o) => o._id) };
-      }
-    } else if (req.user.role === "super_admin") {
-      if (cartId) {
-        filter.cartId = cartId;
-      }
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: cartId || null,
+      requireCart: !["franchise_admin", "super_admin"].includes(req.user.role),
+      operation: "preparation-read",
+    });
+    if (scope.cartId) {
+      filter.cartId = scope.cartId;
+      filter.franchiseId = scope.franchiseId;
+    } else if (scope.franchiseId) {
+      filter.franchiseId = scope.franchiseId;
     }
 
     const preparations = await Preparation.find(filter)
-      .populate("issuedIngredients.ingredientId", "name uom category")
-      .populate("returnedIngredients.ingredientId", "name uom category")
+      .populate("issuedIngredients.ingredientId", "name uom category cartId franchiseId")
+      .populate("returnedIngredients.ingredientId", "name uom category cartId franchiseId")
       .populate("createdBy", "name email")
       .sort({ startedAt: -1 });
+    if (scope.franchiseId) {
+      for (const preparation of preparations) {
+        preparation.issuedIngredients = preparation.issuedIngredients.filter(line =>
+          isIngredientAccessible({ ingredient: line.ingredientId, scope }));
+        preparation.returnedIngredients = preparation.returnedIngredients.filter(line =>
+          isIngredientAccessible({ ingredient: line.ingredientId, scope }));
+      }
+    }
 
     res.json({ success: true, data: preparations });
   } catch (error) {
@@ -76,11 +81,18 @@ exports.createPreparation = async (req, res) => {
       name,
       description: description || "",
       notes: notes || "",
+      cartId: req.body.cartId || null,
+      createdBy: req.user._id,
       status: "active",
       issuedIngredients: [],
       returnedIngredients: [],
     });
 
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: data.cartId, operation: "preparation-create",
+    });
+    data.cartId = scope.cartId;
+    data.franchiseId = scope.franchiseId;
     const preparation = new Preparation(data);
     await preparation.save();
 
@@ -116,12 +128,11 @@ exports.issueIngredient = async (req, res) => {
       });
     }
 
-    // Validate access
-    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied to this preparation",
-      });
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: preparation.cartId, operation: "issueIngredient",
+    });
+    if (id(preparation.franchiseId) !== id(scope.franchiseId)) {
+      return res.status(403).json({ success: false, message: "INVENTORY_SCOPE_MISMATCH" });
     }
 
     if (preparation.status !== "active") {
@@ -138,6 +149,8 @@ exports.issueIngredient = async (req, res) => {
         message: "Ingredient not found",
       });
     }
+
+    assertIngredientMutable(ingredient, scope, "preparation-issueIngredient");
 
     // Convert to base unit
     let qtyInBaseUnit;
@@ -199,7 +212,7 @@ exports.issueIngredient = async (req, res) => {
     res.json({
       success: true,
       data: {
-        preparation,
+        preparation: await redactPreparationLines(preparation, scope),
         transaction: transaction,
         costAllocated: consumeResult.costAllocated,
       },
@@ -233,12 +246,11 @@ exports.returnIngredient = async (req, res) => {
       });
     }
 
-    // Validate access
-    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied to this preparation",
-      });
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: preparation.cartId, operation: "returnIngredient",
+    });
+    if (id(preparation.franchiseId) !== id(scope.franchiseId)) {
+      return res.status(403).json({ success: false, message: "INVENTORY_SCOPE_MISMATCH" });
     }
 
     if (preparation.status !== "active") {
@@ -267,6 +279,8 @@ exports.returnIngredient = async (req, res) => {
         message: "Ingredient not found",
       });
     }
+
+    assertIngredientMutable(ingredient, scope, "preparation-returnIngredient");
 
     // Convert to base unit
     let qtyInBaseUnit;
@@ -343,7 +357,7 @@ exports.returnIngredient = async (req, res) => {
     res.json({
       success: true,
       data: {
-        preparation,
+        preparation: await redactPreparationLines(preparation, scope),
         transaction: returnTransaction,
         costAllocated: returnResult.costAllocated,
       },
@@ -369,12 +383,11 @@ exports.updatePreparation = async (req, res) => {
       });
     }
 
-    // Validate access
-    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied to this preparation",
-      });
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: preparation.cartId, operation: "updatePreparation",
+    });
+    if (id(preparation.franchiseId) !== id(scope.franchiseId)) {
+      return res.status(403).json({ success: false, message: "INVENTORY_SCOPE_MISMATCH" });
     }
 
     if (status) {
@@ -389,10 +402,10 @@ exports.updatePreparation = async (req, res) => {
     }
 
     await preparation.save();
-    await preparation.populate("issuedIngredients.ingredientId", "name uom category");
-    await preparation.populate("returnedIngredients.ingredientId", "name uom category");
+    await preparation.populate("issuedIngredients.ingredientId", "name uom category cartId franchiseId");
+    await preparation.populate("returnedIngredients.ingredientId", "name uom category cartId franchiseId");
 
-    res.json({ success: true, data: preparation });
+    res.json({ success: true, data: await redactPreparationLines(preparation, scope) });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
@@ -413,12 +426,11 @@ exports.deletePreparation = async (req, res) => {
       });
     }
 
-    // Validate access
-    if (req.user.role === "admin" && preparation.cartId.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied to this preparation",
-      });
+    const scope = await resolveOperationalScope(req.user, {
+      cartId: preparation.cartId, operation: "deletePreparation",
+    });
+    if (id(preparation.franchiseId) !== id(scope.franchiseId)) {
+      return res.status(403).json({ success: false, message: "INVENTORY_SCOPE_MISMATCH" });
     }
 
     // Can only delete if cancelled or no ingredients issued

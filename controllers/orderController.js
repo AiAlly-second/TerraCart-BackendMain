@@ -13,8 +13,10 @@ const { triggerKotPrintJob } = require("./networkPrinterController");
 
 const Cart = require("../models/cartModel");
 const {
-  consumeIngredientsForOrder,
-} = require("../services/costing-v2/orderConsumptionService");
+  inventoryStateForNewOrder,
+  maybeProcessInitialInventory,
+  maybeProcessIncrementalInventory,
+} = require("../services/costing-v2/orderInventoryCoordinator");
 const {
   notifyNewOrder,
   notifyOrderReady,
@@ -2837,31 +2839,6 @@ const shouldReleaseTableForStatus = (status, paymentStatus) => {
 const isReadyStatus = (status) =>
   normalizeOrderStatus(status, ORDER_STATUSES.NEW) === ORDER_STATUSES.READY;
 
-const resetInventoryDeductionFlag = async (orderId) => {
-  if (!orderId) return;
-  try {
-    await Order.findByIdAndUpdate(orderId, {
-      inventoryDeducted: false,
-      inventoryDeductedAt: null,
-    });
-  } catch (err) {
-    console.error(
-      `[COSTING] Failed to reset inventoryDeducted for order ${orderId}:`,
-      err.message,
-    );
-  }
-};
-
-const shouldResetInventoryDeduction = (result) => {
-  if (!result) return true;
-  if (result.success || result.alreadyProcessed) return false;
-  const consumedCount = Array.isArray(result.summary?.ingredientsConsumed)
-    ? result.summary.ingredientsConsumed.length
-    : 0;
-  const processedCount = Number(result.summary?.itemsProcessed || 0);
-  return consumedCount === 0 && processedCount === 0;
-};
-
 // ---------------- CREATE ORDER ----------------
 async function releaseTableForOrder(order, io, emitToCafe = null) {
   try {
@@ -3992,6 +3969,7 @@ const createOrder = async (req, res) => {
 
     let order;
     try {
+      Object.assign(orderData, await inventoryStateForNewOrder(orderData));
       order = await Order.create(orderData);
       console.log("[ORDER] Order created successfully:", order._id);
     } catch (createError) {
@@ -4781,29 +4759,22 @@ const addKot = async (req, res) => {
       );
     }
 
-    // If inventory was already deducted earlier, consume only incremental KOT/add-on deltas now.
-    if (order.inventoryDeducted) {
+    // Incremental KOT delta: only relevant for an order that already had its
+    // initial deduction. The coordinator re-checks the Inventory feature on
+    // every call, so a KOT added while disabled is skipped and permanently
+    // marked, even if Inventory was on for this order's initial deduction.
+    {
       const userId = req.user
         ? req.user._id
         : order.cartId && (order.cartId._id || order.cartId);
-      if (userId) {
-        consumeIngredientsForOrder(order, userId)
-          .then((consumptionResult) => {
-            if (consumptionResult?.success || consumptionResult?.alreadyProcessed) {
-              return;
-            }
-            console.warn(
-              `[COSTING] Incremental consumption after addKot had issues for order ${order._id}:`,
-              consumptionResult?.message || consumptionResult?.error || "Unknown error",
-            );
-          })
-          .catch((consumptionError) => {
-            console.warn(
-              `[COSTING] Incremental consumption failed after addKot for order ${order._id}:`,
-              consumptionError?.message || consumptionError,
-            );
-          });
-      }
+      maybeProcessIncrementalInventory({ order, userId, trigger: "add_kot" }).catch(
+        (coordinatorError) => {
+          console.warn(
+            `[COSTING] Incremental consumption failed after addKot for order ${order._id}:`,
+            coordinatorError?.message || coordinatorError,
+          );
+        },
+      );
     }
 
     // Update customer record for takeaway orders (non-blocking)
@@ -4987,33 +4958,29 @@ const finalizeOrder = async (req, res) => {
       isPaid: order.paymentStatus === PAYMENT_STATUSES.PAID,
     });
 
-    const needsFallbackConsumption = !order.inventoryDeducted;
-    if (needsFallbackConsumption) {
-      order.inventoryDeducted = true;
-      order.inventoryDeductedAt = new Date();
-    }
     await order.save();
 
-    if (needsFallbackConsumption) {
-      const userId = req.user
-        ? req.user._id
-        : order.cartId && (order.cartId._id || order.cartId);
-      if (userId) {
-        try {
-          const result = await consumeIngredientsForOrder(order, userId);
-          if (!result.success && shouldResetInventoryDeduction(result)) {
-            await resetInventoryDeductionFlag(order._id);
-          }
-        } catch (err) {
-          console.error(
-            `[COSTING] Finalize consumption error for order ${order._id}:`,
-            err,
-          );
-          await resetInventoryDeductionFlag(order._id);
-        }
-      } else {
-        await resetInventoryDeductionFlag(order._id);
-      }
+    const finalizeUserId = req.user
+      ? req.user._id
+      : order.cartId && (order.cartId._id || order.cartId);
+    await maybeProcessInitialInventory({
+      order, userId: finalizeUserId, trigger: "order_finalize",
+    }).catch((coordinatorError) => {
+      console.error(
+        `[COSTING] Finalize consumption error for order ${order._id}:`,
+        coordinatorError,
+      );
+    });
+    // The coordinator records the outcome directly in Mongo; refresh the
+    // in-memory fields so the response payload below reflects it accurately.
+    const refreshedInventoryFields = await Order.findById(order._id)
+      .select("inventoryDeducted inventoryDeductedAt inventoryProcessingState inventorySkippedAt")
+      .lean();
+    if (refreshedInventoryFields) {
+      order.inventoryDeducted = refreshedInventoryFields.inventoryDeducted;
+      order.inventoryDeductedAt = refreshedInventoryFields.inventoryDeductedAt;
+      order.inventoryProcessingState = refreshedInventoryFields.inventoryProcessingState;
+      order.inventorySkippedAt = refreshedInventoryFields.inventorySkippedAt;
     }
 
     const io = req.app.get("io");
@@ -6002,19 +5969,20 @@ const updateOrderAddons = async (req, res) => {
     order.markModified("selectedAddons");
     await order.save();
 
-    // If inventory was already deducted, consume only new add-on quantity delta now.
-    if (order.inventoryDeducted) {
+    // Incremental add-on delta: same rule as addKot - re-checked every time,
+    // regardless of whether the order's initial deduction happened while on.
+    {
       const userId = req.user
         ? req.user._id
         : order.cartId && (order.cartId._id || order.cartId);
-      if (userId) {
-        consumeIngredientsForOrder(order, userId).catch((consumptionError) => {
+      maybeProcessIncrementalInventory({ order, userId, trigger: "update_addons" }).catch(
+        (coordinatorError) => {
           console.warn(
             `[COSTING] Incremental add-on consumption failed for order ${order._id}:`,
-            consumptionError?.message || consumptionError,
+            coordinatorError?.message || coordinatorError,
           );
-        });
-      }
+        },
+      );
     }
 
     // Emit socket event to cafe room
@@ -6348,16 +6316,13 @@ const updateOrderStatus = async (req, res) => {
     }
 
     const isPreparingStatus = requestedStatus === ORDER_STATUSES.PREPARING;
-    const needsInventoryDeduction = isPreparingStatus && !order.inventoryDeducted;
     const isCompletionOrReady =
       requestedStatus === ORDER_STATUSES.READY ||
       requestedStatus === ORDER_STATUSES.COMPLETED;
-    const needsFallbackConsumption = isCompletionOrReady && !order.inventoryDeducted;
-
-    if (needsInventoryDeduction || needsFallbackConsumption) {
-      updateData.inventoryDeducted = true;
-      updateData.inventoryDeductedAt = new Date();
-    }
+    // Inventory fields are never set optimistically here. The coordinator
+    // decides eligibility (not yet deducted, not permanently skipped) and
+    // records the real outcome once consumption actually finishes.
+    const mayTriggerInventory = isPreparingStatus || isCompletionOrReady;
 
     applyLifecycleFields(updateData, {
       status: updateData.status,
@@ -6381,13 +6346,16 @@ const updateOrderStatus = async (req, res) => {
       ? req.user._id
       : updatedOrder.cartId && (updatedOrder.cartId._id || updatedOrder.cartId);
 
-    if ((needsInventoryDeduction || needsFallbackConsumption) && userId) {
-      consumeIngredientsForOrder(updatedOrder, userId).catch(async (consumptionError) => {
+    if (mayTriggerInventory && userId) {
+      maybeProcessInitialInventory({
+        order: updatedOrder,
+        userId,
+        trigger: `order_status_${requestedStatus.toLowerCase()}`,
+      }).catch((coordinatorError) => {
         console.error(
-          `[COSTING] Error consuming ingredients for order ${updatedOrder._id}:`,
-          consumptionError,
+          `[COSTING] Inventory coordinator error for order ${updatedOrder._id}:`,
+          coordinatorError,
         );
-        await resetInventoryDeductionFlag(updatedOrder._id);
       });
     }
 
@@ -6763,57 +6731,24 @@ const confirmPaymentByCustomer = async (req, res) => {
       isPaid: true,
     });
 
-    // Fallback: trigger inventory consumption if order reached paid without prior deduction.
-    const needsFallbackConsumption = !order.inventoryDeducted;
-    if (needsFallbackConsumption) {
-      order.inventoryDeducted = true;
-      order.inventoryDeductedAt = new Date();
-    }
     await order.save();
 
-    // Run consumption when customer confirms payment (no req.user in this flow)
-    if (needsFallbackConsumption) {
+    // Fallback: trigger inventory consumption if order reached paid without
+    // prior deduction. Fire-and-forget, same as before - the coordinator
+    // records the real outcome once it knows it (no req.user in this flow).
+    {
       const userId =
         req.user && req.user._id
           ? req.user._id
           : order.cartId && (order.cartId._id || order.cartId);
-      if (userId) {
-        console.log(
-          `[COSTING] Fallback: Order ${order._id} paid via customer confirm - triggering consumption`,
+      maybeProcessInitialInventory({
+        order, userId, trigger: "payment_confirm_customer",
+      }).catch((coordinatorError) => {
+        console.error(
+          `[COSTING] Fallback consumption error for order ${order._id}:`,
+          coordinatorError,
         );
-        consumeIngredientsForOrder(order, userId)
-          .then(async (consumptionResult) => {
-            if (consumptionResult.success) {
-              console.log(
-                `[COSTING] Fallback consumption success for order ${order._id}`,
-              );
-            } else {
-              const isBenign =
-                consumptionResult.alreadyProcessed ||
-                consumptionResult.message?.includes("No new items");
-              if (!isBenign && consumptionResult.summary?.errors) {
-                consumptionResult.summary.errors.forEach((e) =>
-                  console.warn(`[COSTING] ${e.item}: ${e.error}`),
-                );
-              }
-              if (!isBenign && shouldResetInventoryDeduction(consumptionResult)) {
-                await resetInventoryDeductionFlag(order._id);
-              }
-            }
-          })
-          .catch(async (err) => {
-            console.error(
-              `[COSTING] Fallback consumption error for order ${order._id}:`,
-              err,
-            );
-            await resetInventoryDeductionFlag(order._id);
-          });
-      } else {
-        console.warn(
-          `[COSTING] Skipping fallback consumption for order ${order._id}: no userId (req.user or order.cartId)`,
-        );
-        await resetInventoryDeductionFlag(order._id);
-      }
+      });
     }
 
     // Create or update payment record.
@@ -7924,4 +7859,3 @@ module.exports = {
   completePrintJob,
   getPendingKots,
 };
-

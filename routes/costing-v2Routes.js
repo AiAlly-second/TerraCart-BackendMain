@@ -73,7 +73,9 @@ const {
 } = require("../controllers/costing-v2/costingController");
 const { protect } = require("../middleware/authMiddleware");
 const { authorize } = require("../middleware/authMiddleware");
+const { requireInventoryEnabled } = require("../middleware/inventoryFeatureMiddleware");
 const { getStorageCallback } = require("../config/uploadConfig");
+const guardInventory = requireInventoryEnabled({ operation: "costing-v2-inventory" });
 
 const uploadInvoiceImage = multer({
   storage: getStorageCallback("invoices"),
@@ -197,14 +199,18 @@ router.delete(
   authorize(["super_admin", "franchise_admin", "admin"]),
   deleteIngredient
 );
+// Live FIFO stock state - guarded. Ingredient identity CRUD above is not:
+// it also defines BOM/recipe data that must keep working while Inventory is off.
 router.get(
   "/ingredients/:id/fifo-layers",
   authorize(["super_admin", "franchise_admin", "admin"]),
+  guardInventory,
   getFIFOLayers
 );
 router.get(
   "/ingredients/debug",
   authorize(["super_admin", "admin"]),
+  guardInventory,
   debugIngredients
 );
 
@@ -219,9 +225,12 @@ router.post(
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
   createPurchase
 );
+// Creating a purchase order is planning-only (no stock movement); receiving
+// it is the live-stock operation and is guarded.
 router.post(
   "/purchases/:id/receive",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   receivePurchase
 );
 
@@ -236,37 +245,44 @@ router.get(
     "manager",
     "cook",
   ]),
+  guardInventory,
   getCostingInventory
 );
 router.post(
   "/inventory/consume",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   consumeInventory
 );
 router.post(
   "/inventory/return",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   returnToInventory
 );
 router.post(
   "/inventory/direct-purchase",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   handleInventoryInvoiceUpload,
   directPurchase
 );
 router.get(
   "/inventory/transactions",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   getInventoryTransactions
 );
 router.get(
   "/diagnose-consumption",
   authorize(["super_admin", "franchise_admin", "admin"]),
+  guardInventory,
   diagnoseConsumption
 );
 router.get(
   "/low-stock",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   getLowStock
 );
 
@@ -274,11 +290,13 @@ router.get(
 router.post(
   "/waste",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   recordWaste
 );
 router.get(
   "/waste",
   authorize(["super_admin", "franchise_admin", "admin", "manager"]),
+  guardInventory,
   getWaste
 );
 

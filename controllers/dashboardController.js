@@ -12,6 +12,23 @@ const {
   PAYMENT_STATUSES,
 } = require("../utils/orderContract");
 const { getISTDateRange } = require("../utils/istDateTime");
+const featureService = require("../services/featureService");
+const { resolveCartScope } = require("../utils/costing-v2/inventoryScope");
+
+// Resolve whether Inventory is enabled for this cart's franchise. Never lets
+// a resolution failure throw - the dashboard must stay up even when
+// Inventory feature configuration cannot be determined.
+const resolveDashboardInventoryEnabled = async (cafeId) => {
+  try {
+    const scope = await resolveCartScope(cafeId, { operation: "dashboard-inventory-check" });
+    return await featureService.isFeatureEnabled({
+      featureKey: featureService.INVENTORY,
+      franchiseAdminId: scope.franchiseId,
+    });
+  } catch (_error) {
+    return false;
+  }
+};
 
 const normalizeIdString = (value) => {
   if (!value) return "";
@@ -281,6 +298,24 @@ exports.getDashboardStats = async (req, res) => {
     const preparingKotStatuses = [ORDER_STATUSES.PREPARING];
     const readyKotStatuses = [ORDER_STATUSES.READY];
 
+    // Inventory OFF: never run the legacy InventoryItem query. An Inventory
+    // collection/query problem must not be able to take down the rest of
+    // this endpoint's core operational metrics.
+    const inventoryEnabled = await resolveDashboardInventoryEnabled(cafeId);
+    const lowStockItemsPromise = inventoryEnabled
+      ? InventoryItem.countDocuments({
+        $and: [
+          buildCartScopeWithLegacyFallback(cafeId),
+          {
+            $or: [
+              { quantity: { $lt: 10 } }, // Use 'quantity' field, not 'stockQuantity'
+              { quantity: { $exists: false } },
+            ]
+          }
+        ]
+      })
+      : Promise.resolve(0);
+
     // Run all queries in parallel for faster response
     const [
       activeOrders,
@@ -343,20 +378,9 @@ exports.getDashboardStats = async (req, res) => {
         paymentStatus: PAYMENT_STATUSES.PAID,
       }),
 
-      // Low stock items (threshold can be configured)
-      // InventoryItem model uses cartId. Fall back to cafeId only for legacy docs
-      // that still do not have cartId.
-      InventoryItem.countDocuments({
-        $and: [
-          buildCartScopeWithLegacyFallback(cafeId),
-          {
-            $or: [
-              { quantity: { $lt: 10 } }, // Use 'quantity' field, not 'stockQuantity'
-              { quantity: { $exists: false } },
-            ]
-          }
-        ]
-      }),
+      // Low stock items (threshold can be configured). Skipped entirely
+      // (resolves to 0) when Inventory is disabled for this franchise.
+      lowStockItemsPromise,
 
       // Today's attendance count
       // EmployeeAttendance uses cartId. Fall back to cafeId only for legacy docs

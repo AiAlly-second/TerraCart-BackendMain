@@ -3,6 +3,8 @@ const fs = require("fs");
 const path = require("path");
 const Purchase = require("./purchaseModel");
 const InventoryTransactionV2 = require("./inventoryTransactionModel");
+const User = require("../userModel");
+const { buildIngredientScopeQuery } = require("../../utils/costing-v2/inventoryScope");
 
 // Helper function for logging
 const logDebug = (location, message, data, hypothesisId) => {
@@ -153,13 +155,29 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
   );
   // #endregion
   const Ingredient = mongoose.model("IngredientV2");
+  const effectiveCartId = cartId || this.cartId || null;
+  const ingredientScope = this.franchiseId
+    ? buildIngredientScopeQuery({
+      cartId: effectiveCartId,
+      franchiseId: this.franchiseId,
+      role: effectiveCartId ? "admin" : "franchise_admin",
+    })
+    : { cartId: null, franchiseId: null };
+  const franchiseCartIds = !effectiveCartId && this.franchiseId
+    ? (await User.find({ role: "admin", franchiseId: this.franchiseId }).select("_id").lean()).map(user => user._id)
+    : [];
+  const transactionScope = effectiveCartId
+    ? { cartId: effectiveCartId }
+    : { cartId: { $in: franchiseCartIds } };
   let totalCost = 0;
   let hasAnyValidCosts = false; // Track if at least one ingredient has valid costs
   let ingredientsWithoutPurchases = []; // Track ingredients without purchases
 
   for (const item of this.ingredients) {
     // Refresh ingredient to get latest cost (important after purchases)
-    const ingredient = await Ingredient.findById(item.ingredientId);
+    const ingredient = await Ingredient.findOne({
+      $and: [{ _id: item.ingredientId }, ingredientScope],
+    });
     if (!ingredient) {
       ingredientsWithoutPurchases.push(
         item.ingredientId?.toString() || "unknown"
@@ -202,6 +220,7 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       // Check if ingredient has any purchase transactions (global check)
       const anyPurchaseTransaction = await InventoryTransactionV2.findOne({
         ingredientId: item.ingredientId,
+        ...transactionScope,
         type: "IN",
         refType: "purchase",
       });
@@ -366,6 +385,7 @@ recipeSchema.methods.calculateCost = async function (cartId = null) {
       // If cartId is null (super admin viewing global), use any purchase
       const purchaseFilter = {
         ingredientId: item.ingredientId,
+        ...transactionScope,
         type: "IN",
         refType: "purchase",
       };
