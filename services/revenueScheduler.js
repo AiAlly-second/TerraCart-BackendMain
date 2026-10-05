@@ -1,3 +1,4 @@
+const {businessDayBoundary, businessMonthRange, dateKeyOffset, getBusinessDateKey, businessParts} = require('../utils/businessTime');
 const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
 const User = require("../models/userModel");
@@ -22,12 +23,9 @@ function calculateOrderRevenue(orders) {
 // Calculate daily revenue (runs at end of each day)
 async function calculateDailyRevenue() {
   try {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    yesterday.setHours(0, 0, 0, 0);
-    
-    const endDate = new Date(yesterday);
-    endDate.setHours(23, 59, 59, 999);
+    const key = dateKeyOffset(-1);
+    const yesterday = businessDayBoundary(key);
+    const endDate = businessDayBoundary(key, true);
 
     // Get all settled orders for yesterday.
     const orders = await Order.find({
@@ -141,7 +139,7 @@ async function calculateDailyRevenue() {
       }
     );
 
-    console.log(`✅ Daily revenue calculated for ${yesterday.toISOString().split('T')[0]}: ₹${totalRevenue}`);
+    console.log(`✅ Daily revenue calculated for ${getBusinessDateKey(yesterday)}: ₹${totalRevenue}`);
   } catch (error) {
     console.error("Error calculating daily revenue:", error);
   }
@@ -150,13 +148,10 @@ async function calculateDailyRevenue() {
 // Calculate monthly revenue (runs at end of each month)
 async function calculateMonthlyRevenue() {
   try {
-    const lastMonth = new Date();
-    lastMonth.setMonth(lastMonth.getMonth() - 1);
-    lastMonth.setDate(1);
-    lastMonth.setHours(0, 0, 0, 0);
-
-    const endDate = new Date(lastMonth.getFullYear(), lastMonth.getMonth() + 1, 0);
-    endDate.setHours(23, 59, 59, 999);
+    const current = businessParts(new Date());
+    const range = businessMonthRange(current.year, current.month - 1);
+    const lastMonth = range.startUTC;
+    const endDate = new Date(range.endUTC.getTime() - 1);
 
     // Get all settled orders for last month.
     const orders = await Order.find({
@@ -270,7 +265,7 @@ async function calculateMonthlyRevenue() {
       }
     );
 
-    console.log(`✅ Monthly revenue calculated for ${lastMonth.toISOString().split('T')[0]}: ₹${totalRevenue}`);
+    console.log(`✅ Monthly revenue calculated for ${getBusinessDateKey(lastMonth)}: ₹${totalRevenue}`);
   } catch (error) {
     console.error("Error calculating monthly revenue:", error);
   }
@@ -280,8 +275,7 @@ async function calculateMonthlyRevenue() {
 const scheduleDailyRevenue = () => {
   const checkAndRunDaily = async () => {
     const now = new Date();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
+    const {hour: hours, minute: minutes} = businessParts(now);
     
     // Run at 11:59 PM (23:59)
     if (hours === 23 && minutes === 59) {
@@ -298,9 +292,8 @@ const scheduleDailyRevenue = () => {
 const scheduleMonthlyRevenue = () => {
   const checkAndRunMonthly = async () => {
     const now = new Date();
-    const day = now.getDate();
-    const hours = now.getHours();
-    const minutes = now.getMinutes();
+    const day = businessParts(now).day;
+    const {hour: hours, minute: minutes} = businessParts(now);
     
     // Run on 1st of month at 12:01 AM (00:01)
     if (day === 1 && hours === 0 && minutes === 1) {

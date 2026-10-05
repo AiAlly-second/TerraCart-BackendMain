@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { attendanceDurations, closeBreakUpdate } = require('../utils/attendanceDuration');
 const EmployeeAttendance = require('../models/employeeAttendanceModel');
 const Employee = require('../models/employeeModel');
 const User = require('../models/userModel');
@@ -12,6 +13,7 @@ const {
   getISTDateKeyOffset,
   getISTDateRangeFromDateKey,
 } = require('../utils/istDateTime');
+const {attendanceDayFilter} = require('../utils/businessTime');
 
 let midnightTimer = null;
 let schedulerStarted = false;
@@ -24,27 +26,16 @@ const toObjectId = (value) => {
   return new mongoose.Types.ObjectId(String(value));
 };
 
-const buildAutoCheckoutQuery = (dateKey, range) => ({
-  $and: [
-    {
-      $or: [
-        { attendanceDateIST: dateKey },
-        { date: { $gte: range.startUTC, $lt: range.endUTC } },
-      ],
-    },
-    { 'checkIn.time': { $ne: null } },
-    { isCheckedOut: { $ne: true } },
-    { autoCheckedOut: { $ne: true } },
-    {
-      $or: [{ 'checkOut.time': null }, { 'checkOut.time': { $exists: false } }],
-    },
-  ],
+const buildAutoCheckoutQuery = (dateKey) => ({
+  ...attendanceDayFilter(dateKey),
+  'checkIn.time': {$ne: null}, isCheckedOut: {$ne: true},
+  autoCheckedOut: {$ne: true}, 'checkOut.time': null,
 });
 
 const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
   const openAttendances = await EmployeeAttendance.find(buildAutoCheckoutQuery(dateKey, range))
     .select(
-      '_id employeeId cartId cafeId checkIn breakDuration attendanceDateIST attendanceStatus checkInStatus status'
+      '_id employeeId cartId cafeId checkIn breakDuration breaks breakStart isOnBreak __v attendanceDateIST attendanceStatus checkInStatus status'
     )
     .lean();
 
@@ -63,9 +54,8 @@ const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
     .lean();
   const employeeMap = new Map(employees.map((employee) => [String(employee._id), employee]));
 
-  const updateOperations = [];
+  let autoCheckedOutCount = 0;
   const managerWarningByCart = new Map();
-  const now = new Date();
 
   for (const attendance of openAttendances) {
     const employee = employeeMap.get(String(attendance.employeeId));
@@ -78,11 +68,6 @@ const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
       continue;
     }
 
-    const checkoutTime = now;
-    const totalDurationMinutes = Math.max(0, Math.floor((checkoutTime - checkInTime) / (1000 * 60)));
-    const breakMinutes = Number(attendance.breakDuration || 0);
-    const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
-
     const pendingSummary = await getPendingTaskSummaryForEmployeeDate({
       employeeId: attendance.employeeId,
       dateKey,
@@ -91,34 +76,28 @@ const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
     const cartId = attendance.cartId || attendance.cafeId || employee.cartId || employee.cafeId || null;
     const pendingCount = Number(pendingSummary.totalPendingTaskCount || 0);
 
-    updateOperations.push({
-      updateOne: {
-        filter: { _id: attendance._id },
-        update: {
-          $set: {
-            attendanceDateIST: dateKey,
-            checkOut: {
-              time: checkoutTime,
-              location: 'AUTO_CHECKOUT_MIDNIGHT',
-              notes: 'Auto checkout at midnight (IST scheduler).',
-            },
-            totalWorkingMinutes,
-            workingHours: Number((totalWorkingMinutes / 60).toFixed(2)),
-            overtime: 0,
-            isOnBreak: false,
-            breakStart: null,
-            attendanceStatus: 'checked_out',
-            checkInStatus: 'checked_out',
-            canTakeBreak: false,
-            isCheckedOut: true,
-            autoCheckedOut: true,
-            status: 'auto_closed',
-            pendingTasksAtCheckout: pendingCount,
-            managerOverrideUsed: false,
-          },
-        },
-      },
-    });
+    let snapshot = attendance;
+    let confirmed = null;
+    for (let attempt = 0; attempt < 3 && snapshot; attempt++) {
+      if (snapshot.isCheckedOut || snapshot.checkOut?.time) break;
+      const checkoutTime = new Date();
+      const totalWorkingMinutes = Math.floor(attendanceDurations(snapshot, checkoutTime).workingMs / 60000);
+      confirmed = await EmployeeAttendance.findOneAndUpdate({
+        _id: snapshot._id, __v: snapshot.__v ?? {$exists: false},
+        'checkOut.time': null, isCheckedOut: {$ne: true},
+      }, {$set: {
+        ...closeBreakUpdate(snapshot, checkoutTime), attendanceDateIST: dateKey,
+        checkOut: {time: checkoutTime, location: 'AUTO_CHECKOUT_MIDNIGHT', notes: 'Auto checkout at midnight (business timezone scheduler).'},
+        totalWorkingMinutes, workingHours: Number((totalWorkingMinutes / 60).toFixed(2)),
+        overtime: 0, isOnBreak: false, breakStart: null, attendanceStatus: 'checked_out',
+        checkInStatus: 'checked_out', canTakeBreak: false, isCheckedOut: true,
+        autoCheckedOut: true, status: 'auto_closed', pendingTasksAtCheckout: pendingCount, managerOverrideUsed: false,
+      }, $inc: {__v: 1}}, {new: true}).lean();
+      if (confirmed) break;
+      snapshot = await EmployeeAttendance.findById(attendance._id).lean();
+    }
+    if (!confirmed) continue;
+    autoCheckedOutCount++;
 
     if (pendingCount > 0) {
       const cartKey = toSafeString(cartId);
@@ -135,24 +114,9 @@ const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
     }
 
     if (io && emitToCafe && cartId) {
-      emitToCafe(io, String(cartId), 'attendance:checked_out', {
-        _id: attendance._id,
-        employeeId: attendance.employeeId,
-        attendanceStatus: 'checked_out',
-        checkInStatus: 'checked_out',
-        isCheckedOut: true,
-        autoCheckedOut: true,
-        pendingTasksAtCheckout: pendingCount,
-        checkOut: {
-          time: checkoutTime,
-          location: 'AUTO_CHECKOUT_MIDNIGHT',
-        },
-      });
+      emitToCafe(io, String(cartId), 'attendance:checked_out', confirmed);
+      emitToCafe(io, String(cartId), 'attendance:updated', confirmed);
     }
-  }
-
-  if (updateOperations.length) {
-    await EmployeeAttendance.bulkWrite(updateOperations, { ordered: false });
   }
 
   let managerNotificationsSent = 0;
@@ -200,7 +164,7 @@ const runAutoCheckoutForDate = async ({ dateKey, range, io, emitToCafe }) => {
   }
 
   return {
-    autoCheckedOutCount: updateOperations.length,
+    autoCheckedOutCount,
     managerNotificationsSent,
     pendingTaskWarnings,
     dateKey,
@@ -282,4 +246,5 @@ module.exports = {
   startAttendanceTaskSchedulers,
   stopAttendanceTaskSchedulers,
   runMidnightAttendanceAndTaskJobs,
+  runAutoCheckoutForDate,
 };

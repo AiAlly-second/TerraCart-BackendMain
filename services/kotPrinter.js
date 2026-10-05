@@ -1,4 +1,5 @@
 const escpos = require("escpos");
+const { DEFAULT_BUSINESS_TIMEZONE } = require("../utils/businessTime");
 const escposNetwork = require("escpos-network");
 
 /**
@@ -166,7 +167,7 @@ function formatKOT(order, kot, kotIndex = 0) {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
-    timeZone: "Asia/Kolkata",
+    timeZone: DEFAULT_BUSINESS_TIMEZONE,
   });
 
   lines.push(outletName || "TERRA CART");

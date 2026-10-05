@@ -1,0 +1,37 @@
+{
+  "kind": "backend",
+  "repository": "AiAlly-second/TerraCart-BackendMain",
+  "node": "22.23.3",
+  "workflow": "terracart-cicd.yml",
+  "artifact_name": "terracart-backend",
+  "reviewed_scripts": {
+    "build": "echo \"Building backend...\" && node -c server.js && echo \"Build completed successfully\""
+  },
+  "safe_tests": [
+    "tests/business-time.test.js",
+    "tests/app-update.test.js",
+    "tests/android-release.test.mjs",
+    "tests/integration/inventory-isolation.test.js",
+    "tests/integration/feature-framework.test.js",
+    "tests/integration/inventory-feature-enforcement.test.js",
+    "tests/integration/feature-socket.test.js",
+    "tests/integration/work-attendance.test.js",
+    "tests/integration/get-me-employee-id.test.js",
+    "tests/integration/schedule-persistence.test.js"
+  ],
+  "runtime_paths": [
+    "server.js",
+    "package.json",
+    "package-lock.json",
+    "ecosystem.config.js",
+    "config",
+    "controllers",
+    "logging",
+    "middleware",
+    "models",
+    "routes",
+    "services",
+    "utils",
+    "data"
+  ]
+}

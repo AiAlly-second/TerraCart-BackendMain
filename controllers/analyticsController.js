@@ -1,3 +1,4 @@
+const {businessDayBoundary, dateKeyOffset, getBusinessDateKey, businessParts, businessDateTime, attendanceDateKey} = require('../utils/businessTime');
 const Order = require("../models/orderModel");
 const { MenuItem } = require("../models/menuItemModel");
 const Employee = require("../models/employeeModel");
@@ -41,53 +42,23 @@ const buildHierarchyQuery = (user) => {
 
 // Helper function to parse date range from query params
 const parseDateRange = (req) => {
-  const { startDate, endDate, period } = req.query;
-  
-  let start, end;
-  
+  const {startDate, endDate, period} = req.query;
+  const now = new Date();
+  let start = businessDayBoundary(startDate || dateKeyOffset(-30));
+  let end = endDate ? businessDayBoundary(endDate, true) : now;
   if (period) {
-    // Predefined periods
-    end = new Date();
-    switch (period) {
-      case "today":
-        start = new Date();
-        start.setHours(0, 0, 0, 0);
-        break;
-      case "yesterday":
-        start = new Date();
-        start.setDate(start.getDate() - 1);
-        start.setHours(0, 0, 0, 0);
-        end = new Date();
-        end.setDate(end.getDate() - 1);
-        end.setHours(23, 59, 59, 999);
-        break;
-      case "week":
-        start = new Date();
-        start.setDate(start.getDate() - 7);
-        break;
-      case "month":
-        start = new Date();
-        start.setMonth(start.getMonth() - 1);
-        break;
-      case "quarter":
-        start = new Date();
-        start.setMonth(start.getMonth() - 3);
-        break;
-      case "year":
-        start = new Date();
-        start.setFullYear(start.getFullYear() - 1);
-        break;
-      default:
-        start = new Date();
-        start.setDate(start.getDate() - 30); // Default to last 30 days
+    if (period === 'today') start = businessDayBoundary(now);
+    else if (period === 'yesterday') {start = businessDayBoundary(dateKeyOffset(-1)); end = businessDayBoundary(dateKeyOffset(-1), true);}
+    else if (period === 'week') start = businessDayBoundary(dateKeyOffset(-7));
+    else if (['month','quarter','year'].includes(period)) {
+      const p = businessParts(now);
+      const date = new Date(Date.UTC(p.year, p.month - 1, p.day));
+      if(period === 'year') date.setUTCFullYear(date.getUTCFullYear()-1);
+      else date.setUTCMonth(date.getUTCMonth() - (period === 'quarter' ? 3 : 1));
+      start = businessDateTime(date.toISOString().slice(0,10), `${String(p.hour).padStart(2,'0')}:${String(p.minute).padStart(2,'0')}`);
     }
-  } else {
-    // Custom date range
-    start = startDate ? new Date(startDate) : new Date(new Date().setDate(new Date().getDate() - 30));
-    end = endDate ? new Date(endDate) : new Date();
   }
-  
-  return { start, end };
+  return {start,end};
 };
 
 // GET /api/analytics/summary - Overall analytics summary
@@ -130,10 +101,8 @@ exports.getAnalyticsSummary = async (req, res) => {
     const totalMenuItems = await MenuItem.countDocuments(menuQuery);
     
     // Get today's attendance
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const today = businessDayBoundary(new Date());
+    const tomorrow = businessDayBoundary(dateKeyOffset(1));
     
     const attendanceQuery = {
       ...hierarchyQuery,
@@ -209,7 +178,7 @@ exports.getOrderAnalytics = async (req, res) => {
     const revenueByDay = {};
     orders.forEach(order => {
       if (isSettledOrder(order)) {
-        const day = new Date(order.createdAt).toISOString().split('T')[0];
+        const day = getBusinessDateKey(order.createdAt);
         revenueByDay[day] = (revenueByDay[day] || 0) + (order.totalAmount || 0);
       }
     });
@@ -414,7 +383,7 @@ exports.getRevenueAnalytics = async (req, res) => {
     const revenueByPaymentMethod = {};
     
     orders.forEach(order => {
-      const day = new Date(order.createdAt).toISOString().split('T')[0];
+      const day = getBusinessDateKey(order.createdAt);
       const amount = order.totalAmount || 0;
       
       revenueByDay[day] = (revenueByDay[day] || 0) + amount;
@@ -526,7 +495,7 @@ exports.getAttendanceAnalytics = async (req, res) => {
     // Attendance by day
     const attendanceByDay = {};
     attendance.forEach(record => {
-      const day = new Date(record.date).toISOString().split('T')[0];
+      const day = attendanceDateKey(record);
       if (!attendanceByDay[day]) {
         attendanceByDay[day] = { present: 0, absent: 0, late: 0, total: 0 };
       }

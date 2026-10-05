@@ -1,0 +1,288 @@
+{
+  "validatedAt": "2026-10-04T14:09:12.151962+00:00",
+  "scope": {
+    "repositories": [
+      "TerraCart-AdminApp",
+      "TerraCart-BackendMain"
+    ],
+    "workspaceFiles": [
+      "ANDROID_RELEASE.md",
+      "APK_UPDATE_DEPLOYMENT.md",
+      "scripts/release-android.sh"
+    ],
+    "productionInfrastructureDeployed": false,
+    "productionDatabaseWrites": false,
+    "committedOrPushed": false
+  },
+  "before": {
+    "version": "1.0.15",
+    "build": 15,
+    "firebase": "Core and FCM; native Android configuration; no Crashlytics dependency",
+    "releaseSigning": "Android debug certificate; differs from this Mac",
+    "installer": "No SHA verification, no build comparison; external force-update bypass",
+    "backend": "Legacy filename, no-store missing, malformed JSON silently defaulted",
+    "oldScripts": "PowerShell references another application; replaced primary documentation with TerraCart Mac guide",
+    "deployment": "Existing GitHub/EC2/PM2 workflows observed; no infrastructure mutation"
+  },
+  "currentRelease": {
+    "latestVersion": "1.0.16",
+    "minimumSupportedVersion": "1.0.12",
+    "apkUrl": "https://api.terracart.in/api/app/apk/1.0.16",
+    "releaseNotes": "Crash diagnostics, verified in-app updates, optional update controls, and release reliability improvements.",
+    "sha256": "c8dec32bc8a812385c2895bb4b30617f3259e912092e12a9114e37932d276e67",
+    "forceUpdate": false,
+    "updateUrl": "",
+    "apkFileName": "terracart_v1.0.16_b38.apk",
+    "latestBuildNumber": 38,
+    "fileSizeBytes": 96485072,
+    "publishedAt": "2026-10-04T14:07:05.259Z",
+    "signingCertificateSha256": "e669f6b8f3559e5bb4f873569f197d3509930c0a3ae3b826847e9290afc6d378",
+    "signingMigration": false
+  },
+  "firebaseDistribution": {
+    "verifiedUpload": true,
+    "groupAliases": [
+      "terracart-testing"
+    ],
+    "groupMemberCount": 3,
+    "individualTesterCount": 2,
+    "consoleUrl": "https://console.firebase.google.com/project/terracart-3fb9f/appdistribution/app/android:com.example.terra_admin_app/releases/2ovmoeifpo0sg",
+    "testerUrl": "https://appdistribution.firebase.google.com/testerapps/1:999857447286:android:9c86a15bd01db0361e1a57/releases/2ovmoeifpo0sg",
+    "cloudBinaryVerification": {
+      "firebaseVersion": "1.0.16",
+      "firebaseBuild": 38,
+      "releaseNotesMatch": true,
+      "cloudDownloadedBytes": 96485072,
+      "cloudDownloadedSha256": "c8dec32bc8a812385c2895bb4b30617f3259e912092e12a9114e37932d276e67",
+      "cloudMatchesBackend": true,
+      "versionBuildMatch": true
+    },
+    "testerEmailReceiptOrDeviceInstallationVerified": false,
+    "individualConfiguredTestersRegistered": true
+  },
+  "crashlytics": {
+    "realFirebaseApiVerified": true,
+    "verificationBuild": "1.0.16 (36)",
+    "verificationEnvironment": "development",
+    "source": "Firebase CLI MCP crashlytics_get_report, version-scoped topIssues report",
+    "issues": [
+      {
+        "code": "CRASHLYTICS_TEST_NONFATAL",
+        "issueId": "8f6acbd34e8a2cefa713cc2e0ea85448",
+        "type": "NON_FATAL",
+        "events": 2
+      },
+      {
+        "code": "FLUTTER_FRAMEWORK_FATAL",
+        "issueId": "69cb7e21db3524a2399b201ead495ec5",
+        "type": "FATAL",
+        "events": 1
+      },
+      {
+        "code": "UNCAUGHT_ASYNC",
+        "issueId": "ada8087befc4a9d3d3c51f6d18a8085d",
+        "type": "FATAL",
+        "events": 1
+      },
+      {
+        "code": "FirebaseCrashlyticsTestCrash",
+        "issueId": "d8171bb78618ae388870825d896dc336",
+        "type": "FATAL",
+        "events": 1
+      }
+    ],
+    "duplicateFatalReportsObserved": false,
+    "normalDebugCollectionEnabled": false,
+    "releaseCollectionEnabledOnEmulator": true,
+    "fatalCapture": "Framework + platform + guarded zone share deduplication; sanitized exception code/type with original stack",
+    "nonFatalCapture": "Unexpected successful-response JSON parsing, corrupt session/update preference storage, update metadata/version parsing, download/hash/native plugin/signature failures",
+    "nonFatalFloodControl": "One report per fixed code per minute; ordinary offline, download timeout, cancel, validation/auth/expected 404 remain quiet",
+    "symbols": "NOT REQUIRED; no Flutter obfuscation; optional flags block activation if fresh symbols cannot upload",
+    "releaseCollectionVerifiedBuild": "1.0.16 (38)"
+  },
+  "tests": {
+    "flutterFullPassed": 422,
+    "flutterUpdaterTargetedPassed": 24,
+    "backendReleaseAndUpdateApiPassed": 30,
+    "analysis": {
+      "baselineFindings": 109,
+      "currentFindings": 109,
+      "warnings": 4,
+      "infos": 105,
+      "errors": 0,
+      "newFindings": 0
+    },
+    "failureSimulations": [
+      "Firebase auth",
+      "distribution",
+      "invalid targets/groups",
+      "missing group",
+      "build",
+      "invalid JSON",
+      "version/signing mismatch",
+      "staging copy",
+      "staged checksum",
+      "symbol upload",
+      "metadata generation",
+      "activation copy",
+      "activation JSON",
+      "final consistency",
+      "interrupted activation journal recovery",
+      "Metadata filename/version/build mismatch",
+      "Real metadata-directory write permission failure"
+    ],
+    "dryRunCompletedBeforeRelease": true,
+    "realBackendApiBinaryValidation": [
+      {
+        "prefix": "/api/app",
+        "metadataStatus": 200,
+        "cacheControl": "no-store",
+        "apkStatus": 200,
+        "version": "1.0.16",
+        "build": 38,
+        "filename": "terracart_v1.0.16_b38.apk",
+        "sizeBytes": 96485072,
+        "sha256": "c8dec32bc8a812385c2895bb4b30617f3259e912092e12a9114e37932d276e67",
+        "contentType": "application/vnd.android.package-archive",
+        "contentLength": "96485072",
+        "contentDisposition": "attachment; filename=\"terracart_v1.0.16_b38.apk\"",
+        "matched": true
+      },
+      {
+        "prefix": "/api/v1/app",
+        "metadataStatus": 200,
+        "cacheControl": "no-store",
+        "apkStatus": 200,
+        "version": "1.0.16",
+        "build": 38,
+        "filename": "terracart_v1.0.16_b38.apk",
+        "sizeBytes": 96485072,
+        "sha256": "c8dec32bc8a812385c2895bb4b30617f3259e912092e12a9114e37932d276e67",
+        "contentType": "application/vnd.android.package-archive",
+        "contentLength": "96485072",
+        "contentDisposition": "attachment; filename=\"terracart_v1.0.16_b38.apk\"",
+        "matched": true
+      }
+    ],
+    "nativeSigningMismatchBlockedOnEmulator": true,
+    "androidOsRejectedDifferentSigner": true,
+    "exactReleaseInstalledAndBootedOnEmulator": true,
+    "unknownAppPermissionResume": "Emulator verified denied install permission opens Android Settings. Unit tests verified grant-and-resume without redownload and with SHA recheck. Grant readiness was not separately observed on a physical device.",
+    "finalReleaseNativeValidation": {
+      "installedVersion": "1.0.16",
+      "installedBuild": 38,
+      "processRunning": true,
+      "existingDebugHelperReplaced": true,
+      "launchSucceeded": true,
+      "releaseCollectionEnabled": true,
+      "fatalAndroidExceptionObserved": false,
+      "emulator": "phase19_pixel"
+    },
+    "dryRunReleaseInputsByteUnchanged": true,
+    "releaseQualityGateRejectionsFixed": [
+      "4 new brace lint findings caught before build/upload",
+      "2 new UI translations caught by full localization coverage test before build/upload"
+    ]
+  },
+  "filesAdded": [
+    "ANDROID_RELEASE.md",
+    "scripts/release-android.sh",
+    "TerraCart-AdminApp/lib/core/services/crash_reporting.dart",
+    "TerraCart-AdminApp/lib/main_crashlytics_verification.dart",
+    "TerraCart-AdminApp/test/services/release_update_test.dart",
+    "TerraCart-AdminApp/tool/android-release-analysis-baseline.json",
+    "TerraCart-AdminApp/tool/verify_apk_signing.dart",
+    "TerraCart-BackendMain/scripts/release-android.mjs",
+    "TerraCart-BackendMain/scripts/release-android.sh",
+    "TerraCart-BackendMain/utils/appUpdateMetadata.js",
+    "TerraCart-BackendMain/tests/android-release.test.mjs",
+    "TerraCart-BackendMain/tests/app-update.test.js",
+    "TerraCart-BackendMain/apk/terracart_v1.0.16_b38.apk",
+    "TerraCart-BackendMain/docs/ANDROID_RELEASE_VALIDATION.json"
+  ],
+  "filesModified": [
+    "APK_UPDATE_DEPLOYMENT.md",
+    "TerraCart-AdminApp/pubspec.yaml",
+    "TerraCart-AdminApp/pubspec.lock",
+    "TerraCart-AdminApp/lib/main.dart",
+    "TerraCart-AdminApp/lib/core/services/api_service.dart",
+    "TerraCart-AdminApp/lib/providers/app_provider.dart",
+    "TerraCart-AdminApp/lib/services/notification_service.dart",
+    "TerraCart-AdminApp/lib/services/app_update_service.dart",
+    "TerraCart-AdminApp/lib/services/in_app_update_installer.dart",
+    "TerraCart-AdminApp/lib/screens/update/update_prompt_dialog.dart",
+    "TerraCart-AdminApp/lib/screens/update/force_update_screen.dart",
+    "TerraCart-AdminApp/android/settings.gradle",
+    "TerraCart-AdminApp/android/app/build.gradle",
+    "TerraCart-AdminApp/android/app/src/main/AndroidManifest.xml",
+    "TerraCart-AdminApp/android/app/src/main/kotlin/com/example/terra_admin_app/MainActivity.kt",
+    "TerraCart-BackendMain/.env",
+    "TerraCart-BackendMain/.env.example",
+    "TerraCart-BackendMain/.gitignore",
+    "TerraCart-BackendMain/package.json",
+    "TerraCart-BackendMain/package-lock.json",
+    "TerraCart-BackendMain/controllers/appUpdateController.js",
+    "TerraCart-BackendMain/routes/appUpdateRoutes.js",
+    "TerraCart-BackendMain/server.js",
+    "TerraCart-BackendMain/app-update.json",
+    "TerraCart-AdminApp/lib/core/constants/preference_keys.dart",
+    "TerraCart-AdminApp/lib/screens/splash_screen.dart",
+    "TerraCart-AdminApp/lib/l10n/ui_literal_translations.dart",
+    "TerraCart-AdminApp/tool/l10n/ui_literals.json",
+    "TerraCart-AdminApp/macos/Flutter/GeneratedPluginRegistrant.swift"
+  ],
+  "servedFilesRemoved": [
+    "TerraCart-BackendMain/apk/terracart_admin_v1.0.15.apk"
+  ],
+  "rollbackCopiesRetained": "TerraCart-BackendMain/apk/.staging/rollback/release-*",
+  "privateSigningFiles": {
+    "keystore": "~/.config/terracart/android-release.jks",
+    "privateSettings": "~/.config/terracart/android-signing.properties",
+    "ignoredLocalSettings": "TerraCart-AdminApp/android/key.properties",
+    "ownerOnlyPermissions": true,
+    "generatedOnlyAtExplicitUserRequest": true,
+    "oldInstallationsRequireReinstall": true
+  },
+  "environmentNamesSupported": [
+    "FIREBASE_PROJECT_ID",
+    "FIREBASE_ANDROID_APP_ID",
+    "FIREBASE_APP_DISTRIBUTION_TESTERS",
+    "FIREBASE_APP_DISTRIBUTION_GROUPS",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "APP_UPDATE_APK_PREFIX",
+    "API_PUBLIC_BASE_URL"
+  ],
+  "manualProductionSteps": [
+    "Deploy matching backend code/APK/metadata through existing infrastructure",
+    "Coordinate existing-user reinstall migration because the signing certificate changed",
+    "Securely back up generated signing key/settings; provision outside-repo service-account credentials if adopting CI"
+  ],
+  "documentation": "../../ANDROID_RELEASE.md",
+  "mobileOptionalSkip": {
+    "persistedFor": "latestVersion + latestBuildNumber",
+    "startupHonorsPreference": true,
+    "newerVersionOrBuildPromptsAgain": true,
+    "mandatoryOverridesSkip": true,
+    "manualSettingsCheckIgnoresSkip": true,
+    "storageReadCorruptionPrompts": true,
+    "mandatoryDialogHasNoLaterOrSkip": true,
+    "languages": [
+      "English",
+      "Hindi",
+      "Marathi"
+    ],
+    "evidence": "24 updater tests included in final 422-test suite"
+  },
+  "intermediateReleasesRetiredFromServedDirectory": [
+    "terracart_v1.0.16_b36.apk",
+    "terracart_v1.0.16_b37.apk"
+  ],
+  "evidenceFiles": {
+    "finalReleaseCommand": "TerraCart-AdminApp/build/release-validation/final-release.log",
+    "finalNative": "TerraCart-AdminApp/build/release-validation/final-native-validation.json",
+    "localApi": "TerraCart-AdminApp/build/release-validation/local-api-verification.json",
+    "firebaseDownload": "TerraCart-AdminApp/build/release-validation/cloud-verification.json",
+    "backendTests": "TerraCart-AdminApp/build/release-validation/backend-tests.log",
+    "dryRun": "TerraCart-AdminApp/build/release-validation/dry-run.log"
+  }
+}

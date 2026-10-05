@@ -10,7 +10,7 @@
 module.exports = {
   apps: [
     {
-      name: 'terra-cart-backend',
+      name: 'terracart-api',
       // Use config file directory so PM2 works no matter where it is started from
       script: 'server.js',
       cwd: __dirname,
@@ -44,7 +44,6 @@ module.exports = {
     },
   ],
 };
-
 
 
 

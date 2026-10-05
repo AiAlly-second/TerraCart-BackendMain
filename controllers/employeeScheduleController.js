@@ -1,5 +1,32 @@
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 const Employee = require("../models/employeeModel");
+const mongoose = require("mongoose");
+
+const DAYS = new Set(["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]);
+const TIME = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const validateWeek = (week) => {
+  if (!Array.isArray(week) || week.length > 7) return "Provide a weekly schedule with at most seven days";
+  const seen = new Set();
+  for (const entry of week) {
+    if (!entry || !DAYS.has(entry.day) || seen.has(entry.day)) return "Choose each valid day only once";
+    seen.add(entry.day);
+    if (typeof entry.isWorking !== "boolean" || typeof entry.startTime !== "string" ||
+        typeof entry.endTime !== "string" || !TIME.test(entry.startTime) || !TIME.test(entry.endTime)) {
+      return "Provide valid HH:mm start and end times and a working-day selection";
+    }
+    // Attendance uses start and end on the same Kolkata business day.
+    if (entry.isWorking && entry.startTime >= entry.endTime) return "Start time must be before end time on working days";
+  }
+  return null;
+};
+
+const createDefaultSchedule = (employee) => EmployeeSchedule.findOneAndUpdate(
+  { employeeId: employee._id },
+  { $setOnInsert: { employeeId: employee._id, weeklySchedule: [],
+      cartId: employee.cartId || employee.cafeId, franchiseId: employee.franchiseId,
+      createdAt: new Date(), updatedAt: new Date() } },
+  { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true, timestamps: false }
+).populate("employeeId", "name employeeRole mobile");
 
 const SELF_ONLY_ROLES = new Set(["waiter", "cook", "employee"]);
 const CART_SCOPED_ROLES = new Set(["manager", "captain"]);
@@ -114,13 +141,7 @@ exports.getEmployeeSchedule = async (req, res) => {
 
     if (!schedule) {
       // Create default schedule if doesn't exist
-      schedule = await EmployeeSchedule.create({
-        employeeId,
-        weeklySchedule: [],
-        cartId: targetEmployee.cartId || targetEmployee.cafeId,
-        franchiseId: targetEmployee.franchiseId,
-      });
-      await schedule.populate("employeeId", "name employeeRole mobile");
+      schedule = await createDefaultSchedule(targetEmployee);
     }
 
     return res.json(schedule);
@@ -142,13 +163,7 @@ exports.getMySchedule = async (req, res) => {
 
     if (!schedule) {
       // Create default schedule if doesn't exist
-      schedule = await EmployeeSchedule.create({
-        employeeId: employee._id,
-        weeklySchedule: [],
-        cartId: employee.cartId || employee.cafeId,
-        franchiseId: employee.franchiseId,
-      });
-      await schedule.populate("employeeId", "name employeeRole mobile");
+      schedule = await createDefaultSchedule(employee);
     }
     
     return res.json(schedule);
@@ -163,6 +178,12 @@ exports.upsertSchedule = async (req, res) => {
     const { employeeId } = req.body;
     const user = req.user;
     const role = String(user?.role || "").toLowerCase();
+
+    if (!mongoose.isObjectIdOrHexString(employeeId)) {
+      return res.status(400).json({ message: "A valid employee is required" });
+    }
+    const validation = validateWeek(req.body.weeklySchedule);
+    if (validation) return res.status(400).json({ message: validation });
 
     const targetEmployee = await Employee.findById(employeeId).lean();
     if (!targetEmployee) {
@@ -183,14 +204,20 @@ exports.upsertSchedule = async (req, res) => {
       }
     }
 
-    // Set hierarchy from employee
-    req.body.cartId = targetEmployee.cartId || targetEmployee.cafeId;
-    req.body.franchiseId = targetEmployee.franchiseId;
+    const cartId = targetEmployee.cartId || targetEmployee.cafeId;
+    if (!cartId) return res.status(400).json({ message: "Employee must be assigned to an outlet before saving a schedule" });
+    // Accept schedule fields only; ownership and hierarchy come from Employee.
+    const update = {
+      employeeId, cartId, franchiseId: targetEmployee.franchiseId,
+      weeklySchedule: req.body.weeklySchedule.map(({ day, startTime, endTime, isWorking }) =>
+        ({ day, startTime, endTime, isWorking })),
+    };
+    if (req.body.todayState !== undefined) update.todayState = req.body.todayState;
 
     const schedule = await EmployeeSchedule.findOneAndUpdate(
       { employeeId },
-      req.body,
-      { new: true, upsert: true }
+      { $set: update },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
     ).populate("employeeId", "name employeeRole mobile");
 
     // Emit socket event for real-time updates
@@ -203,6 +230,9 @@ exports.upsertSchedule = async (req, res) => {
 
     return res.json(schedule);
   } catch (err) {
+    if (err.name === "ValidationError" || err.name === "CastError") {
+      return res.status(400).json({ message: "Invalid schedule details" });
+    }
     return res.status(500).json({ message: err.message });
   }
 };
@@ -260,7 +290,6 @@ exports.deleteSchedule = async (req, res) => {
     return res.status(500).json({ message: err.message });
   }
 };
-
 
 
 

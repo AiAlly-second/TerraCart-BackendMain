@@ -1,3 +1,4 @@
+const {businessDayBoundary} = require('../utils/businessTime');
 const mongoose = require("mongoose");
 const fs = require("fs");
 const path = require("path");
@@ -68,18 +69,7 @@ const toBoundedPositiveInt = (
   return Math.min(parsed, max);
 };
 
-const parseDateOnly = (value, { endOfDay = false } = {}) => {
-  const normalized = String(value || "").trim();
-  if (!normalized) return null;
-  const parsed = new Date(normalized);
-  if (Number.isNaN(parsed.getTime())) return null;
-  if (endOfDay) {
-    parsed.setHours(23, 59, 59, 999);
-  } else {
-    parsed.setHours(0, 0, 0, 0);
-  }
-  return parsed;
-};
+const parseDateOnly = (value, {endOfDay = false} = {}) => businessDayBoundary(value, endOfDay);
 
 const normalizeQueryCsvValues = (value) => {
   if (Array.isArray(value)) {

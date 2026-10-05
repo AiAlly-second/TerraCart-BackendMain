@@ -1,3 +1,4 @@
+const {businessDayBoundary, DEFAULT_BUSINESS_TIMEZONE} = require('../utils/businessTime');
 
 const mongoose = require("mongoose");
 const net = require("net");
@@ -422,18 +423,7 @@ const buildOrderListStatusFilter = (statusValue) => {
   return null;
 };
 
-const parseDateOnly = (value, { endOfDay = false } = {}) => {
-  const normalized = String(value || "").trim();
-  if (!normalized) return null;
-  const parsed = new Date(normalized);
-  if (Number.isNaN(parsed.getTime())) return null;
-  if (endOfDay) {
-    parsed.setHours(23, 59, 59, 999);
-  } else {
-    parsed.setHours(0, 0, 0, 0);
-  }
-  return parsed;
-};
+const parseDateOnly = (value, {endOfDay = false} = {}) => businessDayBoundary(value, endOfDay);
 
 const parseBooleanQuery = (value) => {
   const normalized = String(value || "")
@@ -879,28 +869,14 @@ const getActiveTakeawayTokenQuery = (cartId) => ({
   ],
 });
 
-const TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES = Number.isFinite(
-  Number(process.env.TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES),
-)
-  ? Number(process.env.TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES)
-  : 330; // IST default
-
+const { businessDayQueryRange, legacyOffsetDayRange } = require('../utils/businessTime');
 const getTakeawayTokenBusinessDayRange = (referenceDate = new Date()) => {
-  const offsetMs = TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES * 60 * 1000;
-  // Shift timestamp into business timezone, truncate day, then shift back to UTC.
-  const shifted = new Date(referenceDate.getTime() + offsetMs);
-  const startShiftedUtcMs = Date.UTC(
-    shifted.getUTCFullYear(),
-    shifted.getUTCMonth(),
-    shifted.getUTCDate(),
-    0,
-    0,
-    0,
-    0,
-  );
-  const startUtc = new Date(startShiftedUtcMs - offsetMs);
-  const endUtc = new Date(startUtc.getTime() + 24 * 60 * 60 * 1000);
-  return { startUtc, endUtc };
+  const legacy = process.env.TAKEAWAY_TOKEN_DAY_OFFSET_MINUTES;
+  const range = legacy != null && legacy.trim() !== '' && Number.isFinite(Number(legacy))
+    ? legacyOffsetDayRange(referenceDate, Number(legacy))
+    : businessDayQueryRange(referenceDate);
+  const {startUTC: startUtc, endUTC: endUtc} = range;
+  return {startUtc, endUtc};
 };
 
 const getTakeawayTokenDayQuery = (cartId) => {
@@ -1870,14 +1846,14 @@ async function buildKotPrintTemplate({
   const datePart = printDate.toLocaleDateString("en-IN", {
     day: "2-digit",
     month: "short",
-    timeZone: "Asia/Kolkata",
+    timeZone: DEFAULT_BUSINESS_TIMEZONE,
   });
   const timePart = printDate
     .toLocaleTimeString("en-IN", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
-    timeZone: "Asia/Kolkata",
+    timeZone: DEFAULT_BUSINESS_TIMEZONE,
   })
     .toUpperCase();
   const dateLabel = `${datePart}, ${timePart}`;
@@ -2440,14 +2416,14 @@ const buildBillPrintTemplate = async ({
     day: "2-digit",
     month: "short",
     year: "numeric",
-    timeZone: "Asia/Kolkata",
+    timeZone: DEFAULT_BUSINESS_TIMEZONE,
   });
   const timePart = printDate
     .toLocaleTimeString("en-IN", {
       hour: "2-digit",
       minute: "2-digit",
       hour12: true,
-      timeZone: "Asia/Kolkata",
+      timeZone: DEFAULT_BUSINESS_TIMEZONE,
     })
     .toUpperCase();
   const rows = buildOrderBillRows(order);
@@ -5130,8 +5106,7 @@ const getDashboardOrderSummary = async (req, res) => {
       .lean();
 
     const orders = recentOrders.map(buildLightweightOrderPayload);
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const todayStart = businessDayBoundary(new Date());
 
     const byStatus = {};
     const byServiceType = {};

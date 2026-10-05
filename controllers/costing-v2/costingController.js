@@ -1,3 +1,4 @@
+const {businessDayBoundary} = require('../../utils/businessTime');
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -232,21 +233,9 @@ const resolveShelfLifeState = ({
   };
 };
 
-const parseDateAtStartOfDay = (value) => {
-  if (value == null || value === "") return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  date.setHours(0, 0, 0, 0);
-  return date;
-};
+const parseDateAtStartOfDay = (value) => businessDayBoundary(value, false);
 
-const parseDateAtEndOfDay = (value) => {
-  if (value == null || value === "") return null;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  date.setHours(23, 59, 59, 999);
-  return date;
-};
+const parseDateAtEndOfDay = (value) => businessDayBoundary(value, true);
 
 /**
  * Supports both query styles:
@@ -5400,10 +5389,9 @@ exports.getExpenses = async (req, res) => {
 
     if (from || to) {
       query.expenseDate = {};
-      if (from) query.expenseDate.$gte = new Date(from);
+      if (from) query.expenseDate.$gte = businessDayBoundary(from);
       if (to) {
-        const toDate = new Date(to);
-        toDate.setHours(23, 59, 59, 999);
+        const toDate = businessDayBoundary(to, true);
         query.expenseDate.$lte = toDate;
       }
     }
@@ -5553,10 +5541,9 @@ exports.getExpenseSummary = async (req, res) => {
 
     if (from || to) {
       query.expenseDate = {};
-      if (from) query.expenseDate.$gte = new Date(from);
+      if (from) query.expenseDate.$gte = businessDayBoundary(from);
       if (to) {
-        const toDate = new Date(to);
-        toDate.setHours(23, 59, 59, 999);
+        const toDate = businessDayBoundary(to, true);
         query.expenseDate.$lte = toDate;
       }
     }

@@ -1,165 +1,45 @@
-const fs = require("fs");
-const path = require("path");
+const fs = require('node:fs');
+const path = require('node:path');
+const semver = require('semver');
+const { readMetadata, resolveApk } = require('../utils/appUpdateMetadata');
 
-const APP_UPDATE_CONFIG_PATH = path.join(__dirname, "..", "app-update.json");
-const APK_DIRECTORY = path.join(__dirname, "..", "apk");
-const APK_FILE_PREFIX = "terracart_admin_v";
-const APK_FILE_EXTENSION = ".apk";
-const VERSION_TOKEN_PATTERN = /^[0-9A-Za-z._-]+$/;
-
-const trimTrailingSlash = (value) => String(value || "").replace(/\/+$/, "");
-
-const coalesceString = (...values) => {
-  for (const value of values) {
-    if (value === undefined || value === null) continue;
-    const normalized = String(value).trim();
-    if (normalized.length > 0) {
-      return normalized;
-    }
+function createAppUpdateController({ configPath = path.join(__dirname, '..', 'app-update.json'),
+  apkDirectory = path.join(__dirname, '..', 'apk'), env = process.env } = {}) {
+  function payload(req) {
+    const metadata = readMetadata(configPath);
+    const file = resolveApk(apkDirectory, metadata);
+    const size = fs.statSync(file).size;
+    if (metadata.fileSizeBytes != null && metadata.fileSizeBytes !== size) throw new Error('APP_UPDATE_APK_INVALID');
+    const configured = env.API_PUBLIC_BASE_URL || env.APP_API_BASE_URL || env.API_BASE_URL;
+    const base = (configured || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
+    const origin = new URL(base);
+    if (origin.username || origin.password || (env.NODE_ENV === 'production' && origin.protocol !== 'https:')) throw new Error('APP_UPDATE_PUBLIC_URL_INVALID');
+    return { ...metadata, fileSizeBytes: size,
+      apkUrl: metadata.apkUrl || `${base}/api/app/apk/${encodeURIComponent(metadata.latestVersion)}` };
   }
-  return "";
-};
-
-const hasOwn = (obj, key) =>
-  Object.prototype.hasOwnProperty.call(obj || {}, key);
-
-const parseBoolean = (value, fallback = false) => {
-  if (typeof value === "boolean") return value;
-  if (typeof value === "number") return value !== 0;
-  if (typeof value === "string") {
-    const normalized = value.trim().toLowerCase();
-    if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
-    if (["false", "0", "no", "n", "off"].includes(normalized)) return false;
+  async function getAppVersion(req, res) {
+    res.setHeader('Cache-Control', 'no-store');
+    try { return res.json({ success: true, data: payload(req) }); }
+    catch (_) { return res.status(500).json({ success: false, message: 'App update configuration is unavailable', code: 'APP_UPDATE_CONFIG_INVALID' }); }
   }
-  return fallback;
-};
-
-const readUpdateConfig = () => {
-  try {
-    if (!fs.existsSync(APP_UPDATE_CONFIG_PATH)) return {};
-    const raw = fs.readFileSync(APP_UPDATE_CONFIG_PATH, "utf8");
-    if (!raw || raw.trim().length === 0) return {};
-    // Support UTF-8 with BOM (common when file is edited by Windows PowerShell).
-    const normalizedRaw = raw.replace(/^\uFEFF/, "");
-    const parsed = JSON.parse(normalizedRaw);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed;
-    }
-    return {};
-  } catch (_error) {
-    return {};
-  }
-};
-
-const resolvePublicApiBase = (req) => {
-  const envBase = coalesceString(
-    process.env.APP_API_BASE_URL,
-    process.env.API_BASE_URL
-  );
-  if (envBase) return trimTrailingSlash(envBase);
-  return trimTrailingSlash(`${req.protocol}://${req.get("host")}`);
-};
-
-const buildResolvedUpdatePayload = (req) => {
-  const fileConfig = readUpdateConfig();
-
-  const latestVersion = coalesceString(
-    fileConfig.latestVersion,
-    process.env.LATEST_APP_VERSION,
-    "1.0.0"
-  );
-  const minimumSupportedVersion = coalesceString(
-    fileConfig.minimumSupportedVersion,
-    process.env.MIN_SUPPORTED_APP_VERSION,
-    latestVersion
-  );
-  const releaseNotes = coalesceString(
-    fileConfig.releaseNotes,
-    process.env.APP_RELEASE_NOTES
-  );
-  const sha256 = coalesceString(fileConfig.sha256, process.env.APP_APK_SHA256);
-  const configuredApkUrl = coalesceString(
-    fileConfig.apkUrl,
-    process.env.APP_APK_URL
-  );
-  const updateUrl = coalesceString(
-    fileConfig.updateUrl,
-    process.env.APP_UPDATE_URL
-  );
-  const forceUpdate = hasOwn(fileConfig, "forceUpdate")
-    ? parseBoolean(fileConfig.forceUpdate, false)
-    : parseBoolean(process.env.FORCE_APP_UPDATE, false);
-
-  const defaultApkUrl = `${resolvePublicApiBase(req)}/api/app/apk/${encodeURIComponent(
-    latestVersion
-  )}`;
-  const apkUrl = configuredApkUrl || defaultApkUrl;
-
-  return {
-    latestVersion,
-    minimumSupportedVersion,
-    apkUrl,
-    releaseNotes,
-    sha256,
-    forceUpdate,
-    updateUrl,
-  };
-};
-
-exports.getAppVersion = async (req, res) => {
-  try {
-    const data = buildResolvedUpdatePayload(req);
-    return res.json({ success: true, data });
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Failed to resolve app version info",
-      error: error.message,
-    });
-  }
-};
-
-exports.downloadApkByVersion = async (req, res) => {
-  try {
-    const version = String(req.params.version || "").trim();
-    if (!VERSION_TOKEN_PATTERN.test(version)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid version format",
+  async function downloadApkByVersion(req, res) {
+    try {
+      const version = String(req.params.version || '');
+      if (!semver.valid(version) || version.includes('+')) return res.status(400).json({ success: false, message: 'Invalid version format' });
+      const metadata = readMetadata(configPath);
+      if (version !== metadata.latestVersion) return res.status(404).json({ success: false, message: 'APK version unavailable' });
+      const file = resolveApk(apkDirectory, metadata);
+      const size = fs.statSync(file).size;
+      if (metadata.fileSizeBytes != null && size !== metadata.fileSizeBytes) throw new Error('APP_UPDATE_APK_INVALID');
+      res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+      res.setHeader('Content-Disposition', `attachment; filename="${metadata.apkFileName}"`);
+      res.setHeader('Content-Length', size);
+      res.setHeader('Cache-Control', 'no-store'); // Same-version newer builds must not serve stale bytes.
+      return res.sendFile(file, error => {
+        if (error && !res.headersSent) res.status(error.statusCode || 500).end();
       });
-    }
-
-    const apkFileName = `${APK_FILE_PREFIX}${version}${APK_FILE_EXTENSION}`;
-    const apkPath = path.join(APK_DIRECTORY, apkFileName);
-    const resolvedApkPath = path.resolve(apkPath);
-    const resolvedApkDir = path.resolve(APK_DIRECTORY);
-
-    if (!resolvedApkPath.startsWith(resolvedApkDir)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
-    }
-
-    if (!fs.existsSync(resolvedApkPath)) {
-      return res.status(404).json({
-        success: false,
-        message: `APK not found for version ${version}`,
-      });
-    }
-
-    res.setHeader("Content-Type", "application/vnd.android.package-archive");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${apkFileName}"`
-    );
-    res.setHeader("Cache-Control", "public, max-age=300");
-    return res.sendFile(resolvedApkPath);
-  } catch (error) {
-    return res.status(500).json({
-      success: false,
-      message: "Failed to serve APK",
-      error: error.message,
-    });
+    } catch (_) { return res.status(500).json({ success: false, message: 'APK unavailable', code: 'APP_UPDATE_APK_INVALID' }); }
   }
-};
+  return { getAppVersion, downloadApkByVersion };
+}
+module.exports = { ...createAppUpdateController(), createAppUpdateController };

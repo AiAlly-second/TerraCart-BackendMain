@@ -1,7 +1,6 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { ZipArchive } = require("archiver");
 const { pipeline } = require("stream/promises");
 const {
   getS3ObjectBody,
@@ -9,6 +8,17 @@ const {
   headS3Object,
   assertBackupStorageReadable,
 } = require("./backupStorageService");
+
+// Archiver 8 is ESM-only. This service intentionally uses its ZipArchive
+// class API (rather than the legacy CommonJS factory), so load it at the
+// operation boundary instead of crashing the CommonJS server during route load.
+async function loadZipArchive() {
+  const archiverModule = await import("archiver");
+  if (typeof archiverModule.ZipArchive !== "function") {
+    throw new Error("Archiver 8 ZipArchive export is unavailable");
+  }
+  return archiverModule.ZipArchive;
+}
 
 function buildDownloadFileName(backup) {
   const scopePart = backup.scopeId ? String(backup.scopeId) : "system";
@@ -116,6 +126,7 @@ How restore works in TerraCart Admin
 async function buildBackupZipTempFile({ backup, manifest, files, checksumBody }) {
   const tmpZip = path.join(os.tmpdir(), `terracart-download-${backup._id}-${Date.now()}.zip`);
   const output = fs.createWriteStream(tmpZip);
+  const ZipArchive = await loadZipArchive();
   const archive = new ZipArchive({ zlib: { level: 6 } });
 
   const archiveFinished = new Promise((resolve, reject) => {

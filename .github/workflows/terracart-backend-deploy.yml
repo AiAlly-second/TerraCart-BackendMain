@@ -1,23 +1,54 @@
-name: TerraCart Backend Deploy
-
+name: Production deployment
 on:
   workflow_dispatch:
-
+    inputs:
+      ci_run_id:
+        description: Successful main-push CI run ID
+        type: string
+        required: true
+      dry_run:
+        description: Verify prerequisites only; no production writes
+        type: boolean
+        default: true
+        required: true
+      rollback:
+        description: Restore the retained release for this verified CI run
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
 jobs:
-  deploy-backend:
-    runs-on: ubuntu-latest
-
+  production:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRODUCTION_DEPLOYMENTS_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENTS_ENABLED }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
+      DRY_RUN: ${{ inputs.dry_run }}
+      BACKEND_HOST: ${{ vars.BACKEND_HOST }}
+      BACKEND_SSH_USER: ${{ vars.BACKEND_SSH_USER }}
+      BACKEND_DEPLOY_ROOT: ${{ vars.BACKEND_DEPLOY_ROOT }}
+      BACKEND_SSH_KEY: ${{ secrets.BACKEND_SSH_KEY }}
+      BACKEND_KNOWN_HOSTS: ${{ secrets.BACKEND_KNOWN_HOSTS }}
+      ROLLBACK: ${{ inputs.rollback }}
     steps:
-      - name: Deploy backend to server
-        uses: appleboy/ssh-action@v1.0.3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd /home/ec2-user/terracart/TerraCart-BackendMain
-            git pull origin main
-            npm install
-            npm run build --if-present
-            pm2 restart all
-            pm2 save
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
+      - name: Validate immutable CI artifact and deploy exact application
+        run: |
+          args=(--run-id "$CI_RUN_ID")
+          if [[ "$DRY_RUN" == "false" ]]; then args+=(--apply); fi
+          if [[ "$ROLLBACK" == "true" ]]; then args+=(--rollback); fi
+          python3 ci/deploy_backend.py "${args[@]}"

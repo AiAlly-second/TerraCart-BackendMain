@@ -3,37 +3,14 @@ const Employee = require("../models/employeeModel");
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-
-const getISTNow = () => {
-  const now = new Date();
-  return new Date(now.getTime() + IST_OFFSET_MS);
-};
-
-const istToUTC = (istDate) => {
-  return new Date(istDate.getTime() - IST_OFFSET_MS);
-};
-
-const getISTDate = () => {
-  const istNow = getISTNow();
-  const istDate = new Date(istNow);
-  istDate.setHours(0, 0, 0, 0);
-  return istToUTC(istDate);
-};
-
+const { businessDayQueryRange } = require('../utils/businessTime');
 const getISTDateRange = () => {
-  const today = getISTDate();
-  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-  return { today, tomorrow };
+  const {startUTC: today, endUTC: tomorrow} = businessDayQueryRange();
+  return {today, tomorrow};
 };
-
 const parseLeaveDate = (value) => {
   if (!value) return null;
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return null;
-  const istDate = new Date(parsed.getTime() + IST_OFFSET_MS);
-  istDate.setHours(0, 0, 0, 0);
-  return new Date(istDate.getTime() - IST_OFFSET_MS);
+  try { return businessDayQueryRange(value).startUTC; } catch (_) { return null; }
 };
 
 const normalizeObjectIdString = (value) => {

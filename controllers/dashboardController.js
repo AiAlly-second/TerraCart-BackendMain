@@ -11,7 +11,7 @@ const {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
 } = require("../utils/orderContract");
-const { getISTDateRange } = require("../utils/istDateTime");
+const { getISTDateRange, getBusinessDateKey, dateKeyOffset, businessDayQueryRange } = require("../utils/istDateTime");
 const featureService = require("../services/featureService");
 const { resolveCartScope } = require("../utils/costing-v2/inventoryScope");
 
@@ -525,12 +525,12 @@ exports.getPerformanceMetrics = async (req, res) => {
       return res.status(403).json({ message: "Access denied. No cafe associated with this user." });
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const weekAgo = new Date(today);
-    weekAgo.setDate(weekAgo.getDate() - 7);
-    const monthAgo = new Date(today);
-    monthAgo.setMonth(monthAgo.getMonth() - 1);
+    const key = getBusinessDateKey();
+    const today = businessDayQueryRange(key).startUTC;
+    const weekAgo = businessDayQueryRange(dateKeyOffset(-7, key)).startUTC;
+    const calendar = new Date(`${key}T00:00:00Z`);
+    calendar.setUTCMonth(calendar.getUTCMonth() - 1);
+    const monthAgo = businessDayQueryRange(calendar.toISOString().slice(0, 10)).startUTC;
 
     // Weekly revenue
     const weeklyOrders = await Order.find({
@@ -560,10 +560,8 @@ exports.getPerformanceMetrics = async (req, res) => {
     // Orders per day (last 7 days)
     const ordersPerDay = [];
     for (let i = 6; i >= 0; i--) {
-      const date = new Date(today);
-      date.setDate(date.getDate() - i);
-      const nextDate = new Date(date);
-      nextDate.setDate(nextDate.getDate() + 1);
+      const dateKey = dateKeyOffset(-i, key);
+      const {startUTC: date, endUTC: nextDate} = businessDayQueryRange(dateKey);
 
       const dayOrders = await Order.countDocuments({
         cartId: cafeId,
@@ -573,7 +571,7 @@ exports.getPerformanceMetrics = async (req, res) => {
       });
 
       ordersPerDay.push({
-        date: date.toISOString().split("T")[0],
+        date: dateKey,
         count: dayOrders,
       });
     }

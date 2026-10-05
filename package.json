@@ -14,12 +14,17 @@
     "setup:admins": "node scripts/setup-atlas-admins.js",
     "verify:admins": "node scripts/verify-and-create-admins.js",
     "verify:menu": "node scripts/verify-menu-sync.js",
-    "sync:menu": "node scripts/force-menu-sync.js"
+    "sync:menu": "node scripts/force-menu-sync.js",
+    "release:android": "node scripts/release-android.mjs",
+    "test:release": "node --test tests/android-release.test.mjs tests/app-update.test.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.893.0",
     "@aws-sdk/lib-storage": "^3.893.0",
@@ -41,7 +46,9 @@
     "multer": "^1.4.5-lts.1",
     "multer-s3": "^3.0.1",
     "redis": "^5.11.0",
-    "socket.io": "^4.8.1"
+    "semver": "^7.8.5",
+    "socket.io": "^4.8.1",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.3.0",

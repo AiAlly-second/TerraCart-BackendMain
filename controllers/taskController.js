@@ -4,50 +4,13 @@ const User = require("../models/userModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
 const EmployeeAttendance = require("../models/employeeAttendanceModel");
 
-// IST offset constant (UTC+5:30)
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
-
-// Helper function to get current IST time
-const getISTNow = () => {
-  const now = new Date(); // Current UTC time
-  return new Date(now.getTime() + IST_OFFSET_MS); // Convert to IST
-};
-
-// Helper function to convert IST time to UTC for MongoDB storage
-const istToUTC = (istDate) => {
-  return new Date(istDate.getTime() - IST_OFFSET_MS);
-};
-
-// Helper function to convert UTC time to IST
-const utcToIST = (utcDate) => {
-  return new Date(utcDate.getTime() + IST_OFFSET_MS);
-};
-
-// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB storage)
-const getISTDate = () => {
-  const istNow = getISTNow();
-  // Get start of day in IST
-  const istDate = new Date(istNow);
-  istDate.setHours(0, 0, 0, 0); // Set to start of day in IST
-  
-  // Convert to UTC for MongoDB storage
-  return istToUTC(istDate);
-};
-
-// Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
+const { businessDayQueryRange, getBusinessDateKey, getBusinessDayName, scheduledTime } = require('../utils/businessTime');
+const getISTNow = () => new Date();
 const getISTDateRange = () => {
-  const today = getISTDate();
-  const tomorrow = new Date(today);
-  tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
-  return { today, tomorrow };
+  const {startUTC: today, endUTC: tomorrow} = businessDayQueryRange();
+  return {today, tomorrow};
 };
-
-// Helper function to get day name in IST
-const getISTDayName = () => {
-  const istNow = getISTNow();
-  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[istNow.getDay()]; // Use getDay() for IST day
-};
+const getISTDayName = getBusinessDayName;
 
 const applyTaskCartScope = (query, cartId) => {
   if (!cartId) return;
@@ -138,7 +101,7 @@ const buildHierarchyQuery = async (user) => {
 // Helper function to get day name from date
 const getDayName = (date) => {
   const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[date.getDay()];
+  return dayNames[businessDayQueryRange(date).dayIndex];
 };
 
 const normalizeDayName = (value) => {
@@ -165,21 +128,8 @@ const normalizeDayName = (value) => {
   return map[day] || "";
 };
 
-const getISTDayNameFromDate = (dateValue) => {
-  const date = dateValue ? new Date(dateValue) : new Date();
-  const istDate = utcToIST(date);
-  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[istDate.getDay()];
-};
-
-const getISTDateRangeForDate = (dateValue) => {
-  const source = dateValue ? new Date(dateValue) : new Date();
-  const istDate = utcToIST(source);
-  istDate.setHours(0, 0, 0, 0);
-  const startUTC = istToUTC(istDate);
-  const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000);
-  return { startUTC, endUTC };
-};
+const getISTDayNameFromDate = (value) => getBusinessDayName(value || new Date());
+const getISTDateRangeForDate = (value) => businessDayQueryRange(value || new Date());
 
 const isEmployeeOffOnDay = (employeeSchedule, dayName) => {
   if (!employeeSchedule || !Array.isArray(employeeSchedule.weeklySchedule)) {
@@ -322,16 +272,8 @@ const calculateTaskStatus = (task, employeeSchedule, now) => {
   const [startHour, startMinute] = daySchedule.startTime.split(":").map(Number);
   const [endHour, endMinute] = daySchedule.endTime.split(":").map(Number);
 
-  // Convert task due date from UTC (MongoDB) to IST
-  const taskDateUTC = new Date(task.dueDate);
-  const taskDateIST = utcToIST(taskDateUTC);
-  
-  // Create scheduled times in IST for the task's due date
-  const scheduledStartIST = new Date(taskDateIST);
-  scheduledStartIST.setHours(startHour, startMinute, 0, 0);
-  
-  const scheduledEndIST = new Date(taskDateIST);
-  scheduledEndIST.setHours(endHour, endMinute, 0, 0);
+  const scheduledStartIST = scheduledTime(task.dueDate, daySchedule.startTime);
+  const scheduledEndIST = scheduledTime(task.dueDate, daySchedule.endTime);
 
   // Get current time in IST
   const nowIST = getISTNow();
@@ -419,7 +361,7 @@ exports.getAllTasks = async (req, res) => {
       .lean();
 
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const today = businessDayQueryRange(now).startUTC;
 
     const taskEmployeeIds = [...new Set(tasks
       .map((task) => (task.assignedTo?._id || task.assignedTo || "").toString())
@@ -664,32 +606,7 @@ exports.getTodayTasks = async (req, res) => {
       
       // For non-recurring tasks, check if task is due today (using IST date comparison)
       if (task.dueDate) {
-        // Convert task due date from UTC (MongoDB) to IST
-        const taskDueDateUTC = new Date(task.dueDate);
-        const taskDueDateIST = utcToIST(taskDueDateUTC);
-        
-        // Get start of day in IST for task due date
-        const taskDueDateISTStart = new Date(taskDueDateIST);
-        taskDueDateISTStart.setHours(0, 0, 0, 0);
-        
-        // Get today's start in IST
-        const todayIST = getISTNow();
-        const todayISTStart = new Date(todayIST);
-        todayISTStart.setHours(0, 0, 0, 0);
-        
-        // Compare IST dates
-        const isDueToday = taskDueDateISTStart.getTime() === todayISTStart.getTime();
-        
-        console.log('[TASK] Non-recurring task date check (IST):', {
-          id: task._id,
-          title: task.title,
-          taskDueDateUTC: taskDueDateUTC.toISOString(),
-          taskDueDateIST: taskDueDateIST.toISOString(),
-          taskDueDateISTStart: taskDueDateISTStart.toISOString(),
-          todayISTStart: todayISTStart.toISOString(),
-          isDueToday: isDueToday,
-        });
-        
+        const isDueToday = getBusinessDateKey(task.dueDate) === getBusinessDateKey();
         return isDueToday;
       }
       

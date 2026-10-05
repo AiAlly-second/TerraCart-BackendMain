@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { DEFAULT_BUSINESS_TIMEZONE } = require("../utils/businessTime");
 const BackupJob = require("../models/backupJobModel");
 const BackupRecord = require("../models/backupRecordModel");
 const RestoreRecord = require("../models/restoreRecordModel");
@@ -207,7 +208,7 @@ exports.createBackupJob = async (req, res) => {
       frequency: req.body?.frequency || "daily",
       scheduleTimeIST,
       cronExpression: req.body?.cronExpression || null,
-      timezone: "Asia/Kolkata",
+      timezone: DEFAULT_BUSINESS_TIMEZONE,
       isEnabled: req.body?.isEnabled !== false,
       replaceDailyBackup: Boolean(req.body?.replaceDailyBackup),
       retentionPolicy: req.body?.retentionPolicy || undefined,
@@ -245,7 +246,7 @@ exports.getSchedulerStatus = async (_req, res) => {
     success: true,
     data: {
       enabled,
-      timezone: "Asia/Kolkata",
+      timezone: DEFAULT_BUSINESS_TIMEZONE,
       pollIntervalSeconds: 30,
       envFlag: "BACKUP_SCHEDULER_ENABLED",
     },
