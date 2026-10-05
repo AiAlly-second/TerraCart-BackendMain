@@ -674,6 +674,7 @@ app.use("/api/print", require("./routes/printRoutes")); // Network printer route
 app.use("/api/print-queue", require("./routes/printQueueRoutes")); // Print queue for mobile agent
 app.use("/api/geocode", require("./routes/geocodeRoutes"));
 app.use("/api/app", require("./routes/appUpdateRoutes"));
+app.use("/api/v1/app", require("./routes/appUpdateRoutes"));
 app.use("/api", require("./routes/notificationRoutes"));
 app.use(
   "/api/admin/superadmin/backup-restore",

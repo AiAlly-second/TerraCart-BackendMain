@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { DEFAULT_BUSINESS_TIMEZONE } = require("../utils/businessTime");
 
 const backupJobSchema = new mongoose.Schema(
   {
@@ -23,7 +24,7 @@ const backupJobSchema = new mongoose.Schema(
     },
     scheduleTimeIST: { type: String, required: true, trim: true },
     cronExpression: { type: String, default: null, trim: true },
-    timezone: { type: String, default: "Asia/Kolkata" },
+    timezone: { type: String, default: DEFAULT_BUSINESS_TIMEZONE },
     isEnabled: { type: Boolean, default: true, index: true },
     replaceDailyBackup: { type: Boolean, default: false },
     retentionPolicy: {

@@ -5,3 +5,14 @@ node_modules
 config/firebase-service-account.json
 config/*firebase-adminsdk*.json
 config/terracart-3fb9f-firebase-adminsdk-fbsvc-0625177e20.json
+
+# Android release credentials and transactional staging
+**/*service-account*.json
+**/*firebase-adminsdk*.json
+**/*.jks
+**/*.keystore
+**/key.properties
+apk/.staging/
+apk/.release-lock
+app-update.json.tmp-*
+firebase-debug.log*

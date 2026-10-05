@@ -1,9 +1,15 @@
 {
-    "latestVersion":  "1.0.15",
-    "minimumSupportedVersion":  "1.0.12",
-    "apkUrl":  "",
-    "releaseNotes":  " Ai Tap to order added \n Added VIP order feature \n Added Sort in the order screen",
-    "sha256":  "52bc3789db03867638e9c47d52aa54549f350eb6d5669b3f7118c12c711795b0",
-    "forceUpdate":  false,
-    "updateUrl":  ""
+  "latestVersion": "1.0.16",
+  "minimumSupportedVersion": "1.0.12",
+  "apkUrl": "https://api.terracart.in/api/app/apk/1.0.16",
+  "releaseNotes": "Crash diagnostics, verified in-app updates, optional update controls, and release reliability improvements.",
+  "sha256": "c8dec32bc8a812385c2895bb4b30617f3259e912092e12a9114e37932d276e67",
+  "forceUpdate": false,
+  "updateUrl": "",
+  "apkFileName": "terracart_v1.0.16_b38.apk",
+  "latestBuildNumber": 38,
+  "fileSizeBytes": 96485072,
+  "publishedAt": "2026-10-04T14:07:05.259Z",
+  "signingCertificateSha256": "e669f6b8f3559e5bb4f873569f197d3509930c0a3ae3b826847e9290afc6d378",
+  "signingMigration": false
 }

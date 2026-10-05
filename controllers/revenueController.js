@@ -1,3 +1,4 @@
+const {businessDayBoundary, businessMonthRange, getBusinessDateKey, dateKeyOffset, businessParts} = require('../utils/businessTime');
 const mongoose = require("mongoose");
 const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
@@ -30,17 +31,7 @@ function isValidDateValue(date) {
   return date instanceof Date && !Number.isNaN(date.getTime());
 }
 
-function parseDateFilter(value, endOfDay = false) {
-  if (!value) return null;
-  const parsed = new Date(value);
-  if (!isValidDateValue(parsed)) return null;
-  if (endOfDay) {
-    parsed.setHours(23, 59, 59, 999);
-  } else {
-    parsed.setHours(0, 0, 0, 0);
-  }
-  return parsed;
-}
+function parseDateFilter(value, endOfDay = false) { return businessDayBoundary(value, endOfDay); }
 
 function resolveOrderPaidDate(order) {
   const candidate = order?.paidAt || order?.updatedAt || null;
@@ -54,12 +45,8 @@ function resolveOrderPaidDate(order) {
 exports.calculateDailyRevenue = async (req, res) => {
   try {
     const { date } = req.query;
-    let targetDate = date ? new Date(date) : new Date();
-    
-    // Set to start of day
-    targetDate.setHours(0, 0, 0, 0);
-    const endDate = new Date(targetDate);
-    endDate.setHours(23, 59, 59, 999);
+    const targetDate = businessDayBoundary(date || new Date());
+    const endDate = businessDayBoundary(date || new Date(), true);
 
     // Get all ACTIVE franchises first (only isActive=true)
     const activeFranchises = await User.find({ 
@@ -216,20 +203,11 @@ exports.calculateDailyRevenue = async (req, res) => {
 exports.calculateMonthlyRevenue = async (req, res) => {
   try {
     const { year, month } = req.query;
-    let targetDate = new Date();
-    
-    if (year && month) {
-      targetDate = new Date(parseInt(year), parseInt(month) - 1, 1);
-    } else {
-      // Default to current month
-      targetDate = new Date(targetDate.getFullYear(), targetDate.getMonth(), 1);
-    }
-
-    const startDate = new Date(targetDate);
-    startDate.setHours(0, 0, 0, 0);
-    
-    const endDate = new Date(targetDate.getFullYear(), targetDate.getMonth() + 1, 0);
-    endDate.setHours(23, 59, 59, 999);
+    const current = businessParts(new Date());
+    const range = businessMonthRange(year || current.year, month || current.month);
+    const startDate = range.startUTC;
+    const targetDate = startDate;
+    const endDate = new Date(range.endUTC.getTime() - 1);
 
     // Get all ACTIVE franchises first (only isActive=true)
     const activeFranchises = await User.find({ 
@@ -739,12 +717,7 @@ exports.getFranchiseRevenue = async (req, res) => {
       orderCount: data.orderCount,
     }));
 
-    const buildDateKey = (date) => {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, "0");
-      const day = String(date.getDate()).padStart(2, "0");
-      return `${year}-${month}-${day}`;
-    };
+    const buildDateKey = getBusinessDateKey;
 
     const getOrderTotal = (order) =>
       (order.kotLines || []).reduce(
@@ -786,9 +759,7 @@ exports.getFranchiseRevenue = async (req, res) => {
       }
     } else {
       // Get revenue by date range (last 30 days)
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      thirtyDaysAgo.setHours(0, 0, 0, 0);
+      const thirtyDaysAgo = businessDayBoundary(dateKeyOffset(-30));
 
       // Get recent orders - use paidAt if available, otherwise use updatedAt as fallback
       const recentOrders = orders.filter((order) => {
@@ -801,12 +772,9 @@ exports.getFranchiseRevenue = async (req, res) => {
       // Get daily breakdown for last 30 days
       dailyBreakdown = [];
       for (let i = 29; i >= 0; i--) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
-        date.setHours(0, 0, 0, 0);
-
-        const endDate = new Date(date);
-        endDate.setHours(23, 59, 59, 999);
+        const key = dateKeyOffset(-i);
+        const date = businessDayBoundary(key);
+        const endDate = businessDayBoundary(key, true);
 
         const dayOrders = recentOrders.filter((order) => {
           // Use paidAt if available, otherwise fallback to updatedAt
@@ -816,7 +784,7 @@ exports.getFranchiseRevenue = async (req, res) => {
 
         const dayRevenue = calculateOrderRevenue(dayOrders);
         dailyBreakdown.push({
-          date: date.toISOString().split("T")[0],
+          date: key,
           revenue: dayRevenue,
           orderCount: dayOrders.length,
         });

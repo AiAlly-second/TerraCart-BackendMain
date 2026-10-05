@@ -429,6 +429,7 @@ exports.loginUser = async (req, res) => {
             cafeId: cafeId || user.cafeId,
             cartId: cafeId || user.cafeId || user.cartId, // Mobile app uses cartId for socket/inventory
             employeeId: user.employeeId,
+            hasDisability: employee?.disability?.hasDisability === true,
             franchiseId: franchiseId || user.franchiseId,
             franchiseCode: user.franchiseCode,
             cartCode: user.cartCode,
@@ -1362,6 +1363,31 @@ exports.getMe = async (req, res) => {
         userResponse.cartId = employee.cartId || employee.cafeId;
         userResponse.franchiseId = employee.franchiseId;
         userResponse.employeeId = employee._id;
+        userResponse.hasDisability = employee.disability?.hasDisability === true;
+      }
+    } else if (["waiter", "cook", "captain", "manager"].includes(user.role)) {
+      // Accounts created for staff already carry their employee role
+      // (employeeController creates User{ role: employee.employeeRole }), so the
+      // branch above never runs for them and /users/me used to omit employeeId.
+      // The mobile app needs it to find its own row in the cart-wide
+      // /attendance/today list; without it a manager who is already checked in
+      // saw "Not checked in", and Check In then failed on ALREADY_CHECKED_IN.
+      // Resolve it exactly as checkIn() does (Employee by userId) so the id
+      // always matches the attendance rows, then fall back like
+      // getTodayAttendance() does (email), then to the stored link.
+      const employee =
+        (await Employee.findOne({ userId: user._id }).select("_id disability").lean()) ||
+        (user.email
+          ? await Employee.findOne({
+              email: String(user.email).toLowerCase(),
+            })
+              .select("_id disability")
+              .lean()
+          : null);
+      const resolvedEmployeeId = employee?._id || user.employeeId;
+      userResponse.hasDisability = employee?.disability?.hasDisability === true;
+      if (resolvedEmployeeId) {
+        userResponse.employeeId = resolvedEmployeeId;
       }
     }
 

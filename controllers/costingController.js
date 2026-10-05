@@ -1,3 +1,4 @@
+const {businessDayBoundary} = require('../utils/businessTime');
 const Investment = require("../models/investmentModel");
 const Expense = require("../models/expenseModel");
 const ExpenseCategory = require("../models/expenseCategoryModel");
@@ -2158,9 +2159,8 @@ exports.getPnLReport = async (req, res) => {
       });
     }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999);
+    const start = businessDayBoundary(startDate);
+    const end = businessDayBoundary(endDate, true);
 
     const scopeFilter = {};
     if (franchiseId) scopeFilter.franchiseId = franchiseId;

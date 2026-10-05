@@ -9,115 +9,34 @@ const {
 } = require("../services/dailyTaskService");
 const { sendPushToTokens } = require("../services/pushNotificationService");
 
-// IST offset constant (UTC+5:30)
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
+const { getBusinessDateKey, businessDayQueryRange, getBusinessDayName,
+  scheduledTime, attendanceDateKey, attendanceDayFilter } = require('../utils/businessTime');
+const { attendanceDurations } = require('../utils/attendanceDuration');
 const ATTENDANCE_IDEMPOTENCY_WINDOW_MS = 5 * 1000;
 const ATTENDANCE_REQUEST_CACHE_TTL_MS = 60 * 1000;
 const recentAttendanceRequestMap = new Map();
-
-// Helper function to get current IST time
-const getISTNow = () => {
-  const now = new Date(); // Current UTC time
-  return new Date(now.getTime() + IST_OFFSET_MS); // Convert to IST
-};
-
-// Helper function to convert IST time to UTC for MongoDB storage
-const istToUTC = (istDate) => {
-  return new Date(istDate.getTime() - IST_OFFSET_MS);
-};
-
-// Helper function to convert UTC time to IST
-const utcToIST = (utcDate) => {
-  return new Date(utcDate.getTime() + IST_OFFSET_MS);
-};
-
-// Helper function to get IST date (start of day in IST, converted to UTC for MongoDB storage)
-const getISTDate = () => {
-  const istNow = getISTNow();
-  // Get start of day in IST
-  const istDate = new Date(istNow);
-  istDate.setHours(0, 0, 0, 0); // Set to start of day in IST
-  
-  // Convert to UTC for MongoDB storage
-  return istToUTC(istDate);
-};
-
-// IST day key for "today" lookups and unique constraint: YYYY-MM-DD
-const getISTDateString = () => {
-  const istNow = getISTNow();
-  const y = istNow.getFullYear();
-  const m = String(istNow.getMonth() + 1).padStart(2, "0");
-  const d = String(istNow.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-};
-
-// Helper function to get IST date range (today start and tomorrow start in UTC for MongoDB)
+const getISTNow = () => new Date();
+const getISTDateString = getBusinessDateKey;
+const getISTDayName = getBusinessDayName;
 const getISTDateRange = () => {
-  const today = getISTDate();
-  const tomorrow = new Date(today);
-  tomorrow.setTime(tomorrow.getTime() + 24 * 60 * 60 * 1000);
+  const { startUTC: today, endUTC: tomorrow } = businessDayQueryRange();
   return { today, tomorrow };
 };
-
-const getISTBoundaryUTCFromDateInput = (dateInput, endOfDay = false) => {
-  const normalized = String(dateInput || "").trim();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    const [year, month, day] = normalized.split("-").map(Number);
-    const utcMs =
-      Date.UTC(
-        year,
-        month - 1,
-        day,
-        endOfDay ? 23 : 0,
-        endOfDay ? 59 : 0,
-        endOfDay ? 59 : 0,
-        endOfDay ? 999 : 0
-      ) - IST_OFFSET_MS;
-
-    return new Date(utcMs);
-  }
-
-  const parsed = new Date(normalized);
-  if (Number.isNaN(parsed.getTime())) {
-    return null;
-  }
-
-  parsed.setHours(
-    endOfDay ? 23 : 0,
-    endOfDay ? 59 : 0,
-    endOfDay ? 59 : 0,
-    endOfDay ? 999 : 0
-  );
-  return new Date(parsed.getTime() - IST_OFFSET_MS);
-};
-
 const applyISTDateRangeFilter = (query, { startDate, endDate }) => {
   if (!startDate && !endDate) return;
-
-  const dateFilter = {};
-  const startBoundary = startDate
-    ? getISTBoundaryUTCFromDateInput(startDate, false)
-    : null;
-  const endBoundary = endDate
-    ? getISTBoundaryUTCFromDateInput(endDate, true)
-    : null;
-
-  if (startBoundary) {
-    dateFilter.$gte = startBoundary;
+  const dateFilter = {}, keyFilter = {};
+  if (startDate) {
+    const range = businessDayQueryRange(startDate);
+    dateFilter.$gte = range.startUTC; keyFilter.$gte = range.dateKey;
   }
-  if (endBoundary) {
-    dateFilter.$lte = endBoundary;
+  if (endDate) {
+    const range = businessDayQueryRange(endDate);
+    dateFilter.$lt = range.endUTC; keyFilter.$lte = range.dateKey;
   }
-  if (Object.keys(dateFilter).length > 0) {
-    query.date = dateFilter;
-  }
-};
-
-// Helper function to get day name in IST
-const getISTDayName = () => {
-  const istNow = getISTNow();
-  const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
-  return dayNames[istNow.getDay()]; // Use getDay() for IST day
+  query.$and = [...(query.$and || []), { $or: [
+    { attendanceDateIST: keyFilter },
+    { $and: [{ $or: [{attendanceDateIST: ''}, {attendanceDateIST: null}] }, { date: dateFilter }] },
+  ] }];
 };
 
 const getTodaySchedule = (schedule, dayName) => {
@@ -169,6 +88,7 @@ const normalizeAttendanceRecord = (record) => {
 
   return {
     ...plainRecord,
+    attendanceDateIST: attendanceDateKey(plainRecord),
     attendanceStatus,
     checkInStatus,
     canTakeBreak: plainRecord.canTakeBreak ?? (attendanceStatus === "checked_in" || attendanceStatus === "on_break"),
@@ -403,7 +323,7 @@ const buildActiveSessionQuery = ({ employeeId, today, tomorrow, cartId }) => {
   };
 
   if (today && tomorrow) {
-    query.date = { $gte: today, $lt: tomorrow };
+    query.$and.push(...attendanceDayFilter(getBusinessDateKey(today)).$and);
   }
 
   const cartClause = buildCartMatchClause(cartId);
@@ -569,13 +489,14 @@ exports.getAllAttendance = async (req, res) => {
     const query = await buildHierarchyQuery(req.user);
 
     if (employeeId) {
-      query.employeeId = employeeId;
+      // A requested ID narrows the caller's hierarchy; it cannot replace it.
+      query.$and = [...(query.$and || []), {employeeId}];
     }
 
     if (req.query.cartId) {
       const cartFilter = { $or: [{ cartId: req.query.cartId }, { cafeId: req.query.cartId }] };
       if (query.$or) {
-        query.$and = [{ $or: query.$or }, cartFilter];
+        query.$and = [...(query.$and || []), { $or: query.$or }, cartFilter];
         delete query.$or;
       } else {
         Object.assign(query, cartFilter);
@@ -587,8 +508,9 @@ exports.getAllAttendance = async (req, res) => {
     const istNow = getISTNow();
 
     // If querying today's attendance, mark absent employees
-    const isQueryingToday = (!startDate && !endDate) || 
-      (startDate && new Date(startDate) <= today && (!endDate || new Date(endDate) >= today));
+    const todayKey = getBusinessDateKey();
+    const isQueryingToday = (!startDate || getBusinessDateKey(startDate) <= todayKey) &&
+      (!endDate || getBusinessDateKey(endDate) >= todayKey);
 
     if (isQueryingToday && !employeeId) {
       // Get all employees in the hierarchy
@@ -605,7 +527,7 @@ exports.getAllAttendance = async (req, res) => {
       // Get existing attendance for today
       const todayQuery = {
         ...query,
-        date: { $gte: today, $lt: tomorrow },
+        $and: [...(query.$and || []), ...attendanceDayFilter().$and],
       };
       const existingAttendance = await EmployeeAttendance.find(todayQuery)
         .select("employeeId")
@@ -677,10 +599,8 @@ exports.getAllAttendance = async (req, res) => {
           const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
           
           if (todaySchedule && todaySchedule.isWorking) {
-          const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
           // Create scheduled start time in IST
-          const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
+          const scheduledStartTimeIST = scheduledTime(istNow, todaySchedule.startTime); // Set time in IST
           
           // Add 30 minute buffer in IST
           const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
@@ -718,19 +638,31 @@ exports.getAllAttendance = async (req, res) => {
       // If startDate/endDate undefined, isQueryingToday is TRUE.
       // So default behavior is SHOW TODAY ONLY.
       // If user wants ALL history, they must provide wide date range or we change default.
-      query.date = { $gte: today, $lt: tomorrow };
+      query.$and = [...(query.$and || []), ...attendanceDayFilter(getBusinessDateKey(today)).$and];
     }
 
     if (status) {
       query.status = status;
     }
 
-    const attendance = await EmployeeAttendance.find(query)
+    const paginated = req.query.page !== undefined || req.query.limit !== undefined;
+    const bounded = (value, fallback, max) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) ? Math.min(max, Math.max(1, parsed)) : fallback;
+    };
+    const page = bounded(req.query.page, 1, 50000);
+    const limit = bounded(req.query.limit, 30, 100);
+    let recordsQuery = EmployeeAttendance.find(query)
       .populate("employeeId", "name mobile employeeRole")
-      .sort({ date: -1, createdAt: -1 })
-      .lean();
-
-    return res.json(attendance.map((record) => normalizeAttendanceRecord(record)));
+      .sort({ date: -1, createdAt: -1, _id: -1 });
+    if (paginated) recordsQuery = recordsQuery.skip((page - 1) * limit).limit(limit + 1);
+    const attendance = await recordsQuery.lean();
+    const hasNextPage = paginated && attendance.length > limit;
+    const data = (paginated ? attendance.slice(0, limit) : attendance)
+      .map((record) => normalizeAttendanceRecord(record));
+    if (paginated) return res.json({success: true, data,
+      pagination: {page, limit, hasNextPage}});
+    return res.json(data);
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -757,7 +689,7 @@ exports.getTodayAttendance = async (req, res) => {
     }
     const query = {
       ...hierarchyQuery,
-      date: { $gte: today, $lt: tomorrow },
+      ...attendanceDayFilter(),
     };
 
     if (req.query.cartId) {
@@ -810,7 +742,7 @@ exports.getTodayAttendance = async (req, res) => {
     if (employeeIds.length > 0) {
       const fallbackRows = await EmployeeAttendance.find({
         employeeId: { $in: employeeIds },
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
       })
         .populate("employeeId", "name mobile employeeRole")
         .sort({ "checkIn.time": -1, updatedAt: -1, createdAt: -1 });
@@ -920,10 +852,8 @@ exports.getTodayAttendance = async (req, res) => {
         // If today is a working day and employee hasn't checked in, mark as absent
         if (todaySchedule && todaySchedule.isWorking) {
           // Check if it's past the scheduled start time (with 30 minute buffer)
-          const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
           // Create scheduled start time in IST
-          const scheduledStartTimeIST = new Date(istNow);
-          scheduledStartTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
+          const scheduledStartTimeIST = scheduledTime(istNow, todaySchedule.startTime); // Set time in IST
           
           // Add 30 minute buffer in IST - only mark absent if it's 30 minutes past scheduled start time
           const bufferTimeIST = new Date(scheduledStartTimeIST.getTime() + 30 * 60 * 1000);
@@ -969,30 +899,10 @@ exports.getTodayAttendance = async (req, res) => {
 
       // If checked in but not checked out, calculate real-time working hours
       if (record.checkIn?.time) {
-        const checkInTime = new Date(record.checkIn.time);
-        const breakMinutes = record.breakDuration || 0;
-        
-        // Calculate working minutes (excluding breaks)
-        // If on break, pause the timer at break start
-        let workingMinutes = 0;
-        if (record.isOnBreak && record.breakStart) {
-          // PAUSED: Working timer is frozen at the moment break started
-          const breakStartTime = new Date(record.breakStart);
-          const workingTimeUntilBreak = Math.floor((breakStartTime - checkInTime) / (1000 * 60));
-          // Subtract only completed breaks (breakDuration doesn't include current break)
-          workingMinutes = Math.max(0, workingTimeUntilBreak - breakMinutes);
-        } else {
-          // ACTIVE: Working timer is running
-          const totalDurationMinutes = Math.floor((now - checkInTime) / (1000 * 60));
-          // Subtract completed break time
-          workingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
-        }
-
-        // Live working time for UI timer (not 0:0:0)
-        const hours = Math.floor(workingMinutes / 60);
-        const mins = Math.floor(workingMinutes % 60);
-        const secs = 0; // UI can tick seconds client-side if needed
-        const liveWorkingHMS = { hours, minutes: mins, seconds: secs };
+        const { workingMs } = attendanceDurations(record, now);
+        const workingMinutes = Math.floor(workingMs / 60000);
+        const seconds = Math.floor(workingMs / 1000);
+        const liveWorkingHMS = { hours: Math.floor(seconds / 3600), minutes: Math.floor(seconds / 60) % 60, seconds: seconds % 60 };
 
         return normalizeAttendanceRecord({
           ...record,
@@ -1024,7 +934,8 @@ exports.getPastAttendance = async (req, res) => {
     };
 
     if (employeeId) {
-      query.employeeId = employeeId;
+      // A requested ID narrows the caller's hierarchy; it cannot replace it.
+      query.$and = [...(query.$and || []), {employeeId}];
     }
 
     if (req.query.cartId) {
@@ -1127,11 +1038,11 @@ exports.checkIn = async (req, res) => {
     ) {
       const duplicateQuery = {
         employeeId: targetEmployeeId,
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
       };
       const cartClause = buildCartMatchClause(employeeCartId);
       if (cartClause) {
-        duplicateQuery.$and = [cartClause];
+        duplicateQuery.$and = [...(duplicateQuery.$and || []), cartClause];
       }
       const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
         .sort({ updatedAt: -1, createdAt: -1 });
@@ -1195,7 +1106,7 @@ exports.checkIn = async (req, res) => {
     // This ensures we only find attendance records that match both employeeId AND cartId
     const attendanceQuery = {
       employeeId: targetEmployeeId,
-      date: { $gte: today, $lt: tomorrow },
+      ...attendanceDayFilter(),
     };
     
     // Add cartId filter if we could resolve a cart id from employee/user context.
@@ -1211,7 +1122,7 @@ exports.checkIn = async (req, res) => {
     if (!attendance && employeeCartId) {
       const fallbackQuery = {
         employeeId: targetEmployeeId,
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
         $or: [
           { cartId: { $exists: false } },
           { cartId: null },
@@ -1291,7 +1202,7 @@ exports.checkIn = async (req, res) => {
 
     const checkedInTodayQuery = {
       employeeId: targetEmployeeId,
-      date: { $gte: today, $lt: tomorrow },
+      ...attendanceDayFilter(),
       "checkIn.time": { $ne: null },
     };
 
@@ -1340,16 +1251,14 @@ exports.checkIn = async (req, res) => {
 
     // Get current time in IST, then convert to UTC for MongoDB storage
     const checkInTimeIST = getISTNow();
-    const checkInTime = istToUTC(checkInTimeIST); // Store in UTC (MongoDB default)
+    const checkInTime = checkInTimeIST; // Store in UTC (MongoDB default)
 
     let status = "present";
     let isLate = false;
 
     if (todaySchedule && todaySchedule.isWorking && todaySchedule.startTime) {
-      const [hours, minutes] = todaySchedule.startTime.split(":").map(Number);
         // Create scheduled time in IST for today
-        const scheduledTimeIST = new Date(istNow);
-        scheduledTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
+        const scheduledTimeIST = scheduledTime(istNow, todaySchedule.startTime); // Set time in IST
         
         // Compare checkInTime (IST) with scheduledTime (IST)
         if (checkInTimeIST > scheduledTimeIST) {
@@ -1568,11 +1477,11 @@ exports.checkOut = async (req, res) => {
     ) {
       const duplicateQuery = {
         employeeId: targetEmployeeId,
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
       };
       const cartClause = buildCartMatchClause(employee.cartId);
       if (cartClause) {
-        duplicateQuery.$and = [cartClause];
+        duplicateQuery.$and = [...(duplicateQuery.$and || []), cartClause];
       }
       const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
         .sort({ updatedAt: -1, createdAt: -1 });
@@ -1626,7 +1535,7 @@ exports.checkOut = async (req, res) => {
 
       const latestToday = await EmployeeAttendance.findOne({
         employeeId: targetEmployeeId,
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
       })
         .sort({ updatedAt: -1 })
         .populate("employeeId", "name mobile employeeRole")
@@ -1692,7 +1601,7 @@ exports.checkOutById = async (req, res) => {
     const requestMeta = getAttendanceRequestMeta(req);
 
     // Find attendance record
-    const attendance = await EmployeeAttendance.findById(id);
+    let attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ success: false, message: "Attendance record not found" });
     }
@@ -1734,9 +1643,8 @@ exports.checkOutById = async (req, res) => {
     } else {
       // Admin access check
       const query = await buildHierarchyQuery(user);
-      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
-        return res.status(403).json({ success: false, message: "Access denied" });
-      }
+      const inScope = await EmployeeAttendance.exists({_id: attendance._id, ...query});
+      if (!inScope) return res.status(403).json({success: false, message: 'Access denied'});
     }
 
     const { today, tomorrow } = getISTDateRange();
@@ -1752,11 +1660,11 @@ exports.checkOutById = async (req, res) => {
     ) {
       const duplicateQuery = {
         employeeId: attendance.employeeId,
-        date: { $gte: today, $lt: tomorrow },
+        ...attendanceDayFilter(),
       };
       const cartClause = buildCartMatchClause(attendance.cartId || attendance.cafeId);
       if (cartClause) {
-        duplicateQuery.$and = [cartClause];
+        duplicateQuery.$and = [...(duplicateQuery.$and || []), cartClause];
       }
       const duplicateAttendance = await EmployeeAttendance.findOne(duplicateQuery)
         .sort({ updatedAt: -1, createdAt: -1 });
@@ -1790,7 +1698,7 @@ exports.checkOutById = async (req, res) => {
       today,
       tomorrow,
     });
-    const activeAttendance = await EmployeeAttendance.findOne(activeSessionQuery)
+    let activeAttendance = await EmployeeAttendance.findOne(activeSessionQuery)
       .sort({ updatedAt: -1, createdAt: -1 });
 
     if (!activeAttendance) {
@@ -1897,16 +1805,12 @@ exports.checkOutById = async (req, res) => {
       });
     }
 
-    // Get current time in IST, then convert to UTC for MongoDB storage
+    // Record the actual UTC instant; business timezone only determines the day.
     const checkOutTimeIST = getISTNow();
-    const checkOutTime = istToUTC(checkOutTimeIST); // Store in UTC (MongoDB default)
+    const checkOutTime = checkOutTimeIST; // Store in UTC (MongoDB default)
 
-    // Calculate working hours (convert stored UTC times to IST for calculation)
-    const checkInTimeUTC = new Date(activeAttendance.checkIn.time);
-    const checkInTimeIST = utcToIST(checkInTimeUTC);
-    const totalDurationMinutes = Math.floor((checkOutTimeIST - checkInTimeIST) / (1000 * 60));
-    const breakMinutes = activeAttendance.breakDuration || 0;
-    const totalWorkingMinutes = Math.max(0, totalDurationMinutes - breakMinutes);
+    // Net working time comes from the check-in and complete break timestamps.
+    const totalWorkingMinutes = Math.floor(attendanceDurations(activeAttendance, checkOutTime).workingMs / 60000);
 
     // Get schedule to calculate overtime (all comparisons in IST)
     const schedule = await EmployeeSchedule.findOne({ employeeId: activeAttendance.employeeId });
@@ -1918,10 +1822,8 @@ exports.checkOutById = async (req, res) => {
       const todaySchedule = schedule.weeklySchedule.find((s) => s.day === todayDay);
 
       if (todaySchedule && todaySchedule.isWorking && todaySchedule.endTime) {
-        const [hours, minutes] = todaySchedule.endTime.split(":").map(Number);
         // Create scheduled end time in IST for today
-        const scheduledEndTimeIST = new Date(istNow);
-        scheduledEndTimeIST.setHours(hours, minutes, 0, 0); // Set time in IST
+        const scheduledEndTimeIST = scheduledTime(istNow, todaySchedule.endTime); // Set time in IST
         
         // Compare checkOutTime (IST) with scheduledEndTime (IST)
         if (checkOutTimeIST > scheduledEndTimeIST) {
@@ -1930,8 +1832,8 @@ exports.checkOutById = async (req, res) => {
       }
     }
 
-    // Ensure date field is set to today's IST date (in case it was set incorrectly)
-    activeAttendance.date = today;
+    // Preserve the original check-in business day when closing this session.
+    activeAttendance.date = businessDayQueryRange(attendanceDateKey(activeAttendance)).startUTC;
     
     activeAttendance.checkOut = {
       time: checkOutTime,
@@ -1966,7 +1868,13 @@ exports.checkOutById = async (req, res) => {
       activeAttendance.status = "completed";
     }
 
-    await activeAttendance.save();
+    const updatedCheckout = await EmployeeAttendance.findOneAndUpdate({
+      _id: activeAttendance._id, __v: activeAttendance.__v ?? {$exists: false},
+      'checkOut.time': null, isCheckedOut: { $ne: true },
+      isOnBreak: { $ne: true }, breakStart: null,
+    }, { $set: activeAttendance.getChanges().$set, $inc: {__v: 1} }, {new: true, runValidators: true});
+    if (!updatedCheckout) return res.status(409).json({success: false, code: 'ATTENDANCE_CHANGED', message: 'Attendance changed. Refresh and try again.'});
+    activeAttendance = updatedCheckout;
     await activeAttendance.populate("employeeId", "name mobile employeeRole");
     const normalizedAttendance = normalizeAttendanceRecord(activeAttendance);
 
@@ -2028,7 +1936,7 @@ exports.startBreak = async (req, res) => {
     const user = req.user;
 
     // Find attendance record
-    const attendance = await EmployeeAttendance.findById(id);
+    let attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ success: false, message: "Attendance record not found" });
     }
@@ -2048,9 +1956,8 @@ exports.startBreak = async (req, res) => {
     } else {
       // Admin access check
       const query = await buildHierarchyQuery(user);
-      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
-        return res.status(403).json({ success: false, message: "Access denied" });
-      }
+      const inScope = await EmployeeAttendance.exists({_id: attendance._id, ...query});
+      if (!inScope) return res.status(403).json({success: false, message: 'Access denied'});
     }
 
     await attendance.populate("employeeId", "name mobile employeeRole");
@@ -2089,12 +1996,13 @@ exports.startBreak = async (req, res) => {
       });
     }
 
-    attendance.breakStart = new Date();
-    attendance.isOnBreak = true;
-    attendance.attendanceStatus = "on_break";
-    attendance.checkInStatus = "checked_in";
-    attendance.canTakeBreak = true;
-    await attendance.save();
+    const updated = await EmployeeAttendance.findOneAndUpdate({
+      _id: attendance._id, 'checkIn.time': { $ne: null }, 'checkOut.time': null,
+      isCheckedOut: { $ne: true }, isOnBreak: { $ne: true }, breakStart: null,
+    }, { $set: { breakStart: new Date(), isOnBreak: true, attendanceStatus: 'on_break',
+      checkInStatus: 'checked_in', canTakeBreak: true }, $inc: {__v: 1} }, {new: true});
+    if (!updated) return res.status(409).json({success: false, code: 'ATTENDANCE_CHANGED', message: 'Attendance changed. Refresh and try again.'});
+    attendance = updated;
     await attendance.populate("employeeId", "name mobile employeeRole");
 
     // Emit socket event for real-time update
@@ -2125,7 +2033,7 @@ exports.endBreak = async (req, res) => {
     const user = req.user;
 
     // Find attendance record
-    const attendance = await EmployeeAttendance.findById(id);
+    let attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ message: "Attendance record not found" });
     }
@@ -2145,9 +2053,8 @@ exports.endBreak = async (req, res) => {
     } else {
       // Admin access check
       const query = await buildHierarchyQuery(user);
-      if (query.cafeId && attendance.cafeId?.toString() !== query.cafeId.toString()) {
-        return res.status(403).json({ success: false, message: "Access denied" });
-      }
+      const inScope = await EmployeeAttendance.exists({_id: attendance._id, ...query});
+      if (!inScope) return res.status(403).json({success: false, message: 'Access denied'});
     }
 
     await attendance.populate("employeeId", "name mobile employeeRole");
@@ -2171,24 +2078,16 @@ exports.endBreak = async (req, res) => {
     }
 
     const breakEnd = new Date();
-    const breakStart = attendance.breakStart ? new Date(attendance.breakStart) : breakEnd;
-    const breakDuration = Math.max(0, Math.floor((breakEnd - breakStart) / (1000 * 60))); // in minutes
-    attendance.breakDuration = (attendance.breakDuration || 0) + breakDuration;
-    if (!Array.isArray(attendance.breaks)) {
-      attendance.breaks = [];
-    }
-    attendance.breaks.push({
-      breakStart,
-      breakEnd,
-      durationMinutes: breakDuration,
-    });
-    attendance.breakStart = null; // Clear break start time
-    attendance.isOnBreak = false; // Clear break status
-    attendance.attendanceStatus = "checked_in";
-    attendance.checkInStatus = "checked_in";
-    attendance.canTakeBreak = true;
-
-    await attendance.save();
+    const breakStart = attendance.breakStart;
+    if (!breakStart) return res.status(409).json({success: false, message: 'Active break timestamp is missing'});
+    const breakDuration = Math.floor(Math.max(0, breakEnd - breakStart) / 60000);
+    const updated = await EmployeeAttendance.findOneAndUpdate({
+      _id: attendance._id, breakStart, 'checkOut.time': null, isCheckedOut: { $ne: true },
+    }, { $set: {breakStart: null, isOnBreak: false, attendanceStatus: 'checked_in',
+      checkInStatus: 'checked_in', canTakeBreak: true},
+      $inc: {breakDuration, __v: 1}, $push: {breaks: {breakStart, breakEnd, durationMinutes: breakDuration}} }, {new: true});
+    if (!updated) return res.status(409).json({success: false, code: 'ATTENDANCE_CHANGED', message: 'Attendance changed. Refresh and try again.'});
+    attendance = updated;
     await attendance.populate("employeeId", "name mobile employeeRole");
 
     // Emit socket event for real-time update
@@ -2220,7 +2119,8 @@ exports.getAttendanceStats = async (req, res) => {
     const query = await buildHierarchyQuery(req.user);
 
     if (employeeId) {
-      query.employeeId = employeeId;
+      // A requested ID narrows the caller's hierarchy; it cannot replace it.
+      query.$and = [...(query.$and || []), {employeeId}];
     }
 
     if (req.query.cartId) {
@@ -2274,7 +2174,7 @@ exports.updateAttendanceStatus = async (req, res) => {
     const { id } = req.params;
     const { status, notes } = req.body;
 
-    const attendance = await EmployeeAttendance.findById(id);
+    let attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ message: "Attendance record not found" });
     }
@@ -2332,7 +2232,7 @@ exports.updateAttendanceStatus = async (req, res) => {
 exports.deleteAttendance = async (req, res) => {
   try {
     const { id } = req.params;
-    const attendance = await EmployeeAttendance.findById(id);
+    let attendance = await EmployeeAttendance.findById(id);
     if (!attendance) {
       return res.status(404).json({ message: "Attendance record not found" });
     }
