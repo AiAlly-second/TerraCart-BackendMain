@@ -4,6 +4,7 @@ const User = require('../../models/userModel');
 const { nextRun, period } = require('./time');
 const { generate } = require('./report');
 const { render } = require('./template');
+const { build: buildOrdersWorkbook, attach: attachOrdersWorkbook } = require('./ordersWorkbook');
 const { transaction, hash } = require('./settings');
 const provider = require('./provider');
 const LEASE_MS = 60000;
@@ -29,7 +30,8 @@ async function materialize(now = new Date()) {
       if (!recipients.length) { occurrence.status = 'no_recipients'; await occurrence.save({ session }); return; }
       // Freeze report and provider payload once; retries keep identical content and cutoff.
       occurrence.report = await generate(row, window.start, window.end, now);
-      const content = render(occurrence.report, row.reportOptions);
+      const content = attachOrdersWorkbook(render(occurrence.report, row.reportOptions),
+        await buildOrdersWorkbook({ cartId: row.cartId, franchiseId: row.franchiseId, start: window.start, end: window.end, generatedAt: now }));
       await occurrence.save({ session });
       await Delivery.create(recipients.map(recipient => ({ settingsId: row._id, cartId: row.cartId,
         franchiseId: row.franchiseId, recipientId: recipient._id, email: recipient.email,
