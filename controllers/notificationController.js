@@ -165,6 +165,21 @@ const saveFcmToken = async (req, res) => {
       metadata,
     } =
       req.body || {};
+    if ((firebaseToken != null && typeof firebaseToken !== 'string') ||
+        (token != null && typeof token !== 'string') ||
+        (userId != null && typeof userId !== 'string') ||
+        String(firebaseToken || token || '').length > 4096 ||
+        (platform != null && !VALID_FCM_PLATFORMS.has(platform)) ||
+        (metadata != null && (typeof metadata !== 'object' || Array.isArray(metadata) ||
+          JSON.stringify(metadata).length > 2048)) ||
+        (metadata?.mobileDeviceId != null &&
+          (typeof metadata.mobileDeviceId !== 'string' ||
+          !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(metadata.mobileDeviceId))) ||
+        (metadata?.mobileRegistrationId != null &&
+          (typeof metadata.mobileRegistrationId !== 'string' ||
+          !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(metadata.mobileRegistrationId)))) {
+      return res.status(400).json({ success: false, message: 'Invalid device registration' });
+    }
     const rawHeaderAnonymousSessionId =
       req.headers["x-anonymous-session-id"] || req.headers["x-session-id"];
     const headerAnonymousSessionId = Array.isArray(rawHeaderAnonymousSessionId)
@@ -260,12 +275,17 @@ const saveFcmToken = async (req, res) => {
       });
     }
 
+    // A staff token is scoped to the target user's cart, never a caller-selected tenant.
+    const targetCart = user?.cartId || user?.cafeId || null;
+    if (user && cartId && String(cartId) !== String(targetCart)) {
+      return res.status(403).json({ success: false, message: 'Device cart scope mismatch' });
+    }
     const deviceTokenResult = await upsertDeviceToken({
       token: normalizedToken,
       platform: normalizePlatform(platform),
       userId: user?._id || null,
       anonymousSessionId: normalizedAnonymousSessionId || null,
-      cartId: cartId || req.user?.cartId || req.user?.cafeId || null,
+      cartId: user ? targetCart : cartId || null,
       source,
       metadata,
     });
@@ -280,6 +300,8 @@ const saveFcmToken = async (req, res) => {
 
     if (user) {
       user.fcmToken = normalizedToken;
+      user.fcmTokenRegistrationId = typeof metadata?.mobileRegistrationId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(metadata.mobileRegistrationId)
+        ? metadata.mobileRegistrationId : null;
       user.fcmTokenPlatform = normalizePlatform(platform);
       user.fcmTokenUpdatedAt = now;
       await user.save();
@@ -291,10 +313,7 @@ const saveFcmToken = async (req, res) => {
       anonymousSessionId: normalizedAnonymousSessionId || null,
       cartId: toObjectIdString(deviceTokenResult.cartId || cartId),
       platform: normalizePlatform(platform),
-      tokenPreview:
-        normalizedToken.length > 12
-          ? `${normalizedToken.slice(0, 6)}...${normalizedToken.slice(-6)}`
-          : normalizedToken,
+      hasToken: true,
     });
 
     return res.json({
@@ -312,7 +331,8 @@ const saveFcmToken = async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       success: false,
-      message: error.message || "Failed to save FCM token.",
+      message: "Device registration unavailable",
+      code: "DEVICE_REGISTRATION_UNAVAILABLE",
     });
   }
 };

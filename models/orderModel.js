@@ -145,6 +145,11 @@ const orderSchema = new mongoose.Schema(
       deliveryCharge: { type: Number, default: 0 }, // Delivery charge in rupees
       estimatedTime: { type: Number }, // Estimated delivery time in minutes
     },
+    // Server-authenticated creator metadata; historical orders may omit it.
+    origin: {
+      source: { type: String, enum: ['staff_mobile', 'staff_web', 'customer', 'unknown'], default: 'unknown' },
+      createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    },
     // QR source context (kept flexible for future QR types/locations)
     sourceQrType: {
       type: String,
@@ -257,7 +262,16 @@ const orderSchema = new mongoose.Schema(
     autoReleasedAt: Date,
     sessionToken: { type: String, index: true, sparse: true }, // Session token for dine-in orders
     // Client-generated key to make create-order requests idempotent.
-    idempotencyKey: { type: String, index: true, sparse: true },
+    // One unique sparse index is declared below; a second non-unique path
+    // index with the same name prevents clean databases from initializing.
+    idempotencyKey: { type: String },
+    // Request digest binds customer, operation, cart/tenant and complete payload.
+    // Expiry is logical, not a TTL on orders; expired keys cannot create duplicates.
+    idempotencyBinding: {
+      ownerHash: String,
+      payloadHash: String,
+      expiresAt: Date,
+    },
     // Simple sequential token for takeaway orders (1, 2, 3, etc.) - unique per cart
     takeawayToken: { type: Number, index: true, sparse: true },
     // Cart admin association for data isolation
@@ -276,6 +290,7 @@ const orderSchema = new mongoose.Schema(
     },
     // Idempotency keys already consumed by add-kot requests.
     kotRequestKeys: { type: [String], default: [] },
+    kotReplayBindings: [{ key: String, ownerHash: String, payloadHash: String, expiresAt: Date }],
     // First-come-first-serve order acceptance (TAKEAWAY/PICKUP/DELIVERY)
     acceptedBy: {
       employeeId: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },

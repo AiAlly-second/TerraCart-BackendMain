@@ -10,6 +10,10 @@ const {
 const { protect, authorize, optionalProtect } = require("../middleware/authMiddleware");
 
 const router = express.Router();
+const { createRemoveDeviceToken } = require('../controllers/removeDeviceToken');
+const DeviceToken = require('../models/deviceTokenModel');
+const User = require('../models/userModel');
+router.post('/remove-token', protect, createRemoveDeviceToken(DeviceToken, User));
 
 router.get("/firebase-web-config", optionalProtect, getFirebaseWebConfig);
 

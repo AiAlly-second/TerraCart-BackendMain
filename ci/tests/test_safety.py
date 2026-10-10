@@ -18,6 +18,20 @@ SHA = 'a' * 40
 REPOSITORY = 'owner/application'
 
 
+class SecretScannerSafety(unittest.TestCase):
+    def test_placeholder_comment_cannot_hide_real_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'application.js'
+            path.write_text('const uri = "mongodb://' + 'real-user:real-pass' + '@db.invalid/app"; // YOUR_example fixture\n')
+            with patch.object(checks, 'ROOT', Path(directory)), patch.object(checks, 'source_files', return_value=[path]), patch.object(checks, 'report') as report:
+                with self.assertRaises(RuntimeError):
+                    checks.secret_scan()
+                self.assertEqual(report.call_args.args[1][0]['rule'], 'database-credentials')
+                path.write_text('URI=mongodb://' + 'YOUR_MONGO_USERNAME:YOUR_MONGO_PASSWORD' + '@db.invalid/app\n')
+                checks.secret_scan()
+                self.assertEqual(report.call_args.args[1], [])
+
+
 class ArtifactSafety(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

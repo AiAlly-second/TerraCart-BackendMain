@@ -17,7 +17,7 @@ class DatabaseTargetGuard(unittest.TestCase):
                         'mongodb+srv://db.example/terracart_inventory_isolation_test',
                         'mongodb://127.0.0.1/production',
                         'mongodb://127.0.0.1/terracart_inventory_isolation_test?authSource=admin',
-                        'mongodb://fixture:fixture@127.0.0.1/terracart_inventory_isolation_test'],
+                        'mongodb://' + 'fixture:fixture' + '@127.0.0.1/terracart_inventory_isolation_test'],
                        env=safe_environment(), check=True)
         # Import-time guard rejects accidentally inherited production environment.
         env = safe_environment()

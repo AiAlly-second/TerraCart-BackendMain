@@ -181,11 +181,11 @@ const getMessagingClient = () => {
 
 const buildSingleMessage = (token, payload = {}) => ({
   token,
-  notification: {
+  ...(payload.dataOnly ? {} : { notification: {
     title: String(payload.title || "Notification"),
     body: String(payload.body || ""),
-  },
-  data: normalizeDataPayload(payload.data),
+  } }),
+  data: normalizeDataPayload({ title: payload.title || "Notification", body: payload.body || "", ...payload.data }),
   android: {
     priority: "high",
   },
@@ -197,11 +197,11 @@ const buildSingleMessage = (token, payload = {}) => ({
 
 const buildMulticastMessage = (tokens, payload = {}) => ({
   tokens,
-  notification: {
+  ...(payload.dataOnly ? {} : { notification: {
     title: String(payload.title || "Notification"),
     body: String(payload.body || ""),
-  },
-  data: normalizeDataPayload(payload.data),
+  } }),
+  data: normalizeDataPayload({ title: payload.title || "Notification", body: payload.body || "", ...payload.data }),
   android: {
     priority: "high",
   },
@@ -251,8 +251,12 @@ const upsertDeviceToken = async ({
 
   const now = new Date();
   const identityFilters = [];
-  if (normalizedUserId) {
-    identityFilters.push({ userId: normalizedUserId });
+  // Token rotation retires only this installation. Registering another device
+  // must not silence every other device belonging to the same staff user.
+  const deviceId = metadata?.mobileDeviceId;
+  if (normalizedUserId && typeof deviceId === 'string' &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(deviceId)) {
+    identityFilters.push({ userId: normalizedUserId, 'metadata.mobileDeviceId': deviceId });
   }
   if (normalizedAnonymousSessionId) {
     identityFilters.push({ anonymousSessionId: normalizedAnonymousSessionId });
@@ -297,6 +301,11 @@ const upsertDeviceToken = async ({
       setDefaultsOnInsert: true,
     }
   );
+
+  // One registration token belongs to one current identity. Clear stale
+  // legacy fallbacks when the same installation switches accounts.
+  await User.updateMany({ fcmToken: normalizedToken, _id: { $ne: normalizedUserId } },
+    { $set: { fcmToken: null, fcmTokenPlatform: 'unknown', fcmTokenUpdatedAt: now } });
 
   writePushDebugLog("Device token upserted", {
     userId: deviceToken.userId ? deviceToken.userId.toString() : null,
@@ -434,6 +443,44 @@ const sendPushToTokens = async (tokens, payload = {}) => {
     };
   }
 
+  if (!payload._partitioned) {
+    const type = String(payload.data?.notificationType || '');
+    const operational = ['new_order', 'vip_order', 'order_ready', 'payment_request', 'assistance_request',
+      'customer_request', 'payment_received', 'order_cancelled', 'task_reminder'].includes(type);
+    if (operational) {
+      const rows = await DeviceToken.find({ token: { $in: normalizedTokens }, platform: 'android', isActive: true })
+        .select('token').lean();
+      const androidTokens = new Set(rows.map(row => row.token));
+      // Registered legacy user tokens also carry an explicit platform.
+      const users = await User.find({ fcmToken: { $in: normalizedTokens }, fcmTokenPlatform: 'android' })
+        .select('fcmToken').lean();
+      users.forEach(user => androidTokens.add(user.fcmToken));
+      const batches = [];
+      for (const dataOnly of [true, false]) {
+        const group = normalizedTokens.filter(token => androidTokens.has(token) === dataOnly);
+        for (let offset = 0; offset < group.length; offset += 500) {
+          batches.push(await sendPushToTokens(group.slice(offset, offset + 500),
+            { ...payload, dataOnly, _partitioned: true }));
+        }
+      }
+      return { success: batches.some(row => row.success), total: normalizedTokens.length,
+        successCount: batches.reduce((n, row) => n + row.successCount, 0),
+        failureCount: batches.reduce((n, row) => n + row.failureCount, 0),
+        invalidTokens: batches.flatMap(row => row.invalidTokens || []),
+        results: batches.flatMap(row => row.results || []) };
+    }
+  }
+  if (normalizedTokens.length > 500) {
+    const batches = [];
+    for (let offset = 0; offset < normalizedTokens.length; offset += 500) {
+      batches.push(await sendPushToTokens(normalizedTokens.slice(offset, offset + 500), payload));
+    }
+    return { success: batches.some(row => row.success), total: normalizedTokens.length,
+      successCount: batches.reduce((n, row) => n + row.successCount, 0),
+      failureCount: batches.reduce((n, row) => n + row.failureCount, 0),
+      invalidTokens: batches.flatMap(row => row.invalidTokens || []),
+      results: batches.flatMap(row => row.results || []) };
+  }
   if (normalizedTokens.length === 1) {
     const single = await sendPushToToken(normalizedTokens[0], payload);
     return {
@@ -569,7 +616,8 @@ const sendPushToUser = async (user, payload = {}) => {
     };
   }
 
-  const result = await sendPushToTokens(tokens, payload);
+  const result = await sendPushToTokens(tokens, { ...payload,
+    data: { ...payload.data, recipientUserId: String(user._id) } });
   return {
     ...result,
     userId: user._id.toString(),
@@ -748,6 +796,9 @@ const sendNewOrderNotificationToCartStaff = async (order) => {
 
   const recipients = await User.find({
     role: { $in: STAFF_BROADCAST_ROLES },
+    isActive: { $ne: false },
+    ...(order.origin?.source === 'staff_mobile' && normalizeObjectId(order.origin.createdByUserId)
+      ? { _id: { $ne: normalizeObjectId(order.origin.createdByUserId) } } : {}),
     $or: [{ cartId: cartObjectId }, { cafeId: cartObjectId }],
   })
     .select("_id fcmToken")
@@ -759,8 +810,9 @@ const sendNewOrderNotificationToCartStaff = async (order) => {
 
   const deviceTokenRows = userIds.length
     ? await DeviceToken.find({
-        userId: { $in: userIds },
-        isActive: true,
+      userId: { $in: userIds },
+      isActive: true,
+      $or: [{ cartId: cartObjectId }, { cartId: null }],
       })
         .select("token")
         .lean()
@@ -795,6 +847,7 @@ const sendNewOrderNotificationToCartStaff = async (order) => {
       ? `VIP priority order received${order?._id ? ` (${order._id})` : ""}.`
       : buildStaffOrderNotificationBody(order),
     data: {
+      ...require('../utils/orderOrigin').orderCreationAlertMetadata(order),
       notificationType: isVipOrder ? "vip_order" : "new_order",
       event: "order:created",
       orderId: String(order?._id || ""),
@@ -824,6 +877,7 @@ const sendNewOrderNotificationToCartStaff = async (order) => {
 module.exports = {
   normalizeAnonymousSessionId,
   upsertDeviceToken,
+  buildSingleMessage, buildMulticastMessage,
   sendPushNotification,
   sendPushToToken,
   sendPushToTokens,

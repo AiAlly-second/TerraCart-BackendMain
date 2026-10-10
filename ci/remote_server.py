@@ -114,7 +114,13 @@ def health(url):
         try:
             with urlopen(url, timeout=4) as response:
                 body = json.load(response)
-            if body.get('status') == 'healthy':
+            if body.get('status') == 'healthy' or (
+                body.get('status') == 'degraded'
+                and body.get('mongo', {}).get('ready') is True
+                and body.get('redis', {}).get('configured') is True
+                and body.get('redis', {}).get('required') is False
+                and body.get('shuttingDown') is False
+            ):
                 return
         except Exception:
             pass

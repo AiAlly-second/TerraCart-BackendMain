@@ -55,18 +55,7 @@ const hashString = (input) =>
 
 const isHealthPath = (pathValue) => HEALTH_PATH_REGEX.test(String(pathValue || ""));
 
-const getRequestIp = (req) => {
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (typeof forwardedFor === "string" && forwardedFor.trim()) {
-    return forwardedFor.split(",")[0].trim();
-  }
-  return (
-    req.ip ||
-    req.connection?.remoteAddress ||
-    req.socket?.remoteAddress ||
-    "unknown"
-  );
-};
+const getRequestIp = (req) => req.ip || req.socket?.remoteAddress || 'unknown';
 
 const sortObjectKeys = (value, depth = 0) => {
   if (depth > 8) return "[MAX_DEPTH]";
@@ -169,17 +158,17 @@ const pruneOldestEntries = (map, maxSize) => {
 const createSlowApiLogger = (options = {}) => {
   const thresholdMs = toSafeInt(options.thresholdMs || process.env.SLOW_API_THRESHOLD_MS, 300);
 
+  let logged = 0, windowAt = Date.now();
   return (req, res, next) => {
     const started = process.hrtime.bigint();
 
     res.on("finish", () => {
       const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
       if (elapsedMs <= thresholdMs) return;
-      writeLogLine(
-        `SLOW API: [${req.method}] [${req.originalUrl || req.url}] - ${Math.round(
-          elapsedMs
-        )}ms`
-      );
+      if (Date.now() - windowAt >= 60000) { logged = 0; windowAt = Date.now(); }
+      if (logged++ < 10) writeLogLine(JSON.stringify({ event: 'slow_api',
+        route: require('../services/runtimeDiagnostics').safeRoute(req),
+        elapsedMs: Math.round(elapsedMs) }));
     });
 
     next();
@@ -372,77 +361,46 @@ const createRequestDeduplicationMiddleware = (options = {}) => {
 const createGetResponseCache = (options = {}) => {
   const cache = new Map();
   const ttlMs = toSafeInt(options.ttlMs || process.env.GET_CACHE_TTL_MS, 10000);
-  const maxEntries = toSafeInt(options.maxEntries || process.env.GET_CACHE_MAX_ENTRIES, 600);
-  const matcher = options.matcher || ((req) => req.path.startsWith("/api/menu/public"));
-
+  const maxEntries = toSafeInt(options.maxEntries || process.env.GET_CACHE_MAX_ENTRIES, 128);
+  const maxBytes = toSafeInt(options.maxBytes, 8 * 1024 * 1024);
+  const maxEntryBytes = toSafeInt(options.maxEntryBytes, 256 * 1024);
+  const matcher = options.matcher || ((req) => req.path.startsWith('/api/menu/public'));
+  let bytes = 0;
+  const remove = (key) => { bytes -= cache.get(key)?.bytes || 0; cache.delete(key); };
   const cleanup = () => {
-    const now = nowMs();
-    for (const [key, entry] of cache.entries()) {
-      if (!entry || now >= entry.expiresAt) {
-        cache.delete(key);
-      }
-    }
+    for (const [key, entry] of cache) if (Date.now() >= entry.expiresAt) remove(key);
   };
-
   const cleanupTimer = setInterval(cleanup, 30000);
-  if (typeof cleanupTimer.unref === "function") cleanupTimer.unref();
-
-  return (req, res, next) => {
-    if (req.method !== "GET") return next();
-    if (isHealthPath(req.path)) return next();
-    if (!matcher(req)) return next();
-
-    const cacheKey = createCacheKey(req, false);
-    const now = nowMs();
-    const cached = cache.get(cacheKey);
-
-    if (cached && now < cached.expiresAt) {
-      replayResponse(res, cached);
-      return;
-    }
-
-    let capturedBody;
-    let bodyType;
-    const originalJson = res.json.bind(res);
-    const originalSend = res.send.bind(res);
-    const originalEnd = res.end.bind(res);
-
-    res.json = (body) => {
-      bodyType = "json";
-      capturedBody = cloneBody(body);
-      return originalJson(body);
+  cleanupTimer.unref?.();
+  const middleware = (req, res, next) => {
+    if (req.method !== 'GET' || isHealthPath(req.path) || !matcher(req)) return next();
+    const key = createCacheKey(req);
+    const cached = cache.get(key);
+    if (cached && Date.now() < cached.expiresAt) return replayResponse(res, cached);
+    if (cached) remove(key);
+    let body;
+    const send = res.send.bind(res);
+    // Capture the serialized payload once. res.json itself delegates to send;
+    // wrapping both used to clone the object then overwrite it with JSON text.
+    res.send = (value) => {
+      if (typeof value === 'string' || Buffer.isBuffer(value)) body = value;
+      return send(value);
     };
-
-    res.send = (body) => {
-      if (!bodyType) bodyType = Buffer.isBuffer(body) ? "buffer" : "send";
-      capturedBody = cloneBody(body);
-      return originalSend(body);
-    };
-
-    res.end = function cacheAwareEnd(chunk, encoding, callback) {
-      if (!bodyType && chunk !== undefined && chunk !== null) {
-        bodyType = Buffer.isBuffer(chunk) ? "buffer" : "send";
-        capturedBody = cloneBody(chunk);
-      }
-      return originalEnd(chunk, encoding, callback);
-    };
-
-    res.on("finish", () => {
-      if (res.statusCode < 200 || res.statusCode >= 300) return;
-      const cachedPayload = {
-        createdAt: nowMs(),
-        expiresAt: nowMs() + ttlMs,
-        statusCode: res.statusCode,
-        headers: pickReplayHeaders(res.getHeaders()),
-        bodyType: bodyType || null,
-        body: capturedBody,
-      };
-      cache.set(cacheKey, cachedPayload);
-      pruneOldestEntries(cache, maxEntries);
+    res.once('finish', () => {
+      if (res.statusCode < 200 || res.statusCode >= 300 || body === undefined) return;
+      const size = Buffer.byteLength(body);
+      if (size > maxEntryBytes || size > maxBytes) return;
+      if (cache.has(key)) remove(key);
+      cache.set(key, { body, bytes: size, bodyType: 'send', statusCode: res.statusCode,
+        headers: pickReplayHeaders(res.getHeaders()), expiresAt: Date.now() + ttlMs });
+      bytes += size;
+      while (cache.size > maxEntries || bytes > maxBytes) remove(cache.keys().next().value);
     });
-
     next();
   };
+  middleware.dispose = () => { clearInterval(cleanupTimer); cache.clear(); bytes = 0; };
+  middleware.stats = () => ({ entries: cache.size, bytes });
+  return middleware;
 };
 
 const createShutdownGuard = (isShuttingDown) => {

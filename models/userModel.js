@@ -116,6 +116,7 @@ const userSchema = new mongoose.Schema(
       default: "unknown",
     },
     fcmTokenUpdatedAt: { type: Date, default: null },
+    fcmTokenRegistrationId: { type: String, default: null },
     // Token version for logout from all devices
     // Incrementing this invalidates all existing tokens
     tokenVersion: { type: Number, default: 0 },

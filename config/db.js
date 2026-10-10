@@ -10,6 +10,7 @@ const connectWithUri = async (mongoUri) => {
   const maxIdleTimeMS = Number.parseInt(process.env.MONGO_MAX_IDLE_TIME_MS || "30000", 10);
   const connectTimeoutMS = Number.parseInt(process.env.MONGO_CONNECT_TIMEOUT_MS || "10000", 10);
   const isAtlas = mongoUri.includes("mongodb+srv://");
+  const boundedMaxPool = Number.isFinite(maxPoolSize) && maxPoolSize > 0 ? Math.min(maxPoolSize, 50) : 20;
 
   if (isAtlas) {
     console.log("[DB] Connecting to MongoDB Atlas...");
@@ -20,9 +21,9 @@ const connectWithUri = async (mongoUri) => {
   const conn = await mongoose.connect(mongoUri, {
     // Options for better connection handling
     serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-    maxPoolSize: Number.isNaN(maxPoolSize) ? 100 : maxPoolSize,
-    minPoolSize: Number.isNaN(minPoolSize) ? 5 : minPoolSize,
+    socketTimeoutMS: 15000,
+    maxPoolSize: boundedMaxPool,
+    minPoolSize: Number.isFinite(minPoolSize) && minPoolSize >= 0 ? Math.min(minPoolSize, boundedMaxPool) : 0,
     maxIdleTimeMS: Number.isNaN(maxIdleTimeMS) ? 30000 : maxIdleTimeMS,
     connectTimeoutMS: Number.isNaN(connectTimeoutMS) ? 10000 : connectTimeoutMS,
   });

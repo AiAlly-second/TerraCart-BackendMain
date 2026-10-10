@@ -10,6 +10,7 @@ const {
   completeTask,
   deleteTask,
   getTaskStats,
+  getTaskOccurrences,
 } = require("../controllers/taskController");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const { blockActionsIfCheckedOut } = require("../middleware/checkoutLockMiddleware");
@@ -27,6 +28,8 @@ router.get("/today", authorize(["admin", "franchise_admin", "super_admin", "wait
 
 // Get task statistics
 router.get("/stats", authorize(["admin", "franchise_admin", "super_admin", "manager"]), getTaskStats);
+
+router.get("/:id/occurrences", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTaskOccurrences);
 
 // Get task by ID
 router.get("/:id", authorize(["admin", "franchise_admin", "super_admin", "waiter", "cook", "captain", "manager"]), getTaskById);

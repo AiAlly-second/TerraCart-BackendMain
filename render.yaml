@@ -47,6 +47,18 @@ services:
         value: "true"
       - key: SESSION_TIMEOUT
         value: "60"
+      - key: DAILY_REPORT_EMAIL_ENABLED
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        value: noreply@terracart.in
+      - key: RESEND_FROM_NAME
+        value: TerraCart
+      - key: REPORT_TIMEZONE
+        value: Asia/Kolkata
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false
 
   # Flask Backend API
   - type: web

@@ -57,6 +57,7 @@ let isFirebaseConfigured = false;
 let firebaseInitError = null;
 
 const loadEnvFallback = () => {
+  if (process.env.NODE_ENV === 'test') return;
   // Allow self-healing when .env gets fixed without restarting process.
   dotenv.config({ path: path.join(__dirname, "..", ".env") });
 };
