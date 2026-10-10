@@ -15,6 +15,19 @@ import subprocess
 SHA = 'a' * 40
 
 
+class Readiness(unittest.TestCase):
+    def test_only_explicitly_optional_redis_degradation_is_ready(self):
+        import io
+        optional = dict(status='degraded', mongo={'ready': True}, redis={'configured': True, 'required': False}, shuttingDown=False)
+        with patch.object(server, 'urlopen', return_value=io.BytesIO(json.dumps(optional).encode())):
+            server.health('http://127.0.0.1/health')
+        for changes in [{'shuttingDown': True}, {'redis': {'configured': True, 'required': True}}, {'mongo': {'ready': False}}]:
+            body = {**optional, **changes}
+            with patch.object(server, 'urlopen', return_value=io.BytesIO(json.dumps(body).encode())), patch.object(server.time, 'monotonic', side_effect=[0, 0, 121]), patch.object(server.time, 'sleep'):
+                with self.assertRaises(server.DeploymentRefusal):
+                    server.health('http://127.0.0.1/health')
+
+
 class PersistentDeployment(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

@@ -143,6 +143,7 @@ const notifyNewOrder = async ({ io, emitToCafeFn, order }) => {
     cartId,
     event: NOTIFICATION_EVENT_TYPES.NEW_ORDER,
     payload: {
+      ...require('../utils/orderOrigin').orderCreationAlertMetadata(order),
       orderId: toObjectIdString(order?._id),
       status: order?.status || null,
       paymentStatus: order?.paymentStatus || null,

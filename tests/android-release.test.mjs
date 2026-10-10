@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { X509Certificate } from 'node:crypto';
+import { X509Certificate, generateKeyPairSync } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
 import { parseArgs, hashFile, validateTargets, distributionArgs, preflight, publish, recover,
   analysisFindings, assertAnalysisBaseline, futureMetadata, distributionResult } from '../scripts/release-android.mjs';
@@ -24,6 +24,11 @@ async function fixture(t) {
   const env = { ...process.env, FIREBASE_PROJECT_ID: 'test-project', FIREBASE_ANDROID_APP_ID: '1:123:android:abc',
     FIREBASE_APP_DISTRIBUTION_GROUPS: 'qa', FIREBASE_APP_DISTRIBUTION_TESTERS: '',
     API_PUBLIC_BASE_URL: 'https://api.example.com', APP_UPDATE_APK_PREFIX: 'terracart', GOOGLE_APPLICATION_CREDENTIALS: '' };
+  const metadataKeys = generateKeyPairSync('rsa', {modulusLength:2048});
+  env.APP_UPDATE_METADATA_PUBLIC_KEY_FILE = path.join(root, 'metadata-public.pem');
+  await fs.writeFile(env.APP_UPDATE_METADATA_PUBLIC_KEY_FILE, metadataKeys.publicKey.export({format:'pem',type:'spki'}));
+  env.APP_UPDATE_METADATA_PRIVATE_KEY_FILE = path.join(root, 'metadata-private.pem');
+  await fs.writeFile(env.APP_UPDATE_METADATA_PRIVATE_KEY_FILE, metadataKeys.privateKey.export({format:'pem',type:'pkcs8'}),{mode:0o600});
   await fs.writeFile(path.join(backendDir, '.env'), Object.entries(env).filter(([k]) => k.startsWith('FIREBASE') || k.startsWith('APP_UPDATE') || k === 'API_PUBLIC_BASE_URL' || k === 'GOOGLE_APPLICATION_CREDENTIALS').map(([k, v]) => `${k}=${v}`).join('\n'));
   await fs.writeFile(path.join(appDir, 'pubspec.yaml'), 'version: 1.0.16+36\n');
   await fs.writeFile(path.join(appDir, 'android/app/build.gradle'), 'applicationId = "com.example.terra_admin_app"');
@@ -56,7 +61,7 @@ async function fixture(t) {
     }
     return { code: 0, stdout, stderr: '' };
   };
-  const options = { 'app-dir': appDir, 'backend-dir': backendDir, notes: plan.notes };
+  const options = { 'app-dir': appDir, 'backend-dir': backendDir, notes: plan.notes, 'mirror-production-to-qa': true };
   return { root, plan, source, runner, options, distributed: () => distributed,
     original: await fs.readFile(metadataPath),
     assertOld: async () => { assert.deepEqual(await fs.readFile(metadataPath), Buffer.from(JSON.stringify(current))); assert.equal(await fs.readFile(currentApk, 'utf8'), 'old APK fixture'); assert.equal(await fs.access(plan.destination).then(() => true, () => false), false); } };

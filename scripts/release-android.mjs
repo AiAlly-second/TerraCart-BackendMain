@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID, X509Certificate } from 'node:crypto';
+import { createHash, createPublicKey, createPrivateKey, randomUUID, X509Certificate } from 'node:crypto';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const YAML = require('yaml');
@@ -27,7 +27,7 @@ async function writableParent(directory) {
 export function parseArgs(args) {
   const options = {};
   const flags = new Set(['dry-run', 'force-update', 'clean', 'skip-tests', 'skip-firebase',
-    'no-distribute', 'allow-empty-notes', 'allow-version-override', 'allow-signing-change', 'obfuscate', 'help']);
+    'no-distribute', 'allow-empty-notes', 'allow-version-override', 'allow-signing-change', 'obfuscate', 'mirror-production-to-qa', 'help']);
   const values = new Set(['notes', 'notes-file', 'minimum-supported', 'app-dir', 'backend-dir', 'split-debug-info']);
   for (let i = 0; i < args.length; i++) {
     const key = args[i].replace(/^--/, '');
@@ -155,6 +155,8 @@ export function futureMetadata(plan, artifact = {}) {
     apkUrl: `${plan.publicBase}/api/app/apk/${encodeURIComponent(plan.version)}`,
     updateUrl: '', releaseNotes: plan.notes, sha256: artifact.sha256 || '<computed after build>',
     fileSizeBytes: artifact.size || '<computed after build>', publishedAt: artifact.publishedAt || '<activation time>',
+    applicationId: plan.packageName, channel: 'production_private',
+    releaseSequence: plan.build,
     signingCertificateSha256: plan.signingCertificate,
     signingMigration: plan.signingChanged };
 }
@@ -164,7 +166,8 @@ export async function preflight(options, runner = run) {
   const appDir = await fs.realpath(path.resolve(options['app-dir'] || path.join(backendDir, '..', 'TerraCart-AdminApp')));
   const dotenvPath = path.join(backendDir, '.env');
   const env = { ...dotenv.parse(await fs.readFile(dotenvPath)), ...process.env };
-  const skip = Boolean(options['skip-firebase'] || options['no-distribute']);
+  const skip = !options['mirror-production-to-qa'] || Boolean(options['skip-firebase'] || options['no-distribute']);
+  if (skip && (options.obfuscate || options['split-debug-info'])) throw new Error('Obfuscated production releases require explicit Firebase symbol upload through --mirror-production-to-qa');
   const targets = validateTargets(env, skip);
   const pubspec = YAML.parse(await fs.readFile(path.join(appDir, 'pubspec.yaml'), 'utf8'));
   const versionMatch = String(pubspec.version || '').match(/^(.+)\+([1-9]\d*)$/);
@@ -196,7 +199,7 @@ export async function preflight(options, runner = run) {
   const tools = await androidTools(appDir, env);
   const published = await inspectApk(currentApk, tools, runner);
   if (published.version !== current.latestVersion || (current.latestBuildNumber != null && published.build !== current.latestBuildNumber)) throw new Error('Current backend APK version/build disagrees with metadata');
-  if (!options['allow-version-override'] && (semver.lt(version, current.latestVersion) || build <= published.build || (semver.eq(version, current.latestVersion) && build <= published.build))) {
+  if (semver.lt(version, current.latestVersion) || build <= published.build) {
     throw new Error('Release must advance version or same-version build, and always advance Android build');
   }
   const google = JSON.parse(await fs.readFile(path.join(appDir, 'android/app/google-services.json'), 'utf8'));
@@ -205,6 +208,16 @@ export async function preflight(options, runner = run) {
   const client = google.client?.find(x => x.client_info.android_client_info?.package_name === packageName);
   if (!client || published.package !== packageName) throw new Error('Android/Firebase/published APK package mismatch');
   if (env.FIREBASE_ANDROID_APP_ID !== client.client_info.mobilesdk_app_id || env.FIREBASE_PROJECT_ID !== google.project_info.project_id) throw new Error('Firebase Android App ID/project mismatch');
+  const trustedPublic = await updateSigningPublicKey(env);
+  if (!env.APP_UPDATE_METADATA_PRIVATE_KEY_FILE) throw new Error('Provision the backend metadata private key outside repositories before release');
+  const privatePath = await fs.realpath(env.APP_UPDATE_METADATA_PRIVATE_KEY_FILE);
+  for (const repo of [appDir, backendDir]) if (privatePath.startsWith(repo + path.sep)) throw new Error('Metadata private key must be outside repositories');
+  const privateStat = await fs.stat(privatePath);
+  if (process.platform !== 'win32' && (privateStat.mode & 0o077)) throw new Error('Metadata private key requires owner-only permissions');
+  const privatePublic = createPublicKey(createPrivateKey(await fs.readFile(privatePath)))
+    .export({format:'der',type:'spki'}).toString('base64');
+  if (trustedPublic !== privatePublic) throw new Error('Compiled metadata public key and backend private key do not match');
+  if (env.APP_UPDATE_CHANNEL && env.APP_UPDATE_CHANNEL !== 'production_private') throw new Error('Production release authority must use production_private channel');
   const signing = parseSigning(await fs.readFile(path.join(appDir, 'android/key.properties'), 'utf8').catch(() => { throw new Error('Missing android/key.properties: configure existing release signing material'); }));
   const storeFile = path.resolve(appDir, 'android', signing.storeFile);
   await fs.access(storeFile, constants.R_OK);
@@ -214,7 +227,7 @@ export async function preflight(options, runner = run) {
   if (!pem) throw new Error('Signing certificate unavailable');
   const signingCertificate = new X509Certificate(pem).fingerprint256.replaceAll(':', '').toLowerCase();
   const signingChanged = signingCertificate !== published.certificate;
-  if (signingChanged && !options['allow-signing-change']) throw new Error('Signing certificate differs from installed release. Recover original key or explicitly use --allow-signing-change for an uninstall/reinstall migration');
+  if (signingChanged) throw new Error('Signing certificate differs from installed release. Recover the existing key; a signing migration requires a separately approved migration channel');
   for (const [command, args] of [['node', ['--version']], ['flutter', ['--version']], ['dart', ['--version']], ['firebase', ['--version']]]) await runner(command, args, { env });
   if (env.GOOGLE_APPLICATION_CREDENTIALS) {
     if (!path.isAbsolute(env.GOOGLE_APPLICATION_CREDENTIALS)) throw new Error('GOOGLE_APPLICATION_CREDENTIALS must be an absolute path outside repositories');
@@ -361,7 +374,23 @@ export async function publish(plan, { runner = run, buildArtifact, beforeStage =
   }
 }
 
+export async function updateSigningPublicKey(env) {
+  if (!env.APP_UPDATE_METADATA_PUBLIC_KEY_FILE) {
+    throw new Error('Configure APP_UPDATE_METADATA_PUBLIC_KEY_FILE before building a release; signed update verification is required');
+  }
+  const keyPath = await fs.realpath(env.APP_UPDATE_METADATA_PUBLIC_KEY_FILE);
+  for (const repo of [defaultBackend, path.join(defaultBackend, '..', 'TerraCart-AdminApp')]) {
+    if (keyPath.startsWith(repo + path.sep)) throw new Error('Provision metadata key files outside repositories');
+  }
+  const key = createPublicKey(await fs.readFile(keyPath));
+  if (key.asymmetricKeyType !== 'rsa' || key.asymmetricKeyDetails.modulusLength < 2048) {
+    throw new Error('Update metadata public key must be RSA with at least 2048 bits');
+  }
+  return key.export({ format: 'der', type: 'spki' }).toString('base64');
+}
+
 async function build(plan, stageDir) {
+  const updatePublicKey = await updateSigningPublicKey(plan.env);
   const invoke = async (command, args, allowFailure = false) => run(command, args, { cwd: plan.appDir, env: plan.env, allowFailure });
   if (plan.options.clean) { console.log('Cleaning Flutter output (explicit --clean)...'); await invoke('flutter', ['clean']); }
   console.log('Resolving Flutter dependencies...'); await invoke('flutter', ['pub', 'get']);
@@ -384,7 +413,8 @@ async function build(plan, stageDir) {
   else console.warn('Flutter tests explicitly skipped (--skip-tests).');
   // Remove only canonical build output to eliminate accidental reuse after a failed build.
   await fs.rm(plan.sourceApk, { force: true });
-  const args = ['build', 'apk', '--release', '--dart-define=USE_PROD_API=true'];
+  const args = ['build', 'apk', '--release', '--dart-define=USE_PROD_API=true',
+    `--dart-define=APP_UPDATE_METADATA_PUBLIC_KEY=${updatePublicKey}`];
   if (plan.options.obfuscate || plan.options['split-debug-info']) {
     // Caller can request symbols, but every release uses a new empty staging directory.
     args.push(`--split-debug-info=${path.join(stageDir, 'symbols')}`);
@@ -398,7 +428,7 @@ async function build(plan, stageDir) {
 export async function main(args = process.argv.slice(2)) {
   const options = parseArgs(args);
   if (options.help) {
-    console.log('TerraCart: release-android.sh --notes "Release notes" [--dry-run] [--force-update] [--minimum-supported VERSION] [--clean] [--skip-tests] [--skip-firebase] [--obfuscate] [--split-debug-info auto] [--allow-signing-change] [--allow-version-override] [--app-dir PATH] [--backend-dir PATH]'); return;
+    console.log('TerraCart: release-android.sh --notes "Release notes" [--dry-run] [--force-update] [--minimum-supported VERSION] [--clean] [--skip-tests] [--mirror-production-to-qa] [--skip-firebase] [--obfuscate] [--split-debug-info auto] [--allow-signing-change] [--allow-version-override] [--app-dir PATH] [--backend-dir PATH]'); return;
   }
   console.log('Checking release prerequisites...');
   if (options['dry-run']) {

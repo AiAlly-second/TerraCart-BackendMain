@@ -1,6 +1,9 @@
 const {businessDayBoundary, DEFAULT_BUSINESS_TIMEZONE} = require('../utils/businessTime');
 
 const mongoose = require("mongoose");
+const { readIdempotencyKey, orderRequestBinding, verifyOrderReplay } = require('../utils/orderIdempotency');
+const { appendKotIdempotently, verifyKotReplay } = require('../services/kotIdempotencyService');
+const { createStaffSessionToken } = require('../utils/customerSessionTokens');
 const net = require("net");
 const Order = require("../models/orderModel");
 const PrintJob = require("../models/printJobModel");
@@ -1086,6 +1089,15 @@ const normalizeOrderUpsertTimestamp = (value) => {
     }
   }
   return new Date().toISOString();
+};
+
+const authorizeIdempotentOrderReplay = async (req, order, binding) => {
+  const replay = verifyOrderReplay(order, binding);
+  if (!replay.ok) return replay;
+  if (await hasPrivilegedOrderAccess(req.user, order)) return { ok: true };
+  return verifyPublicOrderSessionAccess(order, extractSessionTokenFromRequest(req), {
+    anonymousSessionId: extractAnonymousSessionIdFromRequest(req),
+  });
 };
 
 const buildOrderUpsertPayload = (order) => {
@@ -2959,7 +2971,6 @@ const createOrder = async (req, res) => {
       officePaymentMode,
       isVIP,
       vipMeta,
-      idempotencyKey,
       paymentRequiredBeforeProceeding: requestedPaymentRequiredBeforeProceeding,
     } = req.body;
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
@@ -2970,17 +2981,20 @@ const createOrder = async (req, res) => {
       return res.status(400).json({ message: "No items supplied" });
     }
 
-    const requestIdempotencyKey = String(
-      idempotencyKey || req.headers["x-idempotency-key"] || "",
-    ).trim();
+    let requestIdempotencyKey, requestBinding;
+    try {
+      requestIdempotencyKey = readIdempotencyKey(req);
+      if (requestIdempotencyKey) requestBinding = orderRequestBinding(req, requestAnonymousSessionId, extractSessionTokenFromRequest(req));
+    } catch (error) {
+      return res.status(400).json({ message: error.message });
+    }
     if (requestIdempotencyKey) {
       const existingByKey = await Order.findOne({
         idempotencyKey: requestIdempotencyKey,
       });
       if (existingByKey) {
-        console.log(
-          `[ORDER] createOrder idempotent replay detected for key ${requestIdempotencyKey}. Returning existing order ${existingByKey._id}.`,
-        );
+        const replay = await authorizeIdempotentOrderReplay(req, existingByKey, requestBinding);
+        if (!replay.ok) return res.status(replay.status).json({ message: replay.message });
         return res.json(existingByKey);
       }
     }
@@ -3173,7 +3187,7 @@ const createOrder = async (req, res) => {
 
         resolvedSessionToken = String(tableDoc.sessionToken || "").trim();
         if (!resolvedSessionToken) {
-          resolvedSessionToken = `STAFF_${tableDoc._id}_${Date.now()}`;
+          resolvedSessionToken = createStaffSessionToken(tableDoc._id);
           tableDoc.sessionToken = resolvedSessionToken;
         }
       }
@@ -3249,8 +3263,8 @@ const createOrder = async (req, res) => {
         console.log(
           `[ORDER] Rejecting order - table ${tableDoc.number} is occupied by another guest:`,
           {
-            tableSessionToken: tableDoc.sessionToken,
-            requestSessionToken: resolvedSessionToken,
+            hasTableSessionToken: Boolean(tableDoc.sessionToken),
+            hasRequestSessionToken: Boolean(resolvedSessionToken),
             hasActiveOrder: hasActiveOrderForTable,
             currentOrder: tableDoc.currentOrder,
             tableStatus: tableDoc.status,
@@ -3271,7 +3285,7 @@ const createOrder = async (req, res) => {
         tableDoc.status !== "OCCUPIED"
       ) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has sessionToken mismatch but status is ${tableDoc.status} - updating sessionToken to: ${resolvedSessionToken}`,
+          `[ORDER] Table ${tableDoc.number} has a session mismatch; updating session for status ${tableDoc.status}`,
         );
         tableDoc.sessionToken = resolvedSessionToken;
       }
@@ -3279,7 +3293,7 @@ const createOrder = async (req, res) => {
       // If table has no sessionToken, set it (user is claiming the table)
       if (!tableDoc.sessionToken && resolvedSessionToken) {
         console.log(
-          `[ORDER] Table ${tableDoc.number} has no sessionToken - setting it to: ${resolvedSessionToken}`,
+          `[ORDER] Table ${tableDoc.number} has no session; issuing one`,
         );
         tableDoc.sessionToken = resolvedSessionToken;
       }
@@ -3291,7 +3305,7 @@ const createOrder = async (req, res) => {
         tableDoc.sessionToken !== resolvedSessionToken
       ) {
         console.log(
-          `[ORDER] Updating table ${tableDoc.number} sessionToken to match active order: ${resolvedSessionToken}`,
+          `[ORDER] Updating table ${tableDoc.number} session to match active order`,
         );
         tableDoc.sessionToken = resolvedSessionToken;
       }
@@ -3303,7 +3317,7 @@ const createOrder = async (req, res) => {
         resolvedSessionToken
       ) {
         console.log(
-          `[ORDER] Setting table ${tableDoc.number} sessionToken from active order: ${resolvedSessionToken}`,
+          `[ORDER] Setting table ${tableDoc.number} session from active order`,
         );
         tableDoc.sessionToken = resolvedSessionToken;
       }
@@ -3478,7 +3492,7 @@ const createOrder = async (req, res) => {
 
       const Cart = require("../models/cartModel");
       const User = require("../models/userModel");
-      const { isWithinDeliveryRange } = require("../utils/distanceCalculator");
+      const { isWithinDeliveryRange, hasValidCoordinates } = require("../utils/distanceCalculator");
 
       let cart = null;
       let cartAdminId = null;
@@ -3558,9 +3572,7 @@ const createOrder = async (req, res) => {
 
         // Validate customer location for delivery
         if (
-          !customerLocation ||
-          !customerLocation.latitude ||
-          !customerLocation.longitude
+          !hasValidCoordinates(customerLocation)
         ) {
           return res.status(400).json({
             message:
@@ -3570,9 +3582,7 @@ const createOrder = async (req, res) => {
 
         // Validate cart has coordinates
         if (
-          !cart.coordinates ||
-          !cart.coordinates.latitude ||
-          !cart.coordinates.longitude
+          !hasValidCoordinates(cart.coordinates)
         ) {
           return res.status(400).json({
             message:
@@ -3694,6 +3704,7 @@ const createOrder = async (req, res) => {
         : "");
 
     const orderData = {
+      origin: require('../utils/orderOrigin').orderOriginFromRequest(req),
       _id: orderId,
       tableNumber: String(tableNumber),
       table: isTakeaway ? null : tableDoc?._id || null, // No table for takeaway/delivery
@@ -3763,6 +3774,7 @@ const createOrder = async (req, res) => {
 
     if (requestIdempotencyKey) {
       orderData.idempotencyKey = requestIdempotencyKey;
+      orderData.idempotencyBinding = requestBinding;
     }
 
     // Only set cartId and franchiseId if they exist (they're optional in the schema)
@@ -3939,8 +3951,8 @@ const createOrder = async (req, res) => {
         : null,
       hasKotLines: !!orderData.kotLines && orderData.kotLines.length > 0,
       kotLinesCount: orderData.kotLines?.length || 0,
-      customerName: orderData.customerName || null,
-      customerMobile: orderData.customerMobile || null,
+      hasCustomerName: Boolean(orderData.customerName),
+      hasCustomerMobile: Boolean(orderData.customerMobile),
     });
 
     let order;
@@ -3959,9 +3971,8 @@ const createOrder = async (req, res) => {
           idempotencyKey: requestIdempotencyKey,
         });
         if (existingByKey) {
-          console.log(
-            `[ORDER] createOrder duplicate key handled for ${requestIdempotencyKey}. Returning existing order ${existingByKey._id}.`,
-          );
+          const replay = await authorizeIdempotentOrderReplay(req, existingByKey, requestBinding);
+          if (!replay.ok) return res.status(replay.status).json({ message: replay.message });
           return res.json(existingByKey);
         }
       }
@@ -3972,12 +3983,12 @@ const createOrder = async (req, res) => {
       if (createError.errors) {
         console.error(
           "[ORDER] Validation errors:",
-          JSON.stringify(createError.errors, null, 2),
+          Object.keys(createError.errors),
         );
       }
       console.error(
         "[ORDER] Order data that failed:",
-        JSON.stringify(orderData, null, 2),
+        { fields: Object.keys(orderData) },
       );
       return res.status(400).json({
         message: `Failed to create order: ${createError.message}`,
@@ -4361,7 +4372,7 @@ const createOrder = async (req, res) => {
     const io = req.app.get("io");
     const emitToCafe = req.app.get("emitToCafe");
     if (order.cartId && io && emitToCafe) {
-      const payload = orderToPlainPayload(order);
+      const payload = { ...orderToPlainPayload(order), ...require('../utils/orderOrigin').orderCreationAlertMetadata(order) };
       const cartIdStr = (payload?.cartId || order.cartId).toString();
       const shouldDeferQueueVisibility =
         requiresPaymentBeforeProceeding(payload || order) &&
@@ -4460,14 +4471,14 @@ const addKot = async (req, res) => {
   console.log("[ORDER] addKot called");
   console.log("[ORDER] addKot - Order ID:", req.params.id);
   console.log(
-    "[ORDER] addKot - Request body:",
-    JSON.stringify(req.body, null, 2),
+    "[ORDER] addKot - Request metadata:",
+    { itemsCount: Array.isArray(req.body?.items) ? req.body.items.length : 0, hasIdempotencyKey: Boolean(req.body?.idempotencyKey) },
   );
   try {
     const { items, selectedAddons = [] } = req.body;
-    const requestKotIdempotencyKey = String(
-      req.body?.idempotencyKey || req.headers["x-idempotency-key"] || "",
-    ).trim();
+    let requestKotIdempotencyKey;
+    try { requestKotIdempotencyKey = readIdempotencyKey(req); }
+    catch (error) { return res.status(400).json({ message: error.message }); }
     const specialInstructions = normalizeOrderSpecialInstructions(req.body);
 
     // Enhanced validation with detailed error messages
@@ -4495,7 +4506,7 @@ const addKot = async (req, res) => {
       });
     }
 
-    const order = await Order.findById(req.params.id);
+    let order = await Order.findById(req.params.id);
     if (!order) {
       console.error("[ORDER] addKot - Order not found:", req.params.id);
       return res.status(404).json({ message: "Order not found" });
@@ -4517,14 +4528,20 @@ const addKot = async (req, res) => {
       }
     }
 
+    let kotBinding;
+    if (requestKotIdempotencyKey) {
+      try {
+        kotBinding = orderRequestBinding(req, extractAnonymousSessionIdFromRequest(req), extractSessionTokenFromRequest(req), Date.now(), `add-kot:${req.params.id}`);
+      } catch (error) { return res.status(400).json({ message: error.message }); }
+    }
+
     if (
       requestKotIdempotencyKey &&
       Array.isArray(order.kotRequestKeys) &&
       order.kotRequestKeys.includes(requestKotIdempotencyKey)
     ) {
-      console.log(
-        `[ORDER] addKot idempotent replay detected for key ${requestKotIdempotencyKey}. Returning existing order ${order._id}.`,
-      );
+      const replay = verifyKotReplay(order, requestKotIdempotencyKey, kotBinding);
+      if (!replay.ok) return res.status(replay.status).json({ message: replay.message });
       return res.json(orderToPlainPayload(order));
     }
 
@@ -4714,7 +4731,15 @@ const addKot = async (req, res) => {
     }
 
     try {
-      await order.save();
+      if (requestKotIdempotencyKey) {
+        const result = await appendKotIdempotently(order, requestKotIdempotencyKey, kotBinding, newKot);
+        if (result.error) return res.status(result.error.status).json({ message: result.error.message });
+        order = result.order;
+        // Only the atomic winner may print, notify or update inventory.
+        if (result.replayed) return res.json(orderToPlainPayload(order));
+      } else {
+        await order.save();
+      }
       console.log("[ORDER] addKot - Order updated successfully:", order._id);
     } catch (saveError) {
       console.error("[ORDER] addKot - Failed to save order:", saveError);
@@ -7811,6 +7836,10 @@ const getPendingKots = async (req, res) => {
 };
 
 module.exports = {
+  hasPrivilegedOrderAccess,
+  verifyPublicOrderSessionAccess,
+  extractSessionTokenFromRequest,
+  extractAnonymousSessionIdFromRequest,
   createOrder,
   getNextTakeawayToken,
   addKot,

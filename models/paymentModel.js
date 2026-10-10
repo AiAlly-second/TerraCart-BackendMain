@@ -53,11 +53,12 @@ const paymentSchema = new mongoose.Schema(
   }
 );
 
+paymentSchema.index({ status: 1, paidAt: 1, orderId: 1 });
+
 module.exports = {
   Payment: mongoose.model("Payment", paymentSchema),
   PAYMENT_METHODS,
   PAYMENT_STATUSES,
 };
-
 
 

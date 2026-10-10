@@ -6,6 +6,7 @@ const { syncStuckRunningJobs } = require("./backupJobSyncService");
 
 let timer = null;
 let started = false;
+let inFlight = false;
 
 const STUCK_RUNNING_MS = Number(process.env.BACKUP_JOB_STUCK_MS || 15 * 60 * 1000);
 
@@ -27,7 +28,10 @@ async function reconcileJobs() {
 }
 
 async function tickScheduler() {
+  if (!started || inFlight) return;
   if (String(process.env.BACKUP_SCHEDULER_ENABLED || "false").toLowerCase() !== "true") return;
+  inFlight = true;
+  try {
   await syncStuckRunningJobs();
   await releaseStuckRunningJobs();
   const now = new Date();
@@ -38,6 +42,7 @@ async function tickScheduler() {
   });
 
   for (const job of dueJobs) {
+    if (!started) break;
     const claimed = await BackupJob.findOneAndUpdate(
       {
         _id: job._id,
@@ -72,17 +77,20 @@ async function tickScheduler() {
         backupRecordId: queuedRecord._id,
       });
     } catch (error) {
-      console.error(`[scheduler] backup failed for job ${claimed._id}:`, error.message);
+      process.stdout.write(`${JSON.stringify({ event: 'backup_job_failed' })}\n`);
     }
   }
+  } finally { inFlight = false; }
 }
 
 async function startBackupSchedulerService() {
   if (started) return;
+  if (String(process.env.BACKUP_SCHEDULER_ENABLED || 'false').toLowerCase() !== 'true') return;
   started = true;
   await reconcileJobs();
+  if (!started) return;
   timer = setInterval(() => {
-    tickScheduler().catch(() => {});
+    tickScheduler().catch(() => process.stdout.write(`${JSON.stringify({ event: 'backup_scheduler_error' })}\n`));
   }, 30 * 1000);
   if (typeof timer.unref === "function") timer.unref();
 }

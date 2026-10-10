@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const semver = require('semver');
 const { readMetadata, resolveApk } = require('../utils/appUpdateMetadata');
+const { signMetadata } = require('../utils/signedUpdateMetadata');
 
 function createAppUpdateController({ configPath = path.join(__dirname, '..', 'app-update.json'),
   apkDirectory = path.join(__dirname, '..', 'apk'), env = process.env } = {}) {
@@ -11,15 +12,17 @@ function createAppUpdateController({ configPath = path.join(__dirname, '..', 'ap
     const size = fs.statSync(file).size;
     if (metadata.fileSizeBytes != null && metadata.fileSizeBytes !== size) throw new Error('APP_UPDATE_APK_INVALID');
     const configured = env.API_PUBLIC_BASE_URL || env.APP_API_BASE_URL || env.API_BASE_URL;
+    if (env.NODE_ENV === 'production' && !configured) throw new Error('APP_UPDATE_PUBLIC_URL_INVALID');
     const base = (configured || `${req.protocol}://${req.get('host')}`).replace(/\/+$/, '');
     const origin = new URL(base);
     if (origin.username || origin.password || (env.NODE_ENV === 'production' && origin.protocol !== 'https:')) throw new Error('APP_UPDATE_PUBLIC_URL_INVALID');
+    if (metadata.apkUrl && new URL(metadata.apkUrl).origin !== origin.origin) throw new Error('APP_UPDATE_PUBLIC_URL_INVALID');
     return { ...metadata, fileSizeBytes: size,
       apkUrl: metadata.apkUrl || `${base}/api/app/apk/${encodeURIComponent(metadata.latestVersion)}` };
   }
   async function getAppVersion(req, res) {
     res.setHeader('Cache-Control', 'no-store');
-    try { return res.json({ success: true, data: payload(req) }); }
+    try { return res.json({ success: true, data: signMetadata(payload(req), env.APP_UPDATE_METADATA_PRIVATE_KEY_FILE, { applicationId: env.APP_UPDATE_APPLICATION_ID || 'com.example.terra_admin_app', channel: env.APP_UPDATE_CHANNEL || 'production_private' }) }); }
     catch (_) { return res.status(500).json({ success: false, message: 'App update configuration is unavailable', code: 'APP_UPDATE_CONFIG_INVALID' }); }
   }
   async function downloadApkByVersion(req, res) {

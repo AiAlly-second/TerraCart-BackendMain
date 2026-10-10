@@ -66,6 +66,12 @@ const taskSchema = new mongoose.Schema(
     },
     // Original due date (for recurring tasks)
     originalDueDate: { type: Date },
+    weekdaysISO: { type: [{type: Number, min: 1, max: 7}], default: undefined },
+    localDueTime: { type: String, match: /^([01]\d|2[0-3]):[0-5]\d$/ },
+    timezone: { type: String, enum: ['Asia/Kolkata'], default: 'Asia/Kolkata' },
+    reminderLeadMinutes: { type: Number, min: 0, max: 1440, default: 5 },
+    recurrenceStartDate: { type: String }, recurrenceEndDate: { type: String, default: null },
+    active: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

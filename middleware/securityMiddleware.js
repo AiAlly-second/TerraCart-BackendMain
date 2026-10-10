@@ -8,6 +8,8 @@
  */
 
 const User = require("../models/userModel");
+const jwt = require('jsonwebtoken');
+const crypto = require('node:crypto');
 const { getRedisAppClient } = require("../services/redisAppClient");
 
 const DISTRIBUTED_AI_LIMITERS = new Set([
@@ -26,6 +28,25 @@ const redisRateLimitEnabled = () =>
 
 const rateLimitStore = new Map();
 const apiKeyBypassCache = new Map();
+const requestIdentity = (req) => {
+  if (req.rateLimitIdentity) return req.rateLimitIdentity;
+  if (req.user?._id) {
+    return `user:${req.user.franchiseId || req.user.cartId || 'global'}:${req.user._id}`;
+  }
+  const token = /^Bearer ([^ ]+)$/i.exec(String(req.headers.authorization || ''))?.[1];
+  if (token && token.length <= 4096 && process.env.JWT_SECRET) {
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      if (/^[a-f\d]{24}$/i.test(String(decoded.id || ''))) {
+        // A verified signed identity is only a quota key. protect still checks
+        // the database, tokenVersion, tenant membership and account state.
+        req.rateLimitIdentity = `user:${decoded.franchiseId || decoded.cartId || 'global'}:${decoded.id}`;
+        return req.rateLimitIdentity;
+      }
+    } catch (_) { /* invalid JWT receives the public IP quota */ }
+  }
+  return `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`;
+};
 const API_KEY_CACHE_TTL_MS = Number.parseInt(
   process.env.API_KEY_BYPASS_CACHE_TTL_MS || "60000",
   10,
@@ -82,32 +103,30 @@ const getWindowStart = (timestampMs, windowMs) =>
   timestampMs - (timestampMs % windowMs);
 
 const pruneOldRateLimitEntries = () => {
-  if (rateLimitStore.size <= RATE_LIMIT_STORE_MAX_ENTRIES) return;
-  const entries = Array.from(rateLimitStore.entries()).sort(
-    (left, right) => (left[1]?.lastSeenAt || 0) - (right[1]?.lastSeenAt || 0)
-  );
-  const toDelete = rateLimitStore.size - RATE_LIMIT_STORE_MAX_ENTRIES;
-  for (let index = 0; index < toDelete; index += 1) {
-    rateLimitStore.delete(entries[index][0]);
+  while (rateLimitStore.size > (Number.isFinite(RATE_LIMIT_STORE_MAX_ENTRIES)
+    ? Math.max(100, RATE_LIMIT_STORE_MAX_ENTRIES) : 15000)) {
+    rateLimitStore.delete(rateLimitStore.keys().next().value);
   }
 };
 
 const isTrustedApiKey = async (rawApiKey) => {
   const apiKey = String(rawApiKey || "").trim();
-  if (!apiKey || !apiKey.startsWith("tc_live_")) return false;
+  if (!apiKey || apiKey.length > 128 || !apiKey.startsWith("tc_live_")) return false;
 
   const now = Date.now();
-  const cached = apiKeyBypassCache.get(apiKey);
+  const cacheKey = crypto.createHash('sha256').update(apiKey).digest('hex');
+  const cached = apiKeyBypassCache.get(cacheKey);
   if (cached && now < cached.expiresAt) {
     return cached.allowed;
   }
 
   const exists = await User.exists({ "apiKeys.key": apiKey });
   const allowed = Boolean(exists);
-  apiKeyBypassCache.set(apiKey, {
+  apiKeyBypassCache.set(cacheKey, {
     allowed,
     expiresAt: now + (Number.isFinite(API_KEY_CACHE_TTL_MS) ? API_KEY_CACHE_TTL_MS : 60000),
   });
+  while (apiKeyBypassCache.size > 1500) apiKeyBypassCache.delete(apiKeyBypassCache.keys().next().value);
 
   return allowed;
 };
@@ -146,14 +165,7 @@ const createRateLimiter = (options = {}) => {
     windowMs = 15 * 60 * 1000, // 15 minutes
     max = 100, // Max requests per window
     message = 'Too many requests, please try again later',
-    keyGenerator = (req) => {
-      // Better IP detection
-      return req.ip || 
-             req.headers['x-forwarded-for']?.split(',')[0]?.trim() || 
-             req.connection?.remoteAddress || 
-             req.socket?.remoteAddress ||
-             'unknown';
-    },
+    keyGenerator = requestIdentity,
     skipSuccessfulRequests = false,
     skipFailedRequests = false,
     skip = () => false
@@ -180,7 +192,7 @@ const createRateLimiter = (options = {}) => {
     if (apiKey) {
       try {
         const trusted = await isTrustedApiKey(apiKey);
-        if (trusted) return next();
+        if (trusted) req.rateLimitIdentity = `api:${crypto.createHash('sha256').update(String(apiKey)).digest('hex')}`;
       } catch (error) {
         // Continue with normal rate limiting if API key lookup fails.
       }
@@ -313,12 +325,14 @@ const createRateLimiter = (options = {}) => {
         1,
         Math.ceil((effectiveWindowMs - elapsedMsInWindow) / 1000)
       );
-      writeRateLimitLog(
+      if (!data.lastBlockedLogAt || now - data.lastBlockedLogAt > 60000) writeRateLimitLog(
         `[RATE_LIMIT] blocked limiter=${name} ip=${baseKey} method=${req.method} path=${requestPath} source="${getRequestSource(req)}" estimated=${Math.ceil(estimatedCount)} limit=${effectiveMax}`
       );
+      data.lastBlockedLogAt = now;
       res.setHeader('Retry-After', retryAfterSeconds);
       return res.status(429).json({
         success: false,
+        code: 'RATE_LIMITED',
         message: isDevelopment 
           ? `Rate limit exceeded (dev mode: ${effectiveMax} requests per ${effectiveWindowMs/1000}s)`
           : message,
@@ -382,6 +396,7 @@ const rateLimiters = {
   // Shared limiter for authentication endpoints (login/signup)
   auth: createRateLimiter({
     name: "auth",
+    keyGenerator: (req) => `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`,
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: Number.parseInt(process.env.RATE_LIMIT_LOGIN || "10", 10) || 10,
     message: 'Too many login attempts. Please try again later.',
@@ -393,6 +408,7 @@ const rateLimiters = {
   // In prod: configurable via RATE_LIMIT_LOGIN env var, with secure default.
   login: createRateLimiter({
     name: "login",
+    keyGenerator: (req) => `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`,
     windowMs: 15 * 60 * 1000, // 15 minutes
     max: Number.parseInt(process.env.RATE_LIMIT_LOGIN || "10", 10) || 10,
     message: 'Too many login attempts. Please try again later.',
@@ -403,6 +419,7 @@ const rateLimiters = {
   // In dev: 50 attempts per 30 min, in prod: 5 per hour
   passwordReset: createRateLimiter({
     name: "passwordReset",
+    keyGenerator: (req) => `ip:${req.ip || req.socket?.remoteAddress || 'unknown'}`,
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 5, // Only 5 password reset requests per hour (50 in dev)
     message: 'Too many password reset attempts. Please try again later.'
@@ -455,6 +472,23 @@ const rateLimiters = {
     max: Number.parseInt(process.env.RATE_LIMIT_AI_SESSION_PER_MIN || "30", 10) || 30,
     message: 'Too many AI session token requests.',
   }),
+};
+
+const publicApiLimiter = rateLimiters.api;
+const readLimiter = createRateLimiter({ name: 'authenticated_read', max: 500,
+  windowMs: 15 * 60000, message: 'Too many API requests' });
+const mutationLimiter = createRateLimiter({ name: 'authenticated_mutation', max: 120,
+  windowMs: 15 * 60000, message: 'Too many changes. Please retry shortly.' });
+const versionLimiter = createRateLimiter({ name: 'version', max: 60, windowMs: 60000 });
+rateLimiters.api = (req, res, next) => {
+  const path = getRateLimitPath(req);
+  if (req.method === 'OPTIONS' || shouldBypassRateLimitForPath(path) || isSystemRateLimitPath(path)) return next();
+  if (req.method === 'GET' && /^\/api\/(?:v1\/)?app\/(?:version|update)(?:\/|$)/.test(path)) {
+    return versionLimiter(req, res, next);
+  }
+  const authenticated = requestIdentity(req).startsWith('user:');
+  return (authenticated ? (['GET', 'HEAD'].includes(req.method) ? readLimiter : mutationLimiter)
+    : publicApiLimiter)(req, res, next);
 };
 
 // Helper to clear rate limit store (useful for development)
@@ -720,6 +754,8 @@ const getCorsConfig = () => {
     'x-anonymous-session-id',
     'X-Terra-Ai-Session',
     'x-terra-ai-session',
+    'X-Checkout-CSRF',
+    'x-checkout-csrf',
     'X-Request-Id',
     'x-request-id',
   ];
@@ -745,7 +781,7 @@ const getCorsConfig = () => {
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders,
-      exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'X-Request-Id'],
+      exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'Retry-After', 'X-Request-Id'],
       maxAge: 86400,
       preflightContinue: false,
       optionsSuccessStatus: 204
@@ -767,7 +803,7 @@ const getCorsConfig = () => {
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders,
-    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'X-Request-Id'],
+    exposedHeaders: ['X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'Retry-After', 'X-Request-Id'],
     maxAge: 86400,
     preflightContinue: false,
     optionsSuccessStatus: 204
@@ -775,6 +811,9 @@ const getCorsConfig = () => {
 };
 
 module.exports = {
+  requestIdentity,
+  stopRateLimitCleanup: () => { clearInterval(rateLimitCleanupInterval); rateLimitStore.clear(); apiKeyBypassCache.clear(); },
+  getRateLimitStoreSize: () => rateLimitStore.size,
   rateLimiters,
   createRateLimiter,
   securityHeaders,
@@ -787,4 +826,3 @@ module.exports = {
   errorHandler,
   getCorsConfig
 };
-

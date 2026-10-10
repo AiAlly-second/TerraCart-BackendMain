@@ -8,6 +8,7 @@
     "build": "echo \"Building backend...\" && node -c server.js && echo \"Build completed successfully\""
   },
   "safe_tests": [
+    "tests/integration/daily-reports.test.js",
     "tests/business-time.test.js",
     "tests/app-update.test.js",
     "tests/android-release.test.mjs",
@@ -17,9 +18,14 @@
     "tests/integration/feature-socket.test.js",
     "tests/integration/work-attendance.test.js",
     "tests/integration/get-me-employee-id.test.js",
-    "tests/integration/schedule-persistence.test.js"
+    "tests/integration/schedule-persistence.test.js",
+    "tests/reliability.test.js",
+    "tests/integration/task-occurrences.test.js",
+    "tests/integration/customer-checkout-security.test.js",
+    "tests/security-dependencies.test.js"
   ],
   "runtime_paths": [
+    "scripts/migrate-daily-reports.js",
     "server.js",
     "package.json",
     "package-lock.json",

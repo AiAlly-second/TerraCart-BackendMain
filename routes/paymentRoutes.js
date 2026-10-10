@@ -12,14 +12,15 @@ const {
   PAYMENT_METHODS,
   PAYMENT_STATUSES,
 } = require("../controllers/paymentController");
-const { protect, authorize } = require("../middleware/authMiddleware");
+const { protect, authorize, optionalProtect } = require("../middleware/authMiddleware");
+const { requirePaymentOrderAccess } = require('../middleware/paymentOrderAccess');
 
 const router = express.Router();
 
-router.post("/create", createPaymentIntent);
-router.get("/order/:orderId/latest", getLatestPaymentForOrder);
-router.post("/:id/cancel", cancelPayment);
-router.post("/:id/verify-razorpay", verifyRazorpayPayment);
+router.post("/create", optionalProtect, requirePaymentOrderAccess, createPaymentIntent);
+router.get("/order/:orderId/latest", optionalProtect, requirePaymentOrderAccess, getLatestPaymentForOrder);
+router.post("/:id/cancel", optionalProtect, requirePaymentOrderAccess, cancelPayment);
+router.post("/:id/verify-razorpay", optionalProtect, requirePaymentOrderAccess, verifyRazorpayPayment);
 
 router.use(protect, authorize(["admin", "franchise_admin", "super_admin", "manager"]));
 

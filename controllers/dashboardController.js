@@ -1,3 +1,4 @@
+const dashboardDebug = (...args) => { if (process.env.BACKEND_ENABLE_DIAGNOSTICS_DEBUG === 'true') console.log(...args); };
 const mongoose = require("mongoose");
 const Order = require("../models/orderModel");
 const { Table } = require("../models/tableModel");
@@ -129,45 +130,7 @@ const toFiniteNumber = (value) => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
-const toRupeesFromPaise = (value) => Number((toFiniteNumber(value) / 100).toFixed(2));
-
-const calculateOrderRevenue = (order) => {
-  const kotLines = Array.isArray(order?.kotLines) ? order.kotLines : [];
-  const selectedAddons = Array.isArray(order?.selectedAddons)
-    ? order.selectedAddons
-    : [];
-
-  let kotTotal = kotLines.reduce((sum, kotLine) => {
-    return sum + toFiniteNumber(kotLine?.totalAmount);
-  }, 0);
-
-  // Fallback for legacy/incomplete KOT totals.
-  if (kotTotal <= 0) {
-    const kotTotalInPaise = kotLines.reduce((sum, kotLine) => {
-      const items = Array.isArray(kotLine?.items) ? kotLine.items : [];
-      return (
-        sum +
-        items.reduce((itemSum, item) => {
-          if (!item || item.returned) return itemSum;
-          const quantity = Math.max(0, Math.floor(toFiniteNumber(item?.quantity) || 0));
-          const priceInPaise = toFiniteNumber(item?.price);
-          return itemSum + quantity * priceInPaise;
-        }, 0)
-      );
-    }, 0);
-    kotTotal = toRupeesFromPaise(kotTotalInPaise);
-  }
-
-  const addonTotal = selectedAddons.reduce((sum, addon) => {
-    const quantity = Math.max(0, Math.floor(toFiniteNumber(addon?.quantity) || 1));
-    return sum + toFiniteNumber(addon?.price) * quantity;
-  }, 0);
-
-  const officeChargeRaw = toFiniteNumber(order?.officeDeliveryCharge);
-  const officeDeliveryCharge = officeChargeRaw > 0 ? officeChargeRaw : 0;
-
-  return kotTotal + addonTotal + officeDeliveryCharge;
-};
+const { calculateOrderRevenue } = require('../utils/orderRevenue');
 
 const calculateRevenueFromOrders = (orders) =>
   orders.reduce((sum, order) => sum + calculateOrderRevenue(order), 0);
@@ -196,7 +159,7 @@ const getCafeId = async (user) => {
       // Prioritize cartId, fallback to cafeId
       const cartId = employee.cartId || employee.cafeId;
       if (cartId) {
-        console.log("[DASHBOARD] getCafeId - Found employee by lookup:", {
+        dashboardDebug("[DASHBOARD] getCafeId - Found employee by lookup:", {
           userId: user._id,
           email: user.email,
           employeeId: employee._id,
@@ -215,7 +178,7 @@ const getCafeId = async (user) => {
       return user.cafeId;
     }
 
-    console.log("[DASHBOARD] getCafeId - No employee found for mobile user:", {
+    dashboardDebug("[DASHBOARD] getCafeId - No employee found for mobile user:", {
       userId: user._id,
       email: user.email,
       role: user.role,
@@ -450,7 +413,7 @@ exports.getRecentActivity = async (req, res) => {
       return res.status(403).json({ message: "Access denied. No cafe associated with this user." });
     }
 
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = Math.max(1, Math.min(50, Number.parseInt(req.query.limit, 10) || 20));
     const activities = [];
 
     // Recent orders
@@ -591,4 +554,3 @@ exports.getPerformanceMetrics = async (req, res) => {
     res.status(500).json({ message: "Failed to get performance metrics", error: error.message });
   }
 };
-

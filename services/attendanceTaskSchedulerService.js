@@ -201,6 +201,7 @@ const runMidnightAttendanceAndTaskJobs = async ({ io, emitToCafe } = {}) => {
 };
 
 const scheduleNextMidnightRun = ({ io, emitToCafe }) => {
+  if (!schedulerStarted) return;
   if (midnightTimer) {
     clearTimeout(midnightTimer);
   }
@@ -212,9 +213,10 @@ const scheduleNextMidnightRun = ({ io, emitToCafe }) => {
     } catch (error) {
       console.error('[ATTENDANCE_TASK_SCHEDULER] Midnight job failed:', error.message);
     } finally {
-      scheduleNextMidnightRun({ io, emitToCafe });
+      if (schedulerStarted) scheduleNextMidnightRun({ io, emitToCafe });
     }
   }, delayMs);
+  midnightTimer.unref?.();
 };
 
 const startAttendanceTaskSchedulers = ({ io, emitToCafe } = {}) => {

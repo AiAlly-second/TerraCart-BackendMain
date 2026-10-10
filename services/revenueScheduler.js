@@ -2,6 +2,7 @@ const {businessDayBoundary, businessMonthRange, dateKeyOffset, getBusinessDateKe
 const RevenueHistory = require("../models/revenueHistoryModel");
 const Order = require("../models/orderModel");
 const User = require("../models/userModel");
+const { logError } = require('../logging/logger');
 const {
   ORDER_STATUSES,
   PAYMENT_STATUSES,
@@ -35,15 +36,18 @@ async function calculateDailyRevenue() {
         $gte: yesterday,
         $lte: endDate,
       },
-    }).lean();
+    }).select("kotLines.totalAmount franchiseId cartId cafeId").lean().cursor();
 
-    const totalRevenue = calculateOrderRevenue(orders);
+    let totalRevenue = 0;
+    let totalOrders = 0;
 
     // Get franchise breakdown
     const franchiseMap = new Map();
     const cafeMap = new Map();
 
-    for (const order of orders) {
+    for await (const order of orders) {
+      totalOrders++;
+      totalRevenue += calculateOrderRevenue([order]);
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       const cafeId =
         order.cartId?.toString() ||
@@ -59,7 +63,7 @@ async function calculateDailyRevenue() {
           });
         }
         const franchise = franchiseMap.get(franchiseId);
-        const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+        const orderTotal = (order.kotLines || []).reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         franchise.revenue += orderTotal;
         if (cafeId) {
           franchise.cafeIds.add(cafeId);
@@ -76,7 +80,7 @@ async function calculateDailyRevenue() {
           });
         }
         const cafe = cafeMap.get(cafeId);
-        const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+        const orderTotal = (order.kotLines || []).reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         cafe.revenue += orderTotal;
         cafe.orderCount += 1;
       }
@@ -129,8 +133,8 @@ async function calculateDailyRevenue() {
         totalRevenue,
         franchiseRevenue,
         cafeRevenue,
-        totalOrders: orders.length,
-        totalPayments: orders.length,
+        totalOrders,
+        totalPayments: totalOrders,
         calculatedAt: new Date(),
       },
       {
@@ -141,7 +145,7 @@ async function calculateDailyRevenue() {
 
     console.log(`✅ Daily revenue calculated for ${getBusinessDateKey(yesterday)}: ₹${totalRevenue}`);
   } catch (error) {
-    console.error("Error calculating daily revenue:", error);
+    logError('revenue_calculation_failed', { period: 'daily' });
   }
 }
 
@@ -161,15 +165,18 @@ async function calculateMonthlyRevenue() {
         $gte: lastMonth,
         $lte: endDate,
       },
-    }).lean();
+    }).select("kotLines.totalAmount franchiseId cartId cafeId").lean().cursor();
 
-    const totalRevenue = calculateOrderRevenue(orders);
+    let totalRevenue = 0;
+    let totalOrders = 0;
 
     // Get franchise breakdown (same logic as daily)
     const franchiseMap = new Map();
     const cafeMap = new Map();
 
-    for (const order of orders) {
+    for await (const order of orders) {
+      totalOrders++;
+      totalRevenue += calculateOrderRevenue([order]);
       const franchiseId = order.franchiseId?.toString() || order.franchiseId;
       const cafeId =
         order.cartId?.toString() ||
@@ -185,7 +192,7 @@ async function calculateMonthlyRevenue() {
           });
         }
         const franchise = franchiseMap.get(franchiseId);
-        const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+        const orderTotal = (order.kotLines || []).reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         franchise.revenue += orderTotal;
         if (cafeId) {
           franchise.cafeIds.add(cafeId);
@@ -202,7 +209,7 @@ async function calculateMonthlyRevenue() {
           });
         }
         const cafe = cafeMap.get(cafeId);
-        const orderTotal = order.kotLines.reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
+        const orderTotal = (order.kotLines || []).reduce((sum, kot) => sum + Number(kot.totalAmount || 0), 0);
         cafe.revenue += orderTotal;
         cafe.orderCount += 1;
       }
@@ -255,8 +262,8 @@ async function calculateMonthlyRevenue() {
         totalRevenue,
         franchiseRevenue,
         cafeRevenue,
-        totalOrders: orders.length,
-        totalPayments: orders.length,
+        totalOrders,
+        totalPayments: totalOrders,
         calculatedAt: new Date(),
       },
       {
@@ -267,49 +274,34 @@ async function calculateMonthlyRevenue() {
 
     console.log(`✅ Monthly revenue calculated for ${getBusinessDateKey(lastMonth)}: ₹${totalRevenue}`);
   } catch (error) {
-    console.error("Error calculating monthly revenue:", error);
+    logError('revenue_calculation_failed', { period: 'monthly' });
   }
 }
 
-// Schedule daily revenue calculation (runs at 11:59 PM every day)
-const scheduleDailyRevenue = () => {
-  const checkAndRunDaily = async () => {
+// One minute timer per job, with a mutex and per-business-day execution guard.
+const timers = new Map();
+function startRevenueJob(name, eligible, calculate) {
+  if (timers.has(name)) return;
+  const state = { busy: false, lastKey: null, timer: null };
+  state.timer = setInterval(async () => {
+    if (state.busy || !timers.has(name)) return;
     const now = new Date();
-    const {hour: hours, minute: minutes} = businessParts(now);
-    
-    // Run at 11:59 PM (23:59)
-    if (hours === 23 && minutes === 59) {
-      console.log("Running daily revenue calculation...");
-      await calculateDailyRevenue();
-    }
-  };
-  
-  // Check every minute
-  setInterval(checkAndRunDaily, 60000);
-};
-
-// Schedule monthly revenue calculation (runs on the 1st of each month at 12:01 AM)
-const scheduleMonthlyRevenue = () => {
-  const checkAndRunMonthly = async () => {
-    const now = new Date();
-    const day = businessParts(now).day;
-    const {hour: hours, minute: minutes} = businessParts(now);
-    
-    // Run on 1st of month at 12:01 AM (00:01)
-    if (day === 1 && hours === 0 && minutes === 1) {
-      console.log("Running monthly revenue calculation...");
-      await calculateMonthlyRevenue();
-    }
-  };
-  
-  // Check every minute
-  setInterval(checkAndRunMonthly, 60000);
-};
-
-module.exports = {
-  scheduleDailyRevenue,
-  scheduleMonthlyRevenue,
-  calculateDailyRevenue,
-  calculateMonthlyRevenue,
-};
-
+    const key = getBusinessDateKey(now);
+    if (!eligible(businessParts(now)) || state.lastKey === key) return;
+    state.busy = true;
+    try { await calculate(); state.lastKey = key; }
+    finally { state.busy = false; }
+  }, 60000);
+  state.timer.unref?.();
+  timers.set(name, state);
+}
+const scheduleDailyRevenue = () => startRevenueJob('daily',
+  ({hour, minute}) => hour === 0 && minute === 1, calculateDailyRevenue);
+const scheduleMonthlyRevenue = () => startRevenueJob('monthly',
+  ({day, hour, minute}) => day === 1 && hour === 0 && minute === 1, calculateMonthlyRevenue);
+function stopRevenueSchedulers() {
+  for (const state of timers.values()) clearInterval(state.timer);
+  timers.clear();
+}
+module.exports = { scheduleDailyRevenue, scheduleMonthlyRevenue, stopRevenueSchedulers,
+  calculateDailyRevenue, calculateMonthlyRevenue };

@@ -1,4 +1,7 @@
+const taskDebug = (...args) => { if (process.env.BACKEND_ENABLE_TASK_DEBUG === 'true') console.log(...args); };
 const Task = require("../models/taskModel");
+const Occurrence = require("../models/taskOccurrenceModel");
+const recurrence = require("../services/taskOccurrenceService");
 const Employee = require("../models/employeeModel");
 const User = require("../models/userModel");
 const EmployeeSchedule = require("../models/employeeScheduleModel");
@@ -338,7 +341,8 @@ exports.getAllTasks = async (req, res) => {
     }
 
     if (status) {
-      query.status = status;
+      query.$and = [{ $or: [{ status }, { 'frequency.0': { $exists: true } },
+        { 'weekdaysISO.0': { $exists: true } }] }];
     }
     if (priority) {
       query.priority = priority;
@@ -403,7 +407,8 @@ exports.getAllTasks = async (req, res) => {
     }
 
     // Filter and enhance tasks based on frequency and work schedule
-    const filteredTasks = tasks
+    const taskViews = await recurrence.withOccurrences(tasks, { includeNonApplicable: !isMobileRole });
+    const filteredTasks = taskViews
       .filter((task) => {
         // For recurring tasks, check if they should be shown today
         if (isMobileRole && task.frequency && task.frequency.length > 0) {
@@ -423,14 +428,14 @@ exports.getAllTasks = async (req, res) => {
         const taskSchedule = taskEmployeeId ? employeeSchedulesMap.get(taskEmployeeId) : employeeSchedule;
         
         // Calculate status based on work schedule
-        const calculatedStatus = calculateTaskStatus(task, taskSchedule, now);
+        const calculatedStatus = task.occurrenceId ? task.status : calculateTaskStatus(task, taskSchedule, now);
         
         return { ...task, status: calculatedStatus };
       });
 
-    return res.json(filteredTasks);
+    return res.json(status ? filteredTasks.filter(task => task.status === status) : filteredTasks);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -460,20 +465,17 @@ exports.getMyTasks = async (req, res) => {
       return res.status(404).json({ message: "Employee record not found" });
     }
 
-    const query = { assignedTo: employeeId };
-    if (status) {
-      query.status = status;
-    }
-
+    const query = { ...(await buildHierarchyQuery(user)), assignedTo: employeeId };
     const tasks = await Task.find(query)
       .populate("assignedTo", "name mobile employeeRole")
       .populate("completedBy", "name mobile employeeRole")
       .sort({ priority: 1, createdAt: -1 })
       .lean();
 
-    return res.json(tasks);
+    const views = await recurrence.withOccurrences(tasks);
+    return res.json(status ? views.filter(task => task.status === status) : views);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -509,6 +511,7 @@ exports.getTodayTasks = async (req, res) => {
       }
     }
 
+    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role) && !employeeId) return res.json([]);
     const hierarchyQuery = await buildHierarchyQuery(req.user);
     const query = {
       ...hierarchyQuery,
@@ -565,10 +568,11 @@ exports.getTodayTasks = async (req, res) => {
     }
 
     // Filter tasks that should be shown today
-    console.log('[TASK] getTodayTasks - Total tasks found:', allTasks.length);
-    console.log('[TASK] getTodayTasks - Today IST date:', today.toISOString());
+    taskDebug('[TASK] getTodayTasks - Total tasks found:', allTasks.length);
+    taskDebug('[TASK] getTodayTasks - Today IST date:', today.toISOString());
     
-    const todayTasks = allTasks.filter((task) => {
+    const taskViews = await recurrence.withOccurrences(allTasks);
+    const todayTasks = taskViews.filter((task) => {
       const taskEmployeeId = task.assignedTo?._id
         ? task.assignedTo._id.toString()
         : task.assignedTo?.toString();
@@ -595,7 +599,7 @@ exports.getTodayTasks = async (req, res) => {
           today,
           attendanceStatus
         );
-        console.log('[TASK] Recurring task:', {
+        taskDebug('[TASK] Recurring task:', {
           id: task._id,
           title: task.title,
           frequency: task.frequency,
@@ -611,14 +615,14 @@ exports.getTodayTasks = async (req, res) => {
       }
       
       // If no dueDate, don't show the task
-      console.log('[TASK] Task has no dueDate:', {
+      taskDebug('[TASK] Task has no dueDate:', {
         id: task._id,
         title: task.title,
       });
       return false;
     });
     
-    console.log('[TASK] getTodayTasks - Tasks for today:', todayTasks.length);
+    taskDebug('[TASK] getTodayTasks - Tasks for today:', todayTasks.length);
 
     // Use IST time for all calculations
     const nowIST = getISTNow();
@@ -631,14 +635,14 @@ exports.getTodayTasks = async (req, res) => {
       const taskSchedule = taskEmployeeId
         ? scheduleMap.get(taskEmployeeId)
         : employeeSchedule;
-      const calculatedStatus = calculateTaskStatus(task, taskSchedule, nowIST);
+      const calculatedStatus = task.occurrenceId ? task.status : calculateTaskStatus(task, taskSchedule, nowIST);
       return { ...task, status: calculatedStatus };
     });
 
     // Return array directly for mobile app compatibility
     return res.json(tasksWithStatus);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -658,9 +662,10 @@ exports.getTaskById = async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
-    return res.json(task);
+    const views = await recurrence.withOccurrences([task.toObject()], { includeNonApplicable: true });
+    return res.json(views[0]);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -669,6 +674,13 @@ exports.createTask = async (req, res) => {
   try {
     const taskData = { ...req.body };
     const user = req.user;
+    if (["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
+      delete taskData.franchiseId;
+      delete taskData.assignedToUser;
+    }
+    if (taskData.assignedTo && !(await Employee.exists({ _id: taskData.assignedTo }))) {
+      return res.status(400).json({ message: "Assignee not found" });
+    }
 
     if (["admin", "franchise_admin", "super_admin"].includes(user.role)) {
       taskData.assignedBy = taskData.assignedBy || "admin";
@@ -777,6 +789,11 @@ exports.createTask = async (req, res) => {
       }
     }
 
+    Object.assign(taskData, recurrence.normalizeRecurrence(taskData));
+    if (scopedEmployee && user.role !== 'super_admin' &&
+      String(scopedEmployee.cartId || scopedEmployee.cafeId) !== String(taskData.cartId)) {
+      return res.status(403).json({ message: 'Assignee must belong to the selected cart' });
+    }
     const createValidationMessage = await validateTaskScheduleConstraints({
       assignedTo: taskData.assignedTo,
       frequency: taskData.frequency,
@@ -800,6 +817,8 @@ exports.createTask = async (req, res) => {
     }
 
     const task = await Task.create(taskData);
+    recurrence.invalidateTaskWindow();
+    await recurrence.refreshTaskWindow(task);
     if (!task.taskId) {
       task.taskId = task._id.toString();
       await task.save();
@@ -817,7 +836,7 @@ exports.createTask = async (req, res) => {
 
     return res.status(201).json(task);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -825,7 +844,7 @@ exports.createTask = async (req, res) => {
 exports.updateTask = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body;
+    const updates = { ...req.body };
     const user = req.user;
     
     // Build hierarchy query, but also allow users to update their own tasks
@@ -838,28 +857,7 @@ exports.updateTask = async (req, res) => {
     const hierarchyTask = await Task.findOne({ _id: id, ...hierarchyQuery }).lean();
     
     if (!hierarchyTask) {
-      // Check if task is assigned to current user
-      let employeeId = user.employeeId;
-      if (!employeeId && ["waiter", "cook", "captain", "manager", "employee"].includes(user.role)) {
-        const employee = await Employee.findOne({
-          $or: [
-            { userId: user._id },
-            { email: user.email?.toLowerCase() }
-          ]
-        }).lean();
-        if (employee) {
-          employeeId = employee._id;
-        }
-      }
-      
-      if (employeeId) {
-        const ownTask = await Task.findOne({ _id: id, assignedTo: employeeId }).lean();
-        if (!ownTask) {
-          return res.status(404).json({ message: "Task not found or access denied" });
-        }
-      } else {
-        return res.status(404).json({ message: "Task not found or access denied" });
-      }
+      return res.status(404).json({ message: "Task not found or access denied" });
     }
 
     const task = await Task.findById(id);
@@ -867,6 +865,31 @@ exports.updateTask = async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
+    if (recurrence.isRecurring(task) && updates.status === 'completed') {
+      const view = await recurrence.completeOccurrence(task,
+        updates.occurrenceDate || getBusinessDateKey(), req.user.employeeId);
+      const io = req.app.get('io'), emit = req.app.get('emitToCafe');
+      if (io && emit && task.cartId) emit(io, String(task.cartId), 'task:completed', view);
+      return res.json(view);
+    }
+    if (recurrence.isRecurring(task) && ['pending', 'in_progress'].includes(updates.status) &&
+        Object.keys(updates).every(key => ['status', 'completedAt', 'completedBy', 'occurrenceDate'].includes(key))) {
+      const view = await recurrence.reopenOccurrence(task,
+        updates.occurrenceDate || getBusinessDateKey(), updates.status);
+      const io = req.app.get('io'), emit = req.app.get('emitToCafe');
+      if (io && emit && task.cartId) emit(io, String(task.cartId), 'task:updated', view);
+      return res.json(view);
+    }
+    if (updates.assignedTo) {
+      const employee = await Employee.findById(updates.assignedTo).lean();
+      if (!employee || String(employee.cartId || employee.cafeId) !== String(task.cartId)) {
+        return res.status(403).json({ message: 'Assignee must belong to the task cart' });
+      }
+    }
+    const recurrenceData = { ...task.toObject(), ...updates };
+    if ('frequency' in updates && !('weekdaysISO' in updates)) delete recurrenceData.weekdaysISO;
+    if ('dueDate' in updates && !('localDueTime' in updates)) delete recurrenceData.localDueTime;
+    Object.assign(updates, recurrence.normalizeRecurrence(recurrenceData));
     const hasAssignedToUpdate = Object.prototype.hasOwnProperty.call(
       updates,
       "assignedTo"
@@ -937,6 +960,8 @@ exports.updateTask = async (req, res) => {
     }
 
     await task.save();
+    recurrence.invalidateTaskWindow();
+    await recurrence.refreshTaskWindow(task);
     await task.populate("assignedTo", "name mobile employeeRole");
     await task.populate("assignedToUser", "name email role");
     await task.populate("completedBy", "name mobile employeeRole");
@@ -954,7 +979,7 @@ exports.updateTask = async (req, res) => {
 
     return res.json(task);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -970,6 +995,16 @@ exports.completeTask = async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
     }
 
+    if (recurrence.isRecurring(task)) {
+      const view = await recurrence.completeOccurrence(task,
+        req.body?.occurrenceDate || getBusinessDateKey(), req.user.employeeId);
+      const io = req.app.get('io'), emit = req.app.get('emitToCafe');
+      if (io && emit && task.cartId) {
+        emit(io, String(task.cartId), 'task:completed', view);
+        emit(io, String(task.cartId), 'task:updated', view);
+      }
+      return res.json(view);
+    }
     if (task.status === "completed") {
       return res.status(400).json({ message: "Task already completed" });
     }
@@ -1007,7 +1042,7 @@ exports.completeTask = async (req, res) => {
 
     return res.json(task);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -1035,7 +1070,7 @@ exports.deleteTask = async (req, res) => {
 
     return res.json({ message: "Task deleted successfully" });
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
@@ -1043,7 +1078,9 @@ exports.deleteTask = async (req, res) => {
 exports.getTaskStats = async (req, res) => {
   try {
     const hierarchyQuery = await buildHierarchyQuery(req.user);
-    const tasks = await Task.find(hierarchyQuery).lean();
+    const templates = await Task.find(hierarchyQuery).lean();
+    const mobile = ["waiter", "cook", "captain", "manager", "employee"].includes(req.user.role);
+    const tasks = await recurrence.withOccurrences(templates, { includeNonApplicable: !mobile });
 
     const stats = {
       total: tasks.length,
@@ -1060,7 +1097,19 @@ exports.getTaskStats = async (req, res) => {
 
     return res.json(stats);
   } catch (err) {
-    return res.status(500).json({ message: err.message });
+    return res.status(err instanceof RangeError || err.name === "ValidationError" ? 400 : 500).json({ message: err.message });
   }
 };
 
+
+exports.getTaskOccurrences = async (req, res) => {
+  try {
+    const scope = await buildHierarchyQuery(req.user);
+    const task = await Task.findOne({ ...scope, _id: req.params.id }).lean();
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+    const page = Math.max(1, Math.min(10000, Number.parseInt(req.query.page, 10) || 1));
+    const rows = await Occurrence.find({ taskId: task._id }).sort({ dateKey: -1 })
+      .skip((page - 1) * 30).limit(30).lean();
+    return res.json(rows.map(row => recurrence.viewOccurrence(task, row)));
+  } catch (_) { return res.status(500).json({ message: 'Unable to load task history' }); }
+};

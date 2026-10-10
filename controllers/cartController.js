@@ -2,7 +2,7 @@ const Cart = require("../models/cartModel");
 const User = require("../models/userModel");
 const Franchise = require("../models/franchiseModel");
 const mongoose = require("mongoose");
-const { isWithinDeliveryRange, calculateDistance } = require("../utils/distanceCalculator");
+const { isWithinDeliveryRange, calculateDistance, hasValidCoordinates } = require("../utils/distanceCalculator");
 
 function pickFirstNonEmptyString(...values) {
   for (const value of values) {
@@ -133,7 +133,7 @@ exports.getNearbyCarts = async (req, res) => {
     const customerLat = parseFloat(latitude);
     const customerLon = parseFloat(longitude);
 
-    if (isNaN(customerLat) || isNaN(customerLon)) {
+    if (!hasValidCoordinates({ latitude: customerLat, longitude: customerLon })) {
       return res.status(400).json({
         success: false,
         message: "Invalid coordinates",
@@ -167,7 +167,7 @@ exports.getNearbyCarts = async (req, res) => {
       const deliveryCharge = cart.deliveryCharge || 0;
 
       // Check if cart has coordinates
-      if (!cart.coordinates?.latitude || !cart.coordinates?.longitude) {
+      if (!hasValidCoordinates(cart.coordinates)) {
         // If no coordinates, skip distance calculation but include if pickup is enabled
         if (orderType === "PICKUP" && pickupEnabled) {
           const helplineNumber = resolveHelplineNumber(cart.cartAdminId);
@@ -308,15 +308,14 @@ exports.getCartById = async (req, res) => {
     if (
       latitude &&
       longitude &&
-      cart.coordinates?.latitude &&
-      cart.coordinates?.longitude
+      hasValidCoordinates(cart.coordinates)
     ) {
       const customerLat = parseFloat(latitude);
       const customerLon = parseFloat(longitude);
       const cartLat = cart.coordinates.latitude;
       const cartLon = cart.coordinates.longitude;
 
-      if (!isNaN(customerLat) && !isNaN(customerLon)) {
+      if (hasValidCoordinates({ latitude: customerLat, longitude: customerLon })) {
         distance = calculateDistance(customerLat, customerLon, cartLat, cartLon);
 
         // Check delivery eligibility

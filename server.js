@@ -11,6 +11,7 @@ const path = require("path");
 const cors = require("cors");
 const compression = require("compression");
 const dotenv = require("dotenv");
+if (process.env.NODE_ENV !== 'test') dotenv.config({ path: path.join(__dirname, ".env") });
 const { createClient } = require("redis");
 const { createAdapter } = require("@socket.io/redis-adapter");
 const jwt = require("jsonwebtoken");
@@ -22,12 +23,15 @@ const { scheduleOrderAutoRelease } = require("./services/orderAutoRelease");
 const {
   scheduleDailyRevenue,
   scheduleMonthlyRevenue,
+  stopRevenueSchedulers,
 } = require("./services/revenueScheduler");
 const {
   startAttendanceTaskSchedulers,
+  stopAttendanceTaskSchedulers,
 } = require("./services/attendanceTaskSchedulerService");
 const {
   startBackupSchedulerService,
+  stopBackupSchedulerService,
 } = require("./services/backupRestore/backupSchedulerService");
 
 // Security middleware
@@ -64,7 +68,6 @@ const {
 } = require("./utils/realtimeStability");
 
 // Always load backend/.env (do not use .env.production)
-dotenv.config({ path: path.join(__dirname, ".env") });
 const SERVER_BOOT_AT = Date.now();
 let isShuttingDown = false;
 
@@ -137,13 +140,19 @@ process.on("unhandledRejection", (reason, promise) => {
 
 // Initialize Express app
 const app = express();
+app.set('isShuttingDown', () => isShuttingDown);
 const server = http.createServer(app);
 let redisPubClient;
 let redisSubClient;
+const socketRedisRequired = Number(process.env.PM2_INSTANCES || '1') !== 1 ||
+  ['cluster', 'cluster_mode'].includes(process.env.PM2_EXEC_MODE);
+app.set('isSocketAdapterReady', () => !socketRedisRequired ||
+  Boolean(redisPubClient?.isReady && redisSubClient?.isReady));
 
 // Respect client IP/HTTPS headers when running behind ALB / reverse proxy
 const trustProxyHops = Number.parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
-app.set("trust proxy", Number.isNaN(trustProxyHops) ? 1 : trustProxyHops);
+app.set("trust proxy", Number.isSafeInteger(trustProxyHops) && trustProxyHops >= 0
+  ? trustProxyHops : 1);
 
 const SOCKET_ATTEMPT_WINDOW_MS = Number.parseInt(
   process.env.SOCKET_ATTEMPT_WINDOW_MS || "10000",
@@ -173,20 +182,9 @@ const SOCKET_USER_TRACKER_MAX_ENTRIES = Number.parseInt(
 const socketAttemptStore = new Map();
 const socketUserConnectionStore = new Map();
 
-const parseForwardedFor = (headerValue) => {
-  if (typeof headerValue !== "string") return null;
-  const ip = headerValue.split(",")[0]?.trim();
-  return ip || null;
-};
-
 const getSocketRequestIp = (requestLike) => {
-  const forwarded = parseForwardedFor(requestLike?.headers?.["x-forwarded-for"]);
-  if (forwarded) return forwarded;
-  return (
-    requestLike?.socket?.remoteAddress ||
-    requestLike?.connection?.remoteAddress ||
-    "unknown"
-  );
+  const proxyaddr = require('proxy-addr');
+  return proxyaddr(requestLike, app.get('trust proxy fn'));
 };
 
 const pruneOldestSocketEntries = (map, maxEntries) => {
@@ -490,7 +488,7 @@ const setupSocketRedisAdapter = async () => {
   const socketRedisAdapterEnabled =
     String(
       process.env.SOCKET_REDIS_ADAPTER_ENABLED ??
-        (process.env.NODE_ENV === "production" ? "true" : "false")
+        "false"
     ).toLowerCase() !== "false";
 
   if (!redisUrl || !socketRedisAdapterEnabled) return;
@@ -506,7 +504,9 @@ const setupSocketRedisAdapter = async () => {
 
   const pubClient = createClient({
     url: redisUrl,
-    socket: { connectTimeout: redisConnectTimeoutMs },
+    disableOfflineQueue: true,
+    commandsQueueMaxLength: 100,
+    socket: { connectTimeout: redisConnectTimeoutMs, reconnectStrategy: false },
   });
   const subClient = pubClient.duplicate();
 
@@ -536,8 +536,8 @@ const setupSocketRedisAdapter = async () => {
     ]);
   } catch (error) {
     await Promise.allSettled([
-      pubClient.isOpen ? pubClient.quit() : pubClient.destroy?.(),
-      subClient.isOpen ? subClient.quit() : subClient.destroy?.(),
+      Promise.resolve().then(() => pubClient.destroy()),
+      Promise.resolve().then(() => subClient.destroy()),
     ]);
     throw error;
   } finally {
@@ -568,6 +568,9 @@ const getResponseCache = createGetResponseCache({
   },
 });
 const shutdownGuard = createShutdownGuard(() => isShuttingDown);
+const { createRuntimeDiagnostics } = require('./services/runtimeDiagnostics');
+const diagnostics = createRuntimeDiagnostics({ log: writeLogLine,
+  redisStatus: getRedisAppStatus, dbState: () => mongoose.connection.readyState });
 
 const ROOT_HEALTH_CACHE_TTL_MS = 5000;
 let rootHealthCachePayload = null;
@@ -593,10 +596,13 @@ app.use(
     ),
   })
 );
+// Signature verification must precede JSON parsing/sanitization/cache middleware.
+app.use('/api/webhooks/resend', require('./routes/resendWebhookRoutes'));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(requestCorrelationMiddleware);
 app.use(requestContextMiddleware);
+app.use(diagnostics.middleware);
 app.use(cors(getCorsConfig()));
 app.use(securityHeaders);
 app.use(sanitizeInput);
@@ -628,6 +634,7 @@ app.use((req, res, next) => {
 });
 
 // Routes
+app.use("/api/customer/session", require("./routes/customerSessionRoutes").createCustomerSessionRouter());
 app.use("/api/users", require("./routes/userRoutes"));
 app.use("/api/menu", require("./routes/menuRoutes"));
 app.use("/api/voice-order", require("./routes/voiceOrderRoutes"));
@@ -676,6 +683,7 @@ app.use("/api/geocode", require("./routes/geocodeRoutes"));
 app.use("/api/app", require("./routes/appUpdateRoutes"));
 app.use("/api/v1/app", require("./routes/appUpdateRoutes"));
 app.use("/api", require("./routes/notificationRoutes"));
+app.use('/api/notification-settings/daily-reports', require('./routes/dailyReportRoutes'));
 app.use(
   "/api/admin/superadmin/backup-restore",
   require("./routes/backupRestoreRoutes")
@@ -688,23 +696,27 @@ app.use("/api", healthRoutes);
 app.get("/health", (req, res) => {
   const now = Date.now();
   const dbState = mongoose.connection.readyState;
-  const dbReady = dbState === 1;
+  const dbReady = dbState === 1 && !isShuttingDown;
 
   if (
+    isShuttingDown ||
     !rootHealthCachePayload ||
     now >= rootHealthCacheExpiresAt ||
     rootHealthCacheDbState !== dbState
   ) {
-    rootHealthCacheStatus = dbReady ? 200 : 503;
     rootHealthCacheDbState = dbState;
     const redis = getRedisAppStatus();
+    const ready = dbReady && (!redis.required || redis.ready) && app.get('isSocketAdapterReady')();
+    rootHealthCacheStatus = ready ? 200 : 503;
     rootHealthCachePayload = {
-      status: dbReady ? (redis.configured && !redis.ready ? "degraded" : "healthy") : "unhealthy",
+      status: ready ? (redis.configured && !redis.ready ? "degraded" : "healthy") : "unhealthy",
+      shuttingDown: isShuttingDown,
       timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       environment: process.env.NODE_ENV || "development",
       dbState,
       mongo: { ready: dbReady },
+      socketAdapterReady: app.get('isSocketAdapterReady')(),
       redis,
     };
     rootHealthCacheExpiresAt = now + ROOT_HEALTH_CACHE_TTL_MS;
@@ -1202,10 +1214,7 @@ app.set("io", io);
 
 // Schedule background jobs
 // scheduleOrderAutoRelease(io); // DISABLED: Orders should only be cancelled by customer or admin, not automatically
-if (require.main === module) {
-  scheduleDailyRevenue();
-  scheduleMonthlyRevenue();
-}
+
 
 // Error handling middleware (must be last)
 app.use(errorHandler);
@@ -1216,7 +1225,7 @@ app.use((req, res) => {
 });
 
 const connectDbWithRetry = async () => {
-  while (true) {
+  while (!isShuttingDown) {
     try {
       await connectDB();
       return;
@@ -1239,6 +1248,10 @@ const connectDbWithRetry = async () => {
 // Start HTTP server, then bootstrap database-dependent services
 const startServer = async () => {
   try {
+    if (socketRedisRequired && (!process.env.REDIS_URL || process.env.SOCKET_REDIS_ADAPTER_ENABLED !== 'true')) {
+      throw new Error('SHARED_SOCKET_ADAPTER_REQUIRED');
+    }
+    diagnostics.start();
     const PORT = process.env.PORT || 5001;
     const keepAliveTimeoutMs = Number.parseInt(
       process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || "65000",
@@ -1272,62 +1285,59 @@ const startServer = async () => {
     try {
       await setupSocketRedisAdapter();
     } catch (redisAdapterError) {
+      if (socketRedisRequired) throw redisAdapterError;
       writeLogLine(
         `[STARTUP] Socket.IO Redis adapter disabled: ${
           redisAdapterError?.message || redisAdapterError
         }. Continuing single-node mode.`
       );
     }
+    if (isShuttingDown) return;
+    scheduleDailyRevenue();
+    scheduleMonthlyRevenue();
     startAttendanceTaskSchedulers({ io, emitToCafe });
+    require('./services/taskOccurrenceService').startTaskReminderScheduler();
     await startBackupSchedulerService();
+    try {
+      await require('./services/dailyReports/worker').start();
+    } catch {
+      // An additive email feature must not take ordering/push/payment APIs offline.
+      require('./services/dailyReports/provider').setReadinessError('REPORT_SCHEDULER_NOT_READY');
+      writeLogLine('[DAILY_REPORTS] Scheduler not ready; sending disabled; existing services remain available');
+    }
   } catch (error) {
+    writeLogLine('[STARTUP] Failed to establish required service readiness');
     process.exit(1);
   }
 };
 
 if (require.main === module) startServer();
 
-const closeRedisClients = async () => {
-  isShuttingDown = true;
-  await new Promise((resolve) => {
-    if (!server.listening) return resolve();
-    const forceCloseTimer = setTimeout(() => resolve(), 15000);
-    if (typeof forceCloseTimer.unref === "function") forceCloseTimer.unref();
-    server.close(() => {
-      clearTimeout(forceCloseTimer);
-      resolve();
-    });
-  });
-  await new Promise((resolve) => io.close(() => resolve()));
-  await Promise.allSettled([
-    redisPubClient?.quit?.(),
-    redisSubClient?.quit?.(),
-    quitRedisAppClient(),
-  ]);
-  await Promise.allSettled([mongoose.connection.close()]);
-};
-
+const { createShutdownCoordinator } = require('./services/shutdownService');
+const shutdown = createShutdownCoordinator({
+  server, io, markStopping: () => { isShuttingDown = true; },
+  stopJobs: [
+    () => require('./services/dailyReports/worker').stop(),
+    stopAttendanceTaskSchedulers, stopBackupSchedulerService, stopRevenueSchedulers,
+    () => require('./services/taskOccurrenceService').stopTaskReminderScheduler(),
+    () => clearInterval(socketStoreCleanupInterval),
+    () => getResponseCache.dispose?.(),
+    () => require('./middleware/securityMiddleware').stopRateLimitCleanup(),
+    () => diagnostics.stop(),
+  ],
+  closeClients: [
+    () => { redisPubClient?.destroy?.(); redisSubClient?.destroy?.(); },
+    quitRedisAppClient, () => mongoose.disconnect(),
+  ],
+  log: (entry) => writeLogLine(JSON.stringify(entry)),
+});
 const handleShutdownSignal = async (signalName) => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  writeLogLine(`[SHUTDOWN] Received ${signalName}. Draining server...`);
-  try {
-    await closeRedisClients();
-  } catch (error) {
-    writeLogLine(
-      `[SHUTDOWN] Error while closing resources: ${error?.message || "unknown"}`
-    );
-  } finally {
-    process.exit(0);
-  }
+  writeLogLine(`[SHUTDOWN] Received ${signalName}`);
+  const result = await shutdown();
+  process.exit(result.clean && !result.failures ? 0 : 1);
 };
-
-process.on("SIGTERM", () => {
-  handleShutdownSignal("SIGTERM");
-});
-
-process.on("SIGINT", () => {
-  handleShutdownSignal("SIGINT");
-});
-
-module.exports = { app, server, io };
+if (require.main === module) {
+  process.once('SIGTERM', () => void handleShutdownSignal('SIGTERM'));
+  process.once('SIGINT', () => void handleShutdownSignal('SIGINT'));
+}
+module.exports = { app, server, io, shutdown };

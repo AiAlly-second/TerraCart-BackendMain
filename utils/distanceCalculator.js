@@ -48,7 +48,7 @@ function toRadians(degrees) {
  * @returns {Object} { isWithinRange: Boolean, distance: Number }
  */
 function isWithinDeliveryRange(customerLat, customerLon, cartLat, cartLon, maxRadius) {
-  if (!customerLat || !customerLon || !cartLat || !cartLon) {
+  if (!hasValidCoordinates({ latitude: customerLat, longitude: customerLon }) || !hasValidCoordinates({ latitude: cartLat, longitude: cartLon })) {
     return { isWithinRange: false, distance: null };
   }
 
@@ -59,9 +59,13 @@ function isWithinDeliveryRange(customerLat, customerLon, cartLat, cartLon, maxRa
   };
 }
 
+function hasValidCoordinates(value) {
+  return typeof value?.latitude === 'number' && Number.isFinite(value.latitude) && Math.abs(value.latitude) <= 90 && typeof value?.longitude === 'number' && Number.isFinite(value.longitude) && Math.abs(value.longitude) <= 180;
+}
+
 module.exports = {
   calculateDistance,
   toRadians,
   isWithinDeliveryRange,
+  hasValidCoordinates,
 };
-

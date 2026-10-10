@@ -46,7 +46,7 @@ def report(name, data):
 
 
 def source_files():
-    result = subprocess.run(['git', 'ls-files', '-z'], cwd=ROOT, capture_output=True)
+    result = subprocess.run(['git', 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], cwd=ROOT, capture_output=True)
     paths = [ROOT / x.decode() for x in result.stdout.split(b'\0') if x]
     if result.returncode:
         paths = list(ROOT.rglob('*'))
@@ -137,7 +137,15 @@ def secret_scan():
             hits.append({'path': relative, 'line': 1, 'rule': 'committed-signing-material'})
         for number, line in enumerate(path.read_text(errors='replace').splitlines(), 1):
             for name, pattern in patterns.items():
-                if re.search(pattern, line) and not re.search(r'fixture|example|YOUR_|placeholder|test-only', line, re.I):
+                match = re.search(pattern, line)
+                placeholder = False
+                if match and name == 'database-credentials':
+                    parsed = urlsplit(match.group(0) + 'placeholder.invalid')
+                    placeholder = (parsed.username, parsed.password) in {
+                        ('YOUR_MONGO_USERNAME', 'YOUR_MONGO_PASSWORD'),
+                        ('YOUR_USERNAME', 'YOUR_PASSWORD'), ('USERNAME', 'PASSWORD'),
+                    }
+                if match and not placeholder:
                     hits.append({'path': relative, 'line': number, 'rule': name})
     report('secret-scan.json', hits)
     print(f'Secret scan: {len(hits)} findings; locations only, values never printed.')
