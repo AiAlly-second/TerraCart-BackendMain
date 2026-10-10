@@ -37,6 +37,7 @@
     "dotenv": "^17.0.1",
     "escpos": "^3.0.0-alpha.6",
     "escpos-network": "^3.0.0-alpha.5",
+    "exceljs": "^4.4.0",
     "express": "^5.1.0",
     "firebase-admin": "^13.7.0",
     "jimp": "^1.6.0",

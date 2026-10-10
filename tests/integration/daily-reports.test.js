@@ -18,6 +18,8 @@ const { calculate, generate } = require('../../services/dailyReports/report');
 const { render } = require('../../services/dailyReports/template');
 const { calculateOrderRevenue } = require('../../utils/orderRevenue');
 const { nextRun, period } = require('../../services/dailyReports/time');
+const ExcelJS = require('exceljs');
+const { build: buildOrdersWorkbook, HEADERS } = require('../../services/dailyReports/ordersWorkbook');
 let mongo, server, origin, context, actor, manager, other, settings;
 const cutoff = new Date('2026-10-09T12:30:00Z');
 const objectId = () => new mongoose.Types.ObjectId();
@@ -186,6 +188,47 @@ test('actual database report matches shared dashboard calculation, excludes fail
   assert.equal(report.orders.total, 2); assert.equal(report.cogs, null); assert.equal(report.grossProfit, null);
   assert.equal(report.refunds, null); assert.equal(report.payments.Cash, 132);
   const returned = calculate([{ ...orders[0], returnedAt: start }], [], start, cutoff); assert.equal(returned.sales, 0); assert.equal(returned.orders.returned, 1);
+});
+test('daily email attaches the Orders Excel for that cart and period', async () => {
+  const start = period(cutoff).start;
+  await Order.collection.insertMany([
+    { _id: 'sheet-order', cartId: context.cartId, franchiseId: context.franchiseId, status: 'COMPLETED', serviceType: 'DINE_IN',
+      tableNumber: '4', customerName: 'Asha', customerMobile: '9999999999', createdAt: start, updatedAt: start,
+      kotLines: [{ items: [{ name: 'Tea', quantity: 2, price: 15000, returned: false }, { name: 'Returned', quantity: 1, price: 5000, returned: true }], subtotal: 1, gst: 0, totalAmount: 1 }],
+      selectedAddons: [{ name: 'Extra', price: 20, quantity: 1 }] },
+    { _id: 'other-sheet', cartId: other.cartId, franchiseId: other.franchiseId, status: 'NEW', createdAt: start,
+      kotLines: [{ items: [{ name: 'X', quantity: 1, price: 100, returned: false }], subtotal: 1, gst: 0, totalAmount: 1 }] },
+    { _id: 'late-sheet', cartId: context.cartId, franchiseId: context.franchiseId, status: 'NEW', createdAt: cutoff,
+      kotLines: [{ items: [{ name: 'Late', quantity: 1, price: 100, returned: false }], subtotal: 1, gst: 0, totalAmount: 1 }] },
+  ]);
+  const file = await buildOrdersWorkbook({ cartId: context.cartId, franchiseId: context.franchiseId, start, end: cutoff, generatedAt: cutoff });
+  assert.equal(file.filename, 'orders-report-2026-10-09.xlsx');
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(Buffer.from(file.content, 'base64'));
+  const sheet = workbook.getWorksheet('Orders');
+  let headerRow = 0;
+  sheet.eachRow((row, number) => { if (row.getCell(1).value === 'Order ID') headerRow = number; });
+  assert.deepEqual(sheet.getRow(headerRow).values.slice(1), HEADERS);
+  const data = sheet.getRow(headerRow + 1).values.slice(1);
+  assert.equal(data[0], 'sheet-order');
+  assert.equal(data[1], `INV-${new Date(start).toISOString().slice(0, 10).replace(/-/g, '')}-${'sheet-order'.slice(-6).toUpperCase()}`);
+  assert.equal(data[4], 'COMPLETED');
+  assert.equal(data[5], 'Dine-In');
+  assert.equal(data[7], '4');
+  assert.equal(data[9], 'Asha');
+  assert.equal(data[10], '9999999999');
+  assert.equal(data[11], 2);
+  assert.equal(Number(data[12]), 320);
+  assert.equal(sheet.getRow(headerRow + 2).getCell(1).value, null);
+  await verifiedDue();
+  await worker.materialize(cutoff);
+  const queued = await models.Delivery.findOne({ kind: 'scheduled' }).lean();
+  assert.equal(queued.payload.attachments[0].filename, file.filename);
+  assert.equal(queued.payload.attachments[0].contentType, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  assert.match(queued.payload.text, /Orders spreadsheet attached: orders-report-2026-10-09\.xlsx/);
+  const attached = new ExcelJS.Workbook();
+  await attached.xlsx.load(Buffer.from(queued.payload.attachments[0].content, 'base64'));
+  assert.equal(attached.getWorksheet('Orders').getRow(headerRow + 1).getCell(1).value, 'sheet-order');
 });
 test('empty days render zero sales, unavailable profit, escaped branded HTML and plain text', () => {
   const report = { ...calculate([], [], period(cutoff).start, cutoff), cartName: '<script>&evil', periodEnd: cutoff, generatedAt: cutoff };

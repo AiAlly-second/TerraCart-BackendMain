@@ -7,6 +7,7 @@ const { nextRun, validTime, period } = require('./time');
 const { generate } = require('./report');
 const { render } = require('./template');
 const provider = require('./provider');
+const { build: buildOrdersWorkbook, attach: attachOrdersWorkbook } = require('./ordersWorkbook');
 const error = (message, status = 400, code = 'INVALID_REPORT_SETTINGS') => Object.assign(new Error(message), { statusCode: status, code });
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 function email(value) {
@@ -149,6 +150,11 @@ async function test(context, actor, body) {
   if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9-]{16,80}$/.test(body.requestId)) throw error('A unique test requestId is required');
   const row = await ensure(context);
   const sample = await preview(context);
+  const message = attachOrdersWorkbook(sample, await buildOrdersWorkbook({
+    cartId: context.cartId, franchiseId: context.franchiseId,
+    start: new Date(sample.report.periodStart), end: new Date(sample.report.periodEnd),
+    generatedAt: new Date(sample.report.generatedAt),
+  }));
   await transaction(async session => {
     const current = await Settings.findOne({ _id: row._id, version: body.version }).session(session);
     if (!current) throw error('Settings changed elsewhere. Refresh.', 409, 'REPORT_VERSION_CONFLICT');
@@ -161,7 +167,8 @@ async function test(context, actor, body) {
       idempotencyKey: `test/${row._id}/${body.requestId}/${hash(recipient.email)}`,
       scheduledOccurrence: new Date(), reportPeriodStart: sample.report.periodStart, reportPeriodEnd: sample.report.periodEnd,
       status: 'queued', nextAttemptAt: new Date(), payload: { from: provider.sender(),
-        to: [recipient.email], subject: `[TEST] ${sample.subject}`, html: sample.html, text: sample.text } })), { session });
+        to: [recipient.email], subject: `[TEST] ${message.subject}`, html: message.html, text: message.text,
+        attachments: message.attachments } })), { session });
     await Audit.create([{ settingsId: row._id, actor, action: 'test.queued', next: { recipientCount: recipients.length } }], { session });
   });
   return { message: 'Test report queued. Delivery is confirmed only by provider webhook.' };
